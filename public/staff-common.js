@@ -127,58 +127,85 @@
     });
   };
 
-  // ---------- audio / attention ----------
-  var A = (SC.audio = { ctx: null, unlocked: false, muted: false, onchange: null });
-  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
-  A.state = function () { return !A.unlocked ? 'off' : A.muted ? 'muted' : 'on'; };
+  // ---------- preferences (localStorage, every access guarded) ----------
+  var PREF_KEY = 'sc_alarm';
+  var stored = {};
+  try { stored = JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch (e) { stored = {}; }
+  var prefs = Object.assign({ sound: true, notify: false, wake: false, vol: 1, everUnlocked: false }, stored);
+  function savePrefs() { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (e) { /* storage blocked */ } }
+  SC.prefs = {
+    get: function (k) { return prefs[k]; },
+    set: function (k, v) { prefs[k] = v; savePrefs(); },
+    // page-specific default that applies only until the user picks something
+    defaults: function (d) { Object.keys(d).forEach(function (k) { if (!(k in stored)) prefs[k] = d[k]; }); },
+  };
+
+  // ---------- audio ----------
+  var A = (SC.audio = { ctx: null, unlocked: false, onchange: null });
+  var VOLS = [0.12, 0.3, 0.7]; // 작게 / 보통 / 크게 (peak gain of a square wave)
+  SC.VOL_LABELS = ['작게', '보통', '크게'];
+  function changed() { if (A.onchange) A.onchange(); }
+  A.state = function () { return !A.unlocked ? 'off' : prefs.sound ? 'on' : 'muted'; };
   A.unlock = function () {
     try {
       var C = window.AudioContext || window.webkitAudioContext;
-      if (!A.ctx && C) A.ctx = new C();
+      if (!A.ctx && C) {
+        A.ctx = new C();
+        A.ctx.onstatechange = function () { A.unlocked = A.ctx.state === 'running'; changed(); };
+      }
       if (A.ctx && A.ctx.state === 'suspended') A.ctx.resume();
-      A.unlocked = !!A.ctx;
-      A.muted = false;
-      store('sc_sound', '1');
+      A.unlocked = !!A.ctx && A.ctx.state !== 'closed';
+      prefs.sound = true; prefs.everUnlocked = true; savePrefs();
     } catch (e) { A.unlocked = false; }
-    if (A.onchange) A.onchange();
+    changed();
     return A.unlocked;
   };
-  A.toggle = function () {
-    if (!A.unlocked) { if (A.unlock()) A.beep('order'); return; }
-    A.muted = !A.muted;
-    if (!A.muted) A.beep('order');
-    if (A.onchange) A.onchange();
+  A.setSound = function (on) {
+    if (on) { if (A.unlock()) A.beep('order'); return; }
+    prefs.sound = false; savePrefs(); changed();
   };
-  // If sound was enabled on a previous visit, re-unlock on the first tap (browsers need a gesture).
-  if (store('sc_sound') === '1') {
+  A.toggle = function () { A.setSound(A.state() !== 'on'); };
+  A.setVol = function (i) { prefs.vol = Math.max(0, Math.min(2, i)); savePrefs(); changed(); };
+  // Browsers need a gesture for audio. If sound was enabled before, re-unlock on the first tap.
+  if (prefs.everUnlocked && prefs.sound) {
     var again = function () { document.removeEventListener('pointerdown', again, true); document.removeEventListener('keydown', again, true); A.unlock(); };
     document.addEventListener('pointerdown', again, true);
     document.addEventListener('keydown', again, true);
   }
+  // [freq Hz, seconds, 's' = soft sine]; 0 Hz = rest. Each source sounds different.
   var PATTERNS = {
-    order: [[784, 0.12], [1047, 0.12], [1319, 0.22]],
-    call: [[659, 0.14], [0, 0.06], [659, 0.14], [0, 0.06], [880, 0.26]],
-    wait: [[523, 0.12], [659, 0.12], [523, 0.2]],
-    kitchen: [[988, 0.16], [0, 0.05], [988, 0.16], [0, 0.05], [1319, 0.28]],
-    called: [[880, 0.2], [0, 0.08], [880, 0.2], [0, 0.08], [1175, 0.4]],
+    order: [[784, 0.13], [0, 0.05], [1175, 0.22]],                                   // two rising beeps
+    call: [[880, 0.08], [0, 0.07], [880, 0.08], [0, 0.07], [880, 0.08]],             // three short
+    wait: [[523, 0.45, 's']],                                                         // one soft
+    kitchen: [[659, 0.13], [0, 0.05], [988, 0.24]],                                   // two rising, lower
+    called: [[880, 0.2], [0, 0.06], [1175, 0.4]],
+    deposit: [[1568, 0.09], [0, 0.05], [1568, 0.09], [0, 0.05], [2093, 0.3]],        // bank deposit needs staff
+    tick: [[1760, 0.05, 's']],                                                         // quiet: auto-matched
   };
+  var lastHint = 0;
   A.beep = function (kind) {
-    if (!A.ctx || !A.unlocked || A.muted) return;
+    if (!prefs.sound) return false;
+    if (!A.ctx || !A.unlocked) {
+      if (Date.now() - lastHint > 20000) { lastHint = Date.now(); SC.toast('소리가 꺼져 있어요. 화면을 한 번 눌러 주세요.', 'error', 6000); }
+      return false;
+    }
     try {
-      var t = A.ctx.currentTime + 0.02;
+      if (A.ctx.state === 'suspended') A.ctx.resume();
+      var t = A.ctx.currentTime + 0.02, peak = VOLS[prefs.vol] != null ? VOLS[prefs.vol] : VOLS[1];
       (PATTERNS[kind] || PATTERNS.order).forEach(function (p) {
         if (p[0]) {
-          var o = A.ctx.createOscillator(), g = A.ctx.createGain();
-          o.type = 'square'; o.frequency.value = p[0];
+          var o = A.ctx.createOscillator(), g = A.ctx.createGain(), soft = p[2] === 's', pk = soft ? peak * 0.7 : peak;
+          o.type = soft ? 'sine' : 'square'; o.frequency.value = p[0];
           g.gain.setValueAtTime(0.0001, t);
-          g.gain.exponentialRampToValueAtTime(0.18, t + 0.015);
+          g.gain.exponentialRampToValueAtTime(pk, t + 0.015);
           g.gain.exponentialRampToValueAtTime(0.0001, t + p[1]);
           o.connect(g); g.connect(A.ctx.destination);
           o.start(t); o.stop(t + p[1] + 0.02);
         }
         t += p[1];
       });
-    } catch (e) { /* ignore */ }
+      return true;
+    } catch (e) { return false; }
   };
   var flashTimer = 0;
   SC.flash = function () {
@@ -192,7 +219,7 @@
   SC.attention = function (kind) { A.beep(kind); SC.flash(); };
   SC.setTitle = function (count, base) { document.title = (count > 0 ? '(' + count + ') ' : '') + base; };
 
-  // Sound toggle button factory (keeps label in sync).
+  // Sound toggle button (top bar): 알림 켜기 -> 알림 켜짐 -> 알림 꺼짐
   SC.soundButton = function () {
     var b = h('button', { class: 'btn btn-sound', type: 'button', onclick: function () { A.toggle(); } });
     function sync() {
@@ -206,6 +233,68 @@
     sync();
     return b;
   };
+  // Strip shown while audio is still locked, so a silent page is never a surprise.
+  SC.audioStrip = function () {
+    var el = h('button', { class: 'strip', type: 'button', role: 'status', onclick: function () { A.unlock(); } });
+    function sync() {
+      el.hidden = A.unlocked || !prefs.sound;
+      el.textContent = prefs.everUnlocked ? '소리를 켜려면 화면을 한 번 눌러 주세요' : '알림 소리가 꺼져 있어요. 여기를 눌러 소리를 켜세요';
+    }
+    var prev = A.onchange;
+    A.onchange = function () { if (prev) prev(); sync(); };
+    sync();
+    return el;
+  };
+
+  // ---------- desktop / phone notifications ----------
+  var N = (SC.notif = {});
+  N.reason = function () {
+    if (!('Notification' in window)) return '이 브라우저는 화면 알림을 지원하지 않아요 (아이폰은 홈 화면에 추가해야 해요)';
+    if (!window.isSecureContext) return '화면 알림은 https 주소에서만 쓸 수 있어요';
+    if (Notification.permission === 'denied') return '브라우저 설정에서 이 사이트의 알림이 차단되어 있어요';
+    return '';
+  };
+  // Ask permission only from a user tap. Resolves true when notifications are on.
+  N.enable = function () {
+    if (N.reason()) return Promise.resolve(false);
+    var ask = window.BoothNotify ? BoothNotify.request() : Promise.resolve(Notification.requestPermission());
+    return Promise.resolve(ask).then(function (p) { var ok = (p || (window.Notification && Notification.permission)) === 'granted'; SC.prefs.set('notify', ok); return ok; }, function () { return false; });
+  };
+  N.show = function (title, body, tag, force) {
+    try {
+      if (!prefs.notify || N.reason() || Notification.permission !== 'granted') return;
+      if (!force && !document.hidden) return;
+      if (window.BoothNotify) BoothNotify.show(String(title), { body: String(body || ''), tag: tag });
+      else new Notification(String(title), { body: String(body || ''), tag: tag });
+    } catch (e) { /* ignore */ }
+  };
+  SC.itemsText = function (items) {
+    if (!items || !items.length) return '';
+    return items[0].name + ' ×' + items[0].qty + (items.length > 1 ? ' 외 ' + (items.length - 1) : '');
+  };
+
+  // ---------- screen wake lock ----------
+  var W = (SC.wake = { sentinel: null, active: function () { return true; } });
+  W.reason = function () {
+    if (!('wakeLock' in navigator)) return '이 브라우저는 화면 켜 두기를 지원하지 않아요';
+    if (!window.isSecureContext) return '화면 켜 두기는 https 주소에서만 쓸 수 있어요';
+    return '';
+  };
+  W.sync = function () {
+    try {
+      var want = prefs.wake && !W.reason() && document.visibilityState === 'visible' && W.active();
+      if (want && !W.sentinel) {
+        W.sentinel = 'pending';
+        navigator.wakeLock.request('screen').then(function (s) {
+          W.sentinel = s;
+          s.addEventListener('release', function () { if (W.sentinel === s) W.sentinel = null; });
+          if (!(prefs.wake && W.active())) W.release();
+        }, function () { W.sentinel = null; });
+      } else if (!want && W.sentinel && W.sentinel !== 'pending') W.release();
+    } catch (e) { W.sentinel = null; }
+  };
+  W.release = function () { var s = W.sentinel; W.sentinel = null; try { if (s && s.release) s.release(); } catch (e) { /* ignore */ } };
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') W.release(); W.sync(); });
 
   // ---------- connection indicator ----------
   var CONN_LABEL = { live: '실시간', poll: '5초마다 갱신', off: '연결 끊김', wait: '연결 중' };
@@ -233,6 +322,9 @@
       if (closed || !window.EventSource) { startPoll(); return; }
       es = new EventSource(BASE + opts.sse);
       es.addEventListener('open', function () { stopPoll(); status('live'); });
+      if (opts.hints) Object.keys(opts.hints).forEach(function (k) {
+        es.addEventListener(k, function (ev) { try { opts.hints[k](JSON.parse(ev.data)); } catch (e) { /* ignore */ } });
+      });
       es.addEventListener('state', function (ev) {
         try { opts.onState(JSON.parse(ev.data)); status('live'); } catch (e) { /* ignore bad frame */ }
       });

@@ -8,11 +8,12 @@
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="__BASE__/static/guest.css">
 <script src="__BASE__/static/base.js"></script>
+<script src="__BASE__/static/notify.js"></script>
 </head>
 <body>
 <header id="hd">
   <h1 id="tno" class="tno">&nbsp;</h1>
-  <div class="hr"><span id="mb" class="mbadge" hidden></span><span id="conn" class="conn" hidden><i></i>재연결 중</span></div>
+  <div class="hside"><button id="mute" class="mute" data-a="mute" aria-label="알림음 끄기" aria-pressed="false">&#128276;</button><div class="hr"><span id="mb" class="mbadge" hidden></span><span id="conn" class="conn" hidden><i></i>재연결 중</span></div></div>
 </header>
 <div id="banner" class="banner" role="status" hidden></div>
 <main id="main"><section id="panel" aria-live="polite"><p class="empty">불러오는 중…</p></section></main>

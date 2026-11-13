@@ -6,17 +6,20 @@
 <meta name="robots" content="noindex">
 <title>QR 인쇄 · 주점 부스</title>
 <script src="__BASE__/static/base.js"></script>
+<script src="__BASE__/static/notify.js"></script>
 <link rel="stylesheet" href="__BASE__/static/staff.css">
 <style>
-  .bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 12px 16px; position: sticky; top: 0; z-index: 10; background: var(--bg); border-bottom: 1px solid var(--line); }
-  .bar h1 { font-size: 1.15rem; font-weight: 900; margin-right: auto; }
-  .bar h1 span { color: var(--accent); }
-  .info { max-width: 900px; margin: 14px auto 0; padding: 0 16px; display: grid; gap: 10px; }
+  .info { margin: 0 0 8px; display: grid; gap: 10px; }
   .warn { padding: 12px 14px; border: 2px solid var(--accent); border-radius: 12px; background: rgba(255, 176, 32, .1); font-weight: 700; overflow-wrap: anywhere; }
-  .err { padding: 24px 16px; text-align: center; display: grid; gap: 14px; justify-items: center; }
-  .sheets { padding: 16px 8px 40px; display: grid; gap: 18px; justify-content: center; zoom: var(--z, 1); }
-  .sheet { width: 190mm; height: 276mm; background: #fff; color: #000; display: grid; grid-template-columns: 95mm 95mm; grid-template-rows: 138.5mm 138.5mm; box-shadow: 0 6px 30px rgba(0, 0, 0, .5); break-after: page; page-break-after: always; }
-  .card { position: relative; width: 95mm; height: 138.5mm; display: flex; flex-direction: column; outline: .25mm dashed #888; outline-offset: -.25mm; break-inside: avoid; page-break-inside: avoid; background: #fff; color: #000; font-family: system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  .cards { padding: 8px 0 40px; display: flex; flex-wrap: wrap; gap: 22px; justify-content: center; }
+  .cell { flex: 0 0 95mm; width: 95mm; display: grid; gap: 8px; align-content: start; }
+  .cell.sel .card { box-shadow: 0 0 0 3px var(--accent); }
+  .pick { display: flex; gap: 10px; align-items: center; font-weight: 800; min-height: 44px; }
+  .pick input { width: 24px; height: 24px; accent-color: #ffb020; }
+  .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .acts .btn { flex: 1 1 auto; }
+  .urlline { font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
+  .card { position: relative; width: 95mm; height: 138mm; display: flex; flex-direction: column; outline: .25mm dashed #888; outline-offset: -.25mm; break-inside: avoid; page-break-inside: avoid; background: #fff; color: #000; font-family: system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
   .half { height: 69mm; padding: 4mm 5mm 3mm; overflow: hidden; display: grid; grid-template-columns: 1fr 42mm; grid-template-rows: 1fr auto; column-gap: 2mm; align-items: center; }
   .half.flip { transform: rotate(180deg); }
   .id { display: grid; justify-items: center; align-content: center; line-height: 1; }
@@ -27,31 +30,37 @@
   .qrbox svg { width: 100%; height: 100%; display: block; }
   .cap { grid-column: 1 / -1; text-align: center; font-size: 5.8mm; font-weight: 900; padding-top: 1mm; }
   .cap small { display: block; font-size: 3.1mm; font-weight: 700; color: #333; margin-top: .6mm; }
-  .fold { position: absolute; left: 0; right: 0; top: 69.25mm; border-top: .25mm dashed #888; text-align: center; height: 0; }
+  .fold { position: absolute; left: 0; right: 0; top: 69mm; border-top: .25mm dashed #888; text-align: center; height: 0; }
   .fold span { position: relative; top: -1.7mm; background: #fff; padding: 0 2mm; font-size: 2.4mm; color: #666; }
-  .url { position: absolute; left: 4px; right: 4px; bottom: 2px; font-size: 9px; color: #666; text-align: center; overflow-wrap: anywhere; }
   @media print {
-    @page { size: A4 portrait; margin: 10mm; }
+    @page { size: A4 portrait; margin: 9mm; }
     html, body { background: #fff !important; color: #000 !important; }
     * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .noprint { display: none !important; }
-    .sheets { padding: 0; gap: 0; zoom: 1; display: block; }
-    .sheet { box-shadow: none; margin: 0; }
-    .sheet:last-child { break-after: auto; page-break-after: auto; }
-    .url { display: none; }
+    .noprint, .top, .strip, .dlg, #toasts { display: none !important; }
+    main { padding: 0 !important; max-width: none !important; margin: 0 !important; }
+    .cards { display: flex; flex-wrap: wrap; gap: 0; padding: 0; width: 190mm; margin: 0; justify-content: flex-start; }
+    .cell { break-inside: avoid; page-break-inside: avoid; height: 138mm; }
+    .cell .card { box-shadow: none !important; }
+    body.print-sel .cell:not(.sel) { display: none !important; }
+    body.print-one .cell:not(.one) { display: none !important; }
   }
 </style>
 </head>
 <body>
-<div class="bar noprint">
-  <h1>QR 인쇄 <span>테이블 텐트</span></h1>
-  <a class="btn" href="__BASE__/staff">스태프 화면</a>
-  <button class="btn btn-primary" id="print" type="button" disabled>인쇄 (A4 · 4장씩)</button>
+<noscript><p style="padding:24px">이 페이지는 JavaScript가 필요합니다.</p></noscript>
+<div id="login" class="login noprint" hidden></div>
+<div id="app" hidden>
+  <main id="main">
+    <div class="view-head noprint" id="bar"></div>
+    <div class="info noprint" id="info"></div>
+    <div class="cards" id="cards" aria-live="polite"></div>
+  </main>
 </div>
-<div class="info noprint" id="info"></div>
-<main class="sheets" id="sheets" aria-live="polite"></main>
+<div id="toasts" class="noprint" role="status" aria-live="polite"></div>
 <script src="__BASE__/static/vendor/qr.js"></script>
 <script src="__BASE__/static/staff-common.js"></script>
+<script src="__BASE__/static/alarm.js"></script>
+<script src="__BASE__/static/shell.js"></script>
 <script src="__BASE__/static/qr-page.js"></script>
 </body>
 </html>

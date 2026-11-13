@@ -7,45 +7,22 @@
 <meta name="theme-color" content="#14110f">
 <title>주방 · 주점 부스</title>
 <script src="__BASE__/static/base.js"></script>
+<script src="__BASE__/static/notify.js"></script>
 <link rel="stylesheet" href="__BASE__/static/staff.css">
-<style>
-  body { font-size: 20px; }
-  .k-top { display: flex; align-items: center; gap: 12px; padding: 12px 20px; flex-wrap: wrap; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
-  .k-top h1 { font-size: 1.6rem; font-weight: 900; margin-right: auto; }
-  .k-top h1 span { color: var(--accent); }
-  .k-wrap { padding: 18px 20px 60px; display: grid; gap: 26px; max-width: 1800px; margin: 0 auto; }
-  .k-h { font-size: 1.3rem; font-weight: 900; color: var(--muted); letter-spacing: .02em; margin-bottom: 12px; display: flex; gap: 12px; align-items: baseline; }
-  .k-h b { color: var(--text); font-size: 1.6rem; }
-  .make { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
-  .mk { display: flex; align-items: center; gap: 18px; background: var(--surface); border: 3px solid var(--accent); border-radius: 20px; padding: 14px 20px; }
-  .mk .q { font-size: clamp(4rem, 7vw, 6.5rem); font-weight: 900; line-height: 1; color: var(--accent); font-variant-numeric: tabular-nums; min-width: 1.3em; text-align: center; }
-  .mk .nm { font-size: clamp(1.8rem, 3vw, 2.6rem); font-weight: 900; line-height: 1.15; overflow-wrap: anywhere; }
-  .jobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; align-items: start; }
-  .job { background: var(--surface); border: 3px solid var(--line); border-radius: 20px; padding: 16px; display: grid; gap: 12px; }
-  .job.l1 { border-color: var(--accent); }
-  .job.l2 { border-color: var(--danger); background: rgba(255, 90, 77, .08); }
-  .job-head { display: flex; align-items: center; gap: 16px; }
-  .job .tn { font-size: clamp(5rem, 9vw, 7.5rem); font-weight: 900; line-height: .9; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
-  .job .tn small { display: block; font-size: 1rem; letter-spacing: 0; color: var(--muted); font-weight: 800; margin-top: 6px; }
-  .job .el { margin-left: auto; text-align: right; font-weight: 900; }
-  .job .el .t { display: block; font-size: 2.6rem; font-variant-numeric: tabular-nums; line-height: 1; }
-  .job .el .w { display: inline-block; margin-top: 6px; font-size: 1rem; }
-  .job .items { font-size: clamp(1.7rem, 2.6vw, 2.3rem); gap: 6px; }
-  .job .items .q { font-size: 1.15em; }
-  .job .note { font-size: 1.4rem; }
-  .job .btn-primary { min-height: 84px; font-size: 1.8rem; border-radius: 16px; }
-  .k-empty { padding: 60px 16px; font-size: 1.8rem; text-align: center; }
-  @media (max-width: 600px) { body { font-size: 18px; } .jobs { grid-template-columns: 1fr; } }
-</style>
 </head>
-<body>
-<header class="k-top" id="top"></header>
-<main class="k-wrap" id="main" aria-live="polite">
-  <section aria-labelledby="mk-h"><h2 class="k-h" id="mk-h">지금 만들 것 <b id="mk-n" class="num"></b></h2><div class="make" id="make"></div></section>
-  <section aria-labelledby="jb-h"><h2 class="k-h" id="jb-h">조리 중인 주문 · 오래된 순 <b id="jb-n" class="num"></b></h2><div class="jobs" id="jobs"></div></section>
-</main>
+<body class="xl-scale">
+<noscript><p style="padding:24px">이 페이지는 JavaScript가 필요합니다.</p></noscript>
+<div id="login" class="login" hidden></div>
+<div id="app" hidden>
+  <main id="main" aria-live="polite">
+    <section aria-labelledby="mk-h"><div class="view-head"><h2 id="mk-h">지금 만들 것</h2><span class="tag warn" id="mk-n"></span></div><div class="make" id="make"></div></section>
+    <section aria-labelledby="jb-h" style="margin-top:22px"><div class="view-head"><h2 id="jb-h">조리 중인 주문 · 오래된 순</h2><span class="tag info" id="jb-n"></span></div><div class="jobs" id="jobs"></div></section>
+  </main>
+</div>
 <div id="toasts" role="status" aria-live="polite"></div>
 <script src="__BASE__/static/staff-common.js"></script>
+<script src="__BASE__/static/alarm.js"></script>
+<script src="__BASE__/static/shell.js"></script>
 <script src="__BASE__/static/kitchen.js"></script>
 </body>
 </html>

@@ -38,7 +38,7 @@ const REWARDS = {
   hourly: { label: '안주 1개 서비스', item: '안주' },
 };
 
-async function boot({ base = '', env = {}, dir, menu, menuRaw } = {}) {
+async function boot({ base = '', env = {}, dir, menu, menuRaw, rewards, tablesCount, noSw } = {}) {
   dir ||= fs.mkdtempSync(path.join(os.tmpdir(), 'booth-test-'));
   const cfg = path.join(dir, 'cfg');
   const pub = path.join(dir, 'pub');
@@ -46,8 +46,9 @@ async function boot({ base = '', env = {}, dir, menu, menuRaw } = {}) {
   if (!fs.existsSync(cfg)) {
     fs.mkdirSync(cfg); fs.mkdirSync(pub);
     fs.writeFileSync(path.join(cfg, 'menu.json'), menuRaw ?? JSON.stringify(menu || MENU));
-    fs.writeFileSync(path.join(cfg, 'rewards.json'), JSON.stringify(REWARDS));
-    fs.writeFileSync(path.join(cfg, 'tables.json'), JSON.stringify({ count: 40 }));
+    fs.writeFileSync(path.join(cfg, 'rewards.json'), JSON.stringify(rewards || REWARDS));
+    fs.writeFileSync(path.join(cfg, 'tables.json'), JSON.stringify({ count: tablesCount ?? 40 }));
+    if (!noSw) fs.writeFileSync(path.join(pub, 'sw.js'), 'const BASE="__BASE__";');
     for (const f of ['guest', 'staff', 'kitchen', 'board', 'wait', 'qr']) {
       fs.writeFileSync(path.join(pub, `${f}.html`), `<!doctype html><title>${f}</title><script src="__BASE__/static/base.js"></script><script src="__BASE__/static/x.js"></script>`);
     }
@@ -98,7 +99,7 @@ class Client {
 }
 
 const raw = (srv, method, p, headers = {}, body) => new Promise((resolve, reject) => {
-  const req = http.request({ host: '127.0.0.1', port: srv.port, method, path: p, headers }, (res) => {
+  const req = http.request({ host: '127.0.0.1', port: srv.port, method, path: p, headers, agent: false }, (res) => { // no keep-alive reuse: the server may close after a 404 with an unread body
     let t = ''; res.on('data', (d) => { t += d; }); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: t }));
   });
   req.on('error', reject);
@@ -173,6 +174,49 @@ CREATE INDEX IF NOT EXISTS orders_ts ON orders(table_id, seat);
 CREATE TABLE IF NOT EXISTS order_items(order_id INTEGER NOT NULL, item_id TEXT NOT NULL, name TEXT NOT NULL, unit_price INTEGER NOT NULL, qty INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS order_items_o ON order_items(order_id);
 CREATE TABLE IF NOT EXISTS sold_out(item_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reward_stock(id TEXT PRIMARY KEY, stock INTEGER NOT NULL, issued INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS coupons(
+  code TEXT PRIMARY KEY, reward_id TEXT NOT NULL, source TEXT NOT NULL, type TEXT NOT NULL, amount INTEGER, label TEXT NOT NULL, item TEXT,
+  table_id INTEGER NOT NULL, seat INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'issued', order_id INTEGER, used_at INTEGER, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS coupons_ts ON coupons(table_id, seat);
+CREATE TABLE IF NOT EXISTS plays(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, game TEXT NOT NULL, device TEXT NOT NULL,
+  nick TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, score INTEGER, rejected INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS plays_dev ON plays(device);
+CREATE INDEX IF NOT EXISTS plays_ts ON plays(table_id, seat);
+CREATE TABLE IF NOT EXISTS nicks(device TEXT NOT NULL, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, nick TEXT NOT NULL, PRIMARY KEY(device, table_id, seat));
+CREATE TABLE IF NOT EXISTS calls(id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER);
+CREATE TABLE IF NOT EXISTS waitlist(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL, size INTEGER NOT NULL, secret TEXT NOT NULL, device TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'waiting', created_at INTEGER NOT NULL, called_at INTEGER);
+CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS login_keys(hash TEXT PRIMARY KEY, fails INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS nicks_ts ON nicks(table_id, seat);
+CREATE INDEX IF NOT EXISTS plays_fin ON plays(finished_at);
+`;
+
+// schema written by the previous release (git 3ba4c20): used to prove the upgrade of a production booth.db
+const HEAD_SCHEMA = `
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA busy_timeout=5000;
+CREATE TABLE IF NOT EXISTS tables(id INTEGER PRIMARY KEY, token TEXT NOT NULL UNIQUE, seat INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS orders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', paid INTEGER NOT NULL DEFAULT 0,
+  subtotal INTEGER NOT NULL, discount INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL,
+  member_discount INTEGER NOT NULL DEFAULT 0, member_id INTEGER,
+  coupon_code TEXT, note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  cooking_at INTEGER, UNIQUE(table_id, seat, key));
+CREATE INDEX IF NOT EXISTS orders_ts ON orders(table_id, seat);
+CREATE TABLE IF NOT EXISTS order_items(order_id INTEGER NOT NULL, item_id TEXT NOT NULL, name TEXT NOT NULL, unit_price INTEGER NOT NULL, qty INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS order_items_o ON order_items(order_id);
+CREATE TABLE IF NOT EXISTS menu_categories(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS menu_items(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, price INTEGER NOT NULL, category_id INTEGER NOT NULL, descr TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0, sold_out INTEGER NOT NULL DEFAULT 0, sort INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS order_items_item ON order_items(item_id);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reward_stock(id TEXT PRIMARY KEY, stock INTEGER NOT NULL, issued INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS coupons(
@@ -574,7 +618,7 @@ test('pages, security headers, device cookie', async () => {
   const g = guest();
   const r = await g.get(`/t/${tok(1)}`);
   assert.equal(r.status, 200);
-  assert.deepEqual((await g.get(`/api/t/${tok(1)}`)).json.pay, { bank: '', account: '', holder: '' });
+  assert.deepEqual((await g.get(`/api/t/${tok(1)}`)).json.pay, { bank: '', account: '', holder: '', tossEnabled: false, kakaoPayUrl: '', requireDepositor: false }); // spec change: pay grew toss / kakao / requireDepositor
   assert.ok(r.text.includes('src="/static/base.js"'));
   assert.equal((await g.get('/static/base.js')).text, 'window.BASE="";');
   assert.ok(r.text.includes('src="/static/x.js"'));
@@ -1284,6 +1328,8 @@ async function realDevice(srv) {
   return sc.split(';')[0].slice('booth_d='.length);
 }
 const withToken = async (tk, extra = {}) => { const g = guest(); g.jar.token = tk; g.jar.booth_d = await realDevice(main); Object.assign(g.jar, extra); return g; };
+// GET /member now also returns the staff-defined rule (spec change: it used to be { enabled, member, pct })
+const memberBody = (over = {}) => ({ enabled: true, member: false, mode: 'percent', pct: 10, amount: 1000, minOrder: 0, maxDiscount: 0, stackWithCoupon: true, ...over });
 let P500; let P900;
 
 test('member discount: rounds DOWN to 100 won, member first then coupon, total floors at 0', async () => {
@@ -1335,7 +1381,7 @@ test('member discount: staff setting is validated, pct 0 disables it', async () 
     const r = await order(g, tok(23), [{ id: 'tteokbokki', qty: 1 }]);
     assert.deepEqual([r.json.order.memberDiscount, r.json.order.total, r.json.order.member], [0, 8000, true]);
     assert.equal(r.json.memberDiscountSkipped, undefined);
-    assert.deepEqual((await g.get(`/api/t/${tok(23)}/member`)).json, { enabled: true, member: true, pct: 0 });
+    assert.deepEqual((await g.get(`/api/t/${tok(23)}/member`)).json, memberBody({ member: true, pct: 0 }));
   } finally { await staff.post('/api/staff/member-discount', { pct: 10 }); }
 });
 
@@ -1362,7 +1408,7 @@ test('member discount: anything but 200 + valid JSON means not a member, and the
     const r = await order(g, T, [{ id: 'cola', qty: 1 }]);
     assert.equal(r.status, 201, `${name}: ${r.text}`);
     assert.deepEqual([r.json.order.memberDiscount, r.json.order.member, r.json.order.total], [0, false, 2000], name);
-    assert.deepEqual((await g.get(`/api/t/${T}/member`)).json, { enabled: true, member: false, pct: 10 }, name);
+    assert.deepEqual((await g.get(`/api/t/${T}/member`)).json, memberBody({ member: false }), name);
     await staff.post(`/api/staff/orders/${r.json.order.id}/status`, { status: 'cancelled' }); // keep the seat under its pending cap
   }
   assert.equal(fake.other.n, otherBefore, 'redirect was not followed');
@@ -1505,7 +1551,7 @@ test('member discount: feature off (no COMS_ME_URL) makes no outbound requests a
     const s = await staffLogin(srv);
     const T = (await s.get('/api/staff/tables')).json.tables[0].token;
     const g = new Client(srv); g.jar.token = fake.member(5001); g.jar.booth_d = await realDevice(srv);
-    assert.deepEqual((await g.get(`/api/t/${T}/member`)).json, { enabled: false, member: false, pct: 10 });
+    assert.deepEqual((await g.get(`/api/t/${T}/member`)).json, memberBody({ enabled: false, member: false }));
     const r = await order(g, T, [{ id: 'tteokbokki', qty: 1 }]);
     assert.deepEqual([r.json.order.memberDiscount, r.json.order.member, r.json.order.total], [0, false, 8000]);
     assert.equal(fake.hitsFor(g.jar.token).length, 0);
@@ -2114,4 +2160,1887 @@ test('invalid menu.json is not seeded: the server starts with an empty menu and 
     again = await boot({ dir: srv.dir });
     assert.equal((await (await staffLogin(again)).get('/api/staff/state')).json.menu.items.length, MENU.items.length);
   } finally { await srv.stop({ keep: true }); if (again) await again.stop(); fs.rmSync(srv.dir, { recursive: true, force: true }); }
+});
+
+// ======================= C. member discount settings =======================
+const MEMBER_DEFAULTS = { enabled: true, mode: 'percent', pct: 10, amount: 1000, minOrder: 0, maxDiscount: 0, includeAssociate: true, perMemberLimit: 20, stackWithCoupon: true };
+async function setMember(over, s = staff) {
+  const r = await s.post('/api/staff/member-discount', over);
+  assert.equal(r.status, 200, r.text);
+  return r.json;
+}
+const restoreMember = () => setMember(MEMBER_DEFAULTS);
+
+test('member settings: every field is validated, bad updates change nothing, state exposes the rule', async () => {
+  assert.equal((await new Client(main).post('/api/staff/member-discount', { pct: 5 })).status, 401);
+  assert.equal((await staff.post('/api/staff/member-discount', {})).json.error, 'nothing_to_update');
+  assert.equal((await staff.post('/api/staff/member-discount', { unknownField: 1 })).json.error, 'nothing_to_update');
+  const bad = {
+    bad_enabled: [{ enabled: 'yes' }, { enabled: 1 }, { enabled: null }],
+    bad_mode: [{ mode: 'fixedd' }, { mode: 1 }, { mode: null }],
+    bad_pct: [{ pct: -1 }, { pct: 51 }, { pct: 1.5 }, { pct: '10' }, { pct: null }],
+    bad_amount: [{ amount: 150 }, { amount: -100 }, { amount: 50100 }, { amount: '100' }, { amount: 1.5 }],
+    bad_min_order: [{ minOrder: 150 }, { minOrder: -100 }, { minOrder: 1000100 }, { minOrder: '0' }],
+    bad_max_discount: [{ maxDiscount: 150 }, { maxDiscount: -100 }, { maxDiscount: 1000100 }, { maxDiscount: null }],
+    bad_include_associate: [{ includeAssociate: 'true' }, { includeAssociate: 0 }],
+    bad_per_member_limit: [{ perMemberLimit: 0 }, { perMemberLimit: 101 }, { perMemberLimit: 1.5 }, { perMemberLimit: '5' }],
+    bad_stack_with_coupon: [{ stackWithCoupon: 'no' }, { stackWithCoupon: 0 }],
+  };
+  for (const [code, bodies] of Object.entries(bad)) {
+    for (const b of bodies) {
+      const r = await staff.post('/api/staff/member-discount', b);
+      assert.equal(r.status, 400, JSON.stringify(b));
+      assert.equal(r.json.error, code, JSON.stringify(b));
+    }
+  }
+  // atomic: a valid field next to an invalid one is not applied
+  assert.equal((await staff.post('/api/staff/member-discount', { pct: 22, amount: 150 })).status, 400);
+  assert.equal((await staff.get('/api/staff/state')).json.memberDiscount.pct, 10);
+  try {
+    // boundaries are accepted
+    for (const ok of [{ pct: 0 }, { pct: 50 }, { amount: 0 }, { amount: 50000 }, { minOrder: 1000000 }, { minOrder: 0 }, { maxDiscount: 1000000 }, { maxDiscount: 0 }, { perMemberLimit: 1 }, { perMemberLimit: 100 }]) await setMember(ok);
+    const full = await setMember({ enabled: true, mode: 'fixed', pct: 12, amount: 1500, minOrder: 3000, maxDiscount: 2000, includeAssociate: false, perMemberLimit: 7, stackWithCoupon: false });
+    assert.deepEqual({ ...full, ok: undefined }, { ok: undefined, ...{ enabled: true, mode: 'fixed', pct: 12, amount: 1500, minOrder: 3000, maxDiscount: 2000, includeAssociate: false, perMemberLimit: 7, stackWithCoupon: false } });
+    const st = (await staff.get('/api/staff/state')).json;
+    assert.deepEqual(st.memberDiscount, { enabled: true, mode: 'fixed', pct: 12, amount: 1500, minOrder: 3000, maxDiscount: 2000, includeAssociate: false, perMemberLimit: 7, stackWithCoupon: false });
+    assert.equal(st.memberDiscountPct, 12); // older field kept
+    // the guest snapshot only carries what the page needs (never includeAssociate / perMemberLimit)
+    const gs = (await guest().get(`/api/t/${tok(13)}`)).json;
+    assert.deepEqual(gs.memberDiscount, { enabled: true, mode: 'fixed', pct: 12, amount: 1500, minOrder: 3000, maxDiscount: 2000, stackWithCoupon: false });
+    assert.equal(gs.memberDiscountPct, 12);
+    const g = await withToken(fake.member(5001, 'USER'));
+    assert.deepEqual((await g.get(`/api/t/${tok(13)}/member`)).json, { enabled: true, member: true, mode: 'fixed', pct: 12, amount: 1500, minOrder: 3000, maxDiscount: 2000, stackWithCoupon: false });
+  } finally { await restoreMember(); }
+});
+
+test('member discount arithmetic: percent with cap, fixed amount larger than the subtotal, minOrder boundary', async () => {
+  const T = tok(6);
+  const g = await withToken(fake.member(5201));
+  const place = async (items) => { // each order is cancelled again so the table stays under its pending cap
+    const r = (await order(g, T, items)).json.order;
+    await staff.post(`/api/staff/orders/${r.id}/status`, { status: 'cancelled' });
+    return r;
+  };
+  const o = async (over, items) => { await setMember(over); return place(items); };
+  try {
+    const big = [{ id: 'tteokbokki', qty: 1 }, { id: 'fries', qty: 1 }]; // 14,000
+    let r = await o({ mode: 'percent', pct: 50, maxDiscount: 3000 }, big);
+    assert.deepEqual([r.memberDiscount, r.total], [3000, 11000], 'percent capped by maxDiscount');
+    r = await o({ maxDiscount: 0 }, big);
+    assert.deepEqual([r.memberDiscount, r.total], [7000, 7000], 'maxDiscount 0 = no cap');
+    r = await o({ maxDiscount: 10000 }, big);
+    assert.equal(r.memberDiscount, 7000, 'a cap above the discount changes nothing');
+    // fixed
+    r = await o({ mode: 'fixed', amount: 1000, maxDiscount: 0 }, [{ id: 'tteokbokki', qty: 1 }]);
+    assert.deepEqual([r.memberDiscount, r.total, r.discount], [1000, 7000, 1000]);
+    r = await o({ amount: 5000 }, [{ id: 'cola', qty: 1 }]); // 2,000 subtotal: never more than the subtotal
+    assert.deepEqual([r.subtotal, r.memberDiscount, r.total, r.member], [2000, 2000, 0, true]);
+    r = await o({ amount: 5000, maxDiscount: 2500 }, [{ id: 'tteokbokki', qty: 1 }]);
+    assert.equal(r.memberDiscount, 2500, 'maxDiscount also caps a fixed amount');
+    r = await o({ amount: 0, maxDiscount: 0 }, [{ id: 'tteokbokki', qty: 1 }]);
+    assert.deepEqual([r.memberDiscount, r.member], [0, true]);
+    // minOrder: subtotal == minOrder applies, one step below does not
+    await setMember({ mode: 'fixed', amount: 500, minOrder: 6900 });
+    assert.equal((await place([{ id: 'fries', qty: 1 }, { id: P900, qty: 1 }])).memberDiscount, 500, 'subtotal 6,900 == minOrder');
+    const below = await place([{ id: 'fries', qty: 1 }, { id: P500, qty: 1 }]);
+    assert.deepEqual([below.subtotal, below.memberDiscount, below.member], [6500, 0, true]);
+    assert.equal((await place([{ id: 'tteokbokki', qty: 1 }])).memberDiscount, 500);
+    // percent mode with minOrder
+    await setMember({ mode: 'percent', pct: 10, minOrder: 8000 });
+    assert.equal((await place([{ id: 'tteokbokki', qty: 1 }])).memberDiscount, 800);
+    assert.equal((await place([{ id: 'fries', qty: 1 }])).memberDiscount, 0);
+  } finally { await restoreMember(); }
+});
+
+test('member discount: includeAssociate=false excludes ASSOCIATE only; the cached role is applied without another lookup', async () => {
+  const T = tok(9);
+  const assoc = fake.member(5301, 'ASSOCIATE');
+  const a = await withToken(assoc);
+  try {
+    await setMember({ includeAssociate: false });
+    assert.equal((await a.get(`/api/t/${T}/member`)).json.member, false);
+    const r = await order(a, T, [{ id: 'tteokbokki', qty: 1 }]);
+    assert.deepEqual([r.json.order.memberDiscount, r.json.order.member, r.json.order.total], [0, false, 8000]);
+    for (const role of ['USER', 'OFFICER', 'VICE_PRESIDENT', 'ADMIN']) {
+      const g = await withToken(fake.member(5310, role));
+      assert.equal((await g.get(`/api/t/${T}/member`)).json.member, true, role);
+      assert.equal((await order(g, T, [{ id: 'tteokbokki', qty: 1 }])).json.order.memberDiscount, 800, role);
+    }
+    await setMember({ includeAssociate: true });
+    assert.equal((await a.get(`/api/t/${T}/member`)).json.member, true);
+    assert.equal((await order(a, T, [{ id: 'tteokbokki', qty: 1 }])).json.order.memberDiscount, 800);
+    assert.equal(fake.hitsFor(assoc).length, 1, 'toggling the rule needs no new club lookup (role is cached)');
+    // the role never reaches the page
+    assert.ok(!/ASSOCIATE|role/i.test(JSON.stringify((await a.get(`/api/t/${T}/member`)).json)));
+  } finally { await restoreMember(); }
+});
+
+test('member discount: stackWithCoupon=false lets the coupon win; true stacks both', async () => {
+  const T = tok(10);
+  const g = await withToken(fake.member(5401));
+  try {
+    const fin = await playOnce(g, T, 'cheers', 800);
+    const code = fin.json.coupons.find((x) => x.rewardId === 'd1000').code;
+    await setMember({ stackWithCoupon: false });
+    const a = await order(g, T, [{ id: 'tteokbokki', qty: 1 }], { couponCode: code });
+    assert.equal(a.json.memberDiscountSkipped, 'coupon');
+    assert.deepEqual([a.json.order.memberDiscount, a.json.order.couponDiscount, a.json.order.total, a.json.order.member], [0, 1000, 7000, true]);
+    const none = await order(g, T, [{ id: 'tteokbokki', qty: 1 }]); // no coupon selected: the member discount applies
+    assert.deepEqual([none.json.order.memberDiscount, none.json.memberDiscountSkipped], [800, undefined]);
+    await staff.post(`/api/staff/orders/${a.json.order.id}/status`, { status: 'cancelled' }); // coupon comes back
+    await setMember({ stackWithCoupon: true });
+    const b = await order(g, T, [{ id: 'tteokbokki', qty: 1 }], { couponCode: code });
+    assert.deepEqual([b.json.order.memberDiscount, b.json.order.couponDiscount, b.json.order.total, b.json.memberDiscountSkipped], [800, 1000, 6200, undefined]);
+  } finally { await restoreMember(); }
+});
+
+test('member discount: perMemberLimit is live; enabled=false stops lookups and discounts', async () => {
+  const T = tok(11);
+  const g = await withToken(fake.member(5501));
+  const mk = async () => (await order(g, T, [{ id: 'tteokbokki', qty: 1 }])).json;
+  try {
+    await setMember({ perMemberLimit: 1 });
+    assert.equal((await mk()).order.memberDiscount, 800);
+    const second = await mk();
+    assert.deepEqual([second.order.memberDiscount, second.memberDiscountSkipped], [0, 'limit']);
+    await setMember({ perMemberLimit: 2 }); // takes effect immediately
+    assert.equal((await mk()).order.memberDiscount, 800);
+    assert.equal((await mk()).memberDiscountSkipped, 'limit');
+    await setMember({ perMemberLimit: 1 });
+    assert.equal((await mk()).memberDiscountSkipped, 'limit');
+    await restoreMember();
+    // staff switch off: no club lookup, no discount, page told so
+    await setMember({ enabled: false });
+    const tk = fake.member(5502);
+    const off = await withToken(tk);
+    assert.deepEqual((await off.get(`/api/t/${T}/member`)).json, memberBody({ enabled: false, member: false }));
+    const r = await order(off, T, [{ id: 'tteokbokki', qty: 1 }]);
+    assert.deepEqual([r.json.order.memberDiscount, r.json.order.member], [0, false]);
+    assert.equal(fake.hitsFor(tk).length, 0, 'switch off = no outbound request');
+    assert.equal((await staff.get('/api/staff/state')).json.memberEnabled, true, 'memberEnabled still says the feature is configured');
+    assert.equal((await off.get(`/api/t/${T}`)).json.memberDiscount.enabled, false);
+    await setMember({ enabled: true });
+    assert.equal((await off.get(`/api/t/${T}/member`)).json.member, true);
+  } finally { await restoreMember(); }
+});
+
+test('member settings persist across restarts; MEMBER_ORDER_MAX only seeds a fresh database', async () => {
+  const srv = await boot({ env: { COMS_ME_URL: fake.url + ME_PATH, MEMBER_ORDER_MAX: '3' } });
+  let srv2;
+  try {
+    const s = await staffLogin(srv);
+    assert.equal((await s.get('/api/staff/state')).json.memberDiscount.perMemberLimit, 3);
+    await setMember({ mode: 'fixed', amount: 2000, pct: 22, includeAssociate: false }, s);
+    await srv.stop({ keep: true });
+    srv2 = await boot({ dir: srv.dir, env: { COMS_ME_URL: fake.url + ME_PATH, MEMBER_ORDER_MAX: '7' } });
+    const m = (await (await staffLogin(srv2)).get('/api/staff/state')).json.memberDiscount;
+    assert.deepEqual([m.mode, m.amount, m.pct, m.includeAssociate, m.perMemberLimit], ['fixed', 2000, 22, false, 3]);
+  } finally { await srv.stop({ keep: true }); if (srv2) await srv2.stop(); else fs.rmSync(srv.dir, { recursive: true, force: true }); }
+});
+
+// ======================= B. reward management =======================
+const REWARD_KEYS = ['active', 'amount', 'game', 'id', 'issued', 'item', 'label', 'remaining', 'stock', 'threshold', 'type', 'used'];
+async function rewardSetup(env = {}) {
+  const srv = await boot({ env: { SEAT_PLAY_GAP_MS: '0', ...env } });
+  const s = await staffLogin(srv);
+  const tk = (await s.get('/api/staff/tables')).json.tables.map((t) => t.token);
+  return { srv, s, tk, list: async () => (await s.get('/api/staff/rewards')).json.rewards };
+}
+
+test('rewards: staff list has live counts; games are read-only constants; unauthenticated is refused', async () => {
+  const { srv, s, tk } = await rewardSetup();
+  try {
+    assert.equal((await new Client(srv).get('/api/staff/rewards')).status, 401);
+    assert.equal((await new Client(srv).post('/api/staff/rewards', { label: 'x' })).status, 401);
+    const r = (await s.get('/api/staff/rewards')).json;
+    assert.deepEqual(r.rewards.map((x) => x.id), ['drink', 'd1000', 'dbig']);
+    for (const x of r.rewards) assert.deepEqual(Object.keys(x).sort(), REWARD_KEYS);
+    assert.deepEqual(r.rewards[0], { id: 'drink', label: '음료 1잔', game: 'pour', threshold: 400, type: 'item', amount: null, item: '콜라', stock: 3, issued: 0, remaining: 3, used: 0, active: true });
+    assert.equal(r.games.pour.maxScore, 500);
+    assert.equal(r.games.cheers.minDurationMs, 200);
+    assert.deepEqual(r.hourly, { enabled: true, label: '안주 1개 서비스', type: 'item', amount: null, item: '안주' });
+    // live counts: issued, remaining and used follow plays and redemptions
+    const g = new Client(srv);
+    const fin = await playOnce(g, tk[0], 'pour', 450);
+    assert.equal(fin.json.coupons.length, 1);
+    let drink = (await s.get('/api/staff/rewards')).json.rewards[0];
+    assert.deepEqual([drink.issued, drink.remaining, drink.used], [1, 2, 0]);
+    await s.post('/api/staff/coupons/redeem', { code: fin.json.coupons[0].code });
+    drink = (await s.get('/api/staff/rewards')).json.rewards[0];
+    assert.deepEqual([drink.issued, drink.remaining, drink.used], [1, 2, 1]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.rewards[0], drink);
+    assert.deepEqual((await s.get('/api/staff/state')).json.games, r.games);
+    // there is no way to edit the games
+    assert.equal((await s.post('/api/staff/games', { pour: { maxScore: 9999 } })).status, 404);
+  } finally { await srv.stop(); }
+});
+
+test('rewards: create validation, limits and boundaries', async () => {
+  const { srv, s } = await rewardSetup();
+  try {
+    const base = { label: '새 보상', game: 'pour', threshold: 100, type: 'item', stock: 5, active: true };
+    const bad = async (over, code) => {
+      const r = await s.post('/api/staff/rewards', { ...base, ...over });
+      assert.equal(r.status, 400, JSON.stringify(over) + r.text);
+      assert.equal(r.json.error, code, JSON.stringify(over));
+    };
+    for (const label of ['', '   ', 'a'.repeat(21), 'ㅤ', '​', 5, null]) await bad({ label }, 'bad_label');
+    for (const game of ['x', 5, null, 'toString']) await bad({ game }, 'bad_game');
+    for (const threshold of [-1, 501, 1.5, '100', null]) await bad({ threshold }, 'bad_threshold'); // pour: 0..500
+    await bad({ game: 'cheers', threshold: 1001 }, 'bad_threshold');
+    for (const type of ['x', null, 5]) await bad({ type }, 'bad_type');
+    for (const amount of [undefined, 0, 50, 150, 100100, '500', null, 1.5]) await bad({ type: 'discount', amount }, 'bad_amount');
+    for (const stock of [-1, 10001, 1.5, '5', null, undefined]) await bad({ stock }, 'bad_stock');
+    for (const active of ['yes', 1, null]) await bad({ active }, 'bad_active');
+    // boundaries
+    const lo = await s.post('/api/staff/rewards', { label: 'a'.repeat(20), game: 'pour', threshold: 0, type: 'discount', amount: 100, stock: 0, active: false });
+    assert.equal(lo.status, 200, lo.text);
+    assert.deepEqual([lo.json.reward.threshold, lo.json.reward.amount, lo.json.reward.stock, lo.json.reward.active, lo.json.reward.type], [0, 100, 0, false, 'discount']);
+    const hi = await s.post('/api/staff/rewards', { label: '최대', game: 'cheers', threshold: 1000, type: 'discount', amount: 100000, stock: 10000 });
+    assert.equal(hi.status, 200, hi.text);
+    assert.equal(hi.json.reward.active, true, 'active defaults to true');
+    // an item reward ignores a sent amount
+    const it = await s.post('/api/staff/rewards', { ...base, label: '음료', amount: 5000 });
+    assert.deepEqual([it.json.reward.amount, it.json.reward.item], [null, '음료']);
+    assert.match(it.json.reward.id, /^r[0-9a-f]{8}$/);
+    assert.deepEqual(it.json.rewards.map((x) => x.id).slice(0, 3), ['drink', 'd1000', 'dbig']);
+    // at most 12 rewards (3 seeded + 3 created so far)
+    for (let i = 6; i < 12; i++) assert.equal((await s.post('/api/staff/rewards', { ...base, label: 'r' + i })).status, 200);
+    const over = await s.post('/api/staff/rewards', { ...base, label: '열세번째' });
+    assert.equal(over.status, 409); assert.equal(over.json.error, 'too_many_rewards');
+  } finally { await srv.stop(); }
+});
+
+test('rewards: edits reach guests live; coupons keep the label/type/amount they were issued with; deactivate keeps old coupons valid', async () => {
+  const { srv, s, tk } = await rewardSetup();
+  try {
+    const A = new Client(srv); const B = new Client(srv); const C = new Client(srv); const D = new Client(srv); const E = new Client(srv);
+    const created = await s.post('/api/staff/rewards', { label: '테스트 할인', game: 'pour', threshold: 100, type: 'discount', amount: 500, stock: 3, active: true });
+    const id = created.json.reward.id;
+    assert.deepEqual([created.json.reward.issued, created.json.reward.remaining, created.json.reward.used], [0, 3, 0]);
+    // guest snapshot + board reflect it (and an SSE stream gets the edit)
+    const gs = await openSse(srv, `/api/t/${tk[4]}/events`, { cookie: `booth_d=${await realDevice(srv)}` });
+    try {
+      await gs.until((b) => b.includes('event: state'));
+      const snap = (await E.get(`/api/t/${tk[4]}`)).json;
+      assert.deepEqual(snap.rewards.find((r) => r.id === id), { id, game: 'pour', label: '테스트 할인', type: 'discount', amount: 500, item: null, threshold: 100, soldOut: false, got: false });
+      assert.ok((await E.get('/api/board')).json.rewards.some((r) => r.id === id && r.remaining === 3 && r.stock === 3));
+      assert.equal((await s.post(`/api/staff/rewards/${id}`, { label: '실시간 이름' })).status, 200);
+      await gs.until((b) => b.includes('실시간 이름'));
+    } finally { gs.close(); }
+    await s.post(`/api/staff/rewards/${id}`, { label: '테스트 할인' });
+    // A earns it with the original definition
+    const fa = await playOnce(A, tk[0], 'pour', 450);
+    const ca = fa.json.coupons.find((x) => x.rewardId === id);
+    assert.deepEqual([ca.label, ca.type, ca.amount], ['테스트 할인', 'discount', 500]);
+    // staff edits label + amount: A's coupon is unchanged, B gets the new values
+    assert.equal((await s.post(`/api/staff/rewards/${id}`, { label: '바뀐 이름', amount: 700 })).json.reward.amount, 700);
+    const cA = (await A.get(`/api/t/${tk[0]}`)).json.coupons.find((x) => x.code === ca.code);
+    assert.deepEqual([cA.label, cA.amount], ['테스트 할인', 500]);
+    const oA = await order(A, tk[0], [{ id: 'tteokbokki', qty: 1 }], { couponCode: ca.code });
+    assert.equal(oA.json.order.couponDiscount, 500, 'applying uses the stored amount');
+    const fb = await playOnce(B, tk[1], 'pour', 450);
+    const cb = fb.json.coupons.find((x) => x.rewardId === id);
+    assert.deepEqual([cb.label, cb.amount], ['바뀐 이름', 700]);
+    // threshold edits apply to later plays only
+    await s.post(`/api/staff/rewards/${id}`, { threshold: 500 });
+    const fc = await playOnce(C, tk[2], 'pour', 450);
+    assert.equal(fc.json.rewards.find((r) => r.rewardId === id).result, 'low_score');
+    await s.post(`/api/staff/rewards/${id}`, { threshold: 100 });
+    // type change to item: later coupons are item coupons, B's discount coupon still applies
+    const asItem = await s.post(`/api/staff/rewards/${id}`, { type: 'item' });
+    assert.deepEqual([asItem.json.reward.type, asItem.json.reward.amount, asItem.json.reward.item], ['item', null, '바뀐 이름']);
+    const fcc = await playOnce(new Client(srv), tk[2], 'pour', 450); // another device at the same seat (avoids the per-device gap)
+    const cc = fcc.json.coupons.find((x) => x.rewardId === id);
+    assert.deepEqual([cc.type, cc.amount, cc.item], ['item', null, '바뀐 이름']);
+    assert.equal((await order(C, tk[2], [{ id: 'tteokbokki', qty: 1 }], { couponCode: cc.code })).json.error, 'coupon_not_discount');
+    assert.equal((await order(B, tk[1], [{ id: 'tteokbokki', qty: 1 }], { couponCode: cb.code })).json.order.couponDiscount, 700);
+    // type back to discount needs an amount
+    assert.equal((await s.post(`/api/staff/rewards/${id}`, { type: 'discount' })).json.error, 'bad_amount');
+    assert.equal((await s.post(`/api/staff/rewards/${id}`, { type: 'discount', amount: 900 })).json.reward.amount, 900);
+    // deactivate: hidden from guests/board, nothing is issued, existing coupons stay valid
+    await s.post(`/api/staff/rewards/${id}`, { active: false });
+    assert.ok(!(await D.get(`/api/t/${tk[3]}`)).json.rewards.some((r) => r.id === id));
+    assert.ok(!(await D.get('/api/board')).json.rewards.some((r) => r.id === id));
+    const fd = await playOnce(D, tk[3], 'pour', 450);
+    assert.ok(!fd.json.rewards.some((r) => r.rewardId === id), 'inactive reward is not offered');
+    assert.ok(!fd.json.coupons.some((x) => x.rewardId === id));
+    assert.equal((await s.post('/api/staff/coupons/redeem', { code: cc.code })).status, 200, 'a coupon of a deactivated reward can still be redeemed');
+    await s.post(`/api/staff/rewards/${id}`, { active: true });
+    assert.ok((await D.get(`/api/t/${tk[3]}`)).json.rewards.some((r) => r.id === id));
+    // issued so far: A, B, C = 3 of stock 3: sold out
+    const sold = (await s.get('/api/staff/rewards')).json.rewards.find((r) => r.id === id);
+    assert.deepEqual([sold.issued, sold.remaining], [3, 0]);
+    const fd2 = await playOnce(new Client(srv), tk[3], 'pour', 450);
+    assert.equal(fd2.json.rewards.find((r) => r.rewardId === id).result, 'sold_out');
+    // stock can never go below issued, but equal is fine, and the old stock endpoint obeys the same rule
+    const below = await s.post(`/api/staff/rewards/${id}`, { stock: 2 });
+    assert.equal(below.status, 400); assert.equal(below.json.error, 'stock_below_issued'); assert.equal(below.json.issued, 3);
+    assert.equal((await s.post(`/api/staff/rewards/${id}`, { stock: 3 })).json.reward.remaining, 0);
+    assert.equal((await s.post(`/api/staff/rewards/${id}/stock`, { stock: 2 })).json.error, 'stock_below_issued');
+    assert.equal((await s.post(`/api/staff/rewards/${id}/stock`, { stock: 6 })).status, 200);
+    assert.equal((await s.post(`/api/staff/rewards/${id}`, {})).json.error, 'nothing_to_update');
+    assert.equal((await s.post('/api/staff/rewards/nope', { stock: 1 })).status, 404);
+    // several rewards of one game each pay at most once per seat
+    assert.equal((await s.post('/api/staff/rewards', { label: '두번째', game: 'pour', threshold: 100, type: 'item', stock: 5 })).status, 200);
+    const again = await playOnce(new Client(srv), tk[0], 'pour', 450);
+    assert.deepEqual(again.json.rewards.filter((r) => r.result === 'already_got').map((r) => r.rewardId).sort(), ['drink', id].sort());
+    assert.equal(again.json.rewards.filter((r) => r.result === 'issued').length, 1, 'only the new reward');
+  } finally { await srv.stop(); }
+});
+
+test('rewards: delete only when never issued; reset keeps definitions and configured stock', async () => {
+  const { srv, s, tk } = await rewardSetup();
+  try {
+    const g = new Client(srv);
+    const fresh = (await s.post('/api/staff/rewards', { label: '지울 보상', game: 'cheers', threshold: 10, type: 'item', stock: 5 })).json.reward.id;
+    const del = await s.post(`/api/staff/rewards/${fresh}/delete`);
+    assert.equal(del.status, 200);
+    assert.ok(!del.json.rewards.some((x) => x.id === fresh));
+    assert.equal((await s.post(`/api/staff/rewards/${fresh}/delete`)).status, 404);
+    // issued -> 409 in_use
+    const keep = (await s.post('/api/staff/rewards', { label: '발급될 보상', game: 'pour', threshold: 1, type: 'item', stock: 5 })).json.reward.id;
+    await playOnce(g, tk[0], 'pour', 450);
+    const busy = await s.post(`/api/staff/rewards/${keep}/delete`);
+    assert.equal(busy.status, 409); assert.equal(busy.json.error, 'in_use');
+    // reset: issued counts and coupons go, definitions / active flags / configured stock stay
+    await s.post('/api/staff/rewards/drink', { stock: 7 });
+    await s.post('/api/staff/rewards/d1000', { active: false });
+    await s.post('/api/staff/hourly-reward', { label: '시간 보상', enabled: false });
+    const before = (await s.get('/api/staff/rewards')).json.rewards;
+    assert.ok(before.find((x) => x.id === 'drink').issued > 0);
+    assert.equal((await s.post('/api/staff/reset', { confirm: '초기화' })).status, 200);
+    const after = (await s.get('/api/staff/rewards')).json;
+    assert.deepEqual(after.rewards.map((x) => [x.id, x.label, x.stock, x.active, x.threshold]), before.map((x) => [x.id, x.label, x.stock, x.active, x.threshold]));
+    assert.ok(after.rewards.every((x) => x.issued === 0 && x.used === 0 && x.remaining === x.stock));
+    assert.equal(after.rewards.find((x) => x.id === 'drink').stock, 7, 'configured stock is kept, remaining returns to it');
+    assert.equal(after.rewards.find((x) => x.id === 'd1000').active, false);
+    assert.deepEqual([after.hourly.label, after.hourly.enabled], ['시간 보상', false], 'the hourly reward setting is kept too');
+    assert.deepEqual((await g.get(`/api/t/${tk[0]}`)).json.coupons, []);
+    // nothing was issued any more: now it can be deleted
+    assert.equal((await s.post(`/api/staff/rewards/${keep}/delete`)).status, 200);
+  } finally { await srv.stop(); }
+});
+
+test('hourly ranking reward: label, type/amount and on/off are staff-editable', async () => {
+  const { srv, s, tk } = await rewardSetup();
+  try {
+    assert.equal((await s.post('/api/staff/hourly-reward', {})).json.error, 'nothing_to_update');
+    for (const [body, code] of [[{ label: '' }, 'bad_label'], [{ label: 'a'.repeat(21) }, 'bad_label'], [{ type: 'x' }, 'bad_type'], [{ type: 'discount' }, 'bad_amount'],
+      [{ type: 'discount', amount: 150 }, 'bad_amount'], [{ type: 'discount', amount: 100100 }, 'bad_amount'], [{ enabled: 'x' }, 'bad_enabled']]) {
+      const r = await s.post('/api/staff/hourly-reward', body);
+      assert.equal(r.status, 400, JSON.stringify(body)); assert.equal(r.json.error, code, JSON.stringify(body));
+    }
+    assert.equal((await new Client(srv).post('/api/staff/hourly-reward', { enabled: false })).status, 401);
+    const upd = await s.post('/api/staff/hourly-reward', { label: '시간대 1등 할인', type: 'discount', amount: 2000 });
+    assert.deepEqual(upd.json.hourly, { enabled: true, label: '시간대 1등 할인', type: 'discount', amount: 2000, item: '시간대 1등 할인' });
+    assert.deepEqual((await s.get('/api/staff/state')).json.hourly, upd.json.hourly);
+    assert.deepEqual((await new Client(srv).get('/api/board')).json.hourly, upd.json.hourly);
+    const g = new Client(srv);
+    await playOnce(g, tk[0], 'pour', 300);
+    // switched off: no award
+    await s.post('/api/staff/hourly-reward', { enabled: false });
+    const off = await s.post('/api/staff/award-hour');
+    assert.equal(off.status, 409); assert.equal(off.json.error, 'hourly_disabled');
+    await s.post('/api/staff/hourly-reward', { enabled: true });
+    const won = await s.post('/api/staff/award-hour');
+    assert.equal(won.status, 200, won.text);
+    assert.deepEqual([won.json.coupon.type, won.json.coupon.amount, won.json.coupon.label], ['discount', 2000, '시간대 1등 할인']);
+    // it is a normal discount coupon: usable on an order
+    const o = await order(g, tk[0], [{ id: 'tteokbokki', qty: 1 }], { couponCode: won.json.coupon.code });
+    assert.deepEqual([o.json.order.couponDiscount, o.json.order.total], [2000, 6000]);
+    // back to an item reward
+    const item = await s.post('/api/staff/hourly-reward', { type: 'item' });
+    assert.deepEqual([item.json.hourly.type, item.json.hourly.amount], ['item', null]);
+  } finally { await srv.stop(); }
+});
+
+test('rewards.json seeds once; an invalid file starts with no rewards and a clear log line', async () => {
+  const mk = (over) => ({ ...REWARDS, rewards: over });
+  const r1 = { id: 'a1', game: 'pour', threshold: 100, type: 'item', label: 'A', stock: 3 };
+  const variants = {
+    'duplicate id': mk([r1, { ...r1 }]), 'bad threshold': mk([{ ...r1, threshold: 501 }]), 'unknown game': mk([{ ...r1, game: 'darts' }]),
+    'bad type': mk([{ ...r1, type: 'gift' }]), 'negative stock': mk([{ ...r1, stock: -1 }]), 'discount without amount': mk([{ ...r1, type: 'discount' }]),
+    'bad amount': mk([{ ...r1, type: 'discount', amount: 150 }]), 'long label': mk([{ ...r1, label: 'x'.repeat(21) }]),
+    'bad id': mk([{ ...r1, id: 'has space' }]), 'not an array': { ...REWARDS, rewards: 'nope' },
+    'too many': mk(Array.from({ length: 13 }, (_, i) => ({ ...r1, id: 'r' + i, label: 'L' + i }))),
+  };
+  for (const [name, rw] of Object.entries(variants)) {
+    const srv = await boot({ rewards: rw });
+    let again;
+    try {
+      assert.equal((await new Client(srv).get('/api/health')).status, 200, name);
+      const s = await staffLogin(srv);
+      assert.deepEqual((await s.get('/api/staff/rewards')).json.rewards, [], name);
+      assert.match(srv.log(), /rewards\.json is invalid/, name);
+      await srv.stop({ keep: true });
+      fs.writeFileSync(path.join(srv.dir, 'cfg', 'rewards.json'), JSON.stringify(REWARDS)); // fixed: nothing was seeded, so it is picked up now
+      again = await boot({ dir: srv.dir });
+      assert.equal((await (await staffLogin(again)).get('/api/staff/rewards')).json.rewards.length, 3, name);
+    } finally { await srv.stop({ keep: true }); if (again) await again.stop(); fs.rmSync(srv.dir, { recursive: true, force: true }); }
+  }
+  // once seeded the file is never read again, even after staff delete every reward
+  const srv = await boot();
+  let srv2; let srv3;
+  try {
+    const s = await staffLogin(srv);
+    await s.post('/api/staff/rewards/drink', { stock: 11 });
+    await srv.stop({ keep: true });
+    fs.writeFileSync(path.join(srv.dir, 'cfg', 'rewards.json'), JSON.stringify({ ...REWARDS, rewards: [{ ...r1, id: 'drink', stock: 99, label: '파일에서' }] }));
+    srv2 = await boot({ dir: srv.dir });
+    const s2 = await staffLogin(srv2);
+    const l = (await s2.get('/api/staff/rewards')).json.rewards;
+    assert.deepEqual([l.length, l[0].stock, l[0].label], [3, 11, '음료 1잔'], 'edits persist, the file is not re-applied');
+    for (const x of l) assert.equal((await s2.post(`/api/staff/rewards/${x.id}/delete`)).status, 200);
+    await srv2.stop({ keep: true });
+    srv3 = await boot({ dir: srv.dir });
+    assert.deepEqual((await (await staffLogin(srv3)).get('/api/staff/rewards')).json.rewards, [], 'not re-seeded after deleting everything');
+  } finally { await srv.stop({ keep: true }); if (srv2) await srv2.stop({ keep: true }); if (srv3) await srv3.stop(); fs.rmSync(srv.dir, { recursive: true, force: true }); }
+});
+
+// ======================= A. menu photos =======================
+const jpg = (n = 200) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(Math.max(0, n - 4), 1)]);
+const png = (n = 200) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(Math.max(0, n - 8), 2)]);
+const webp = (n = 200) => { const b = Buffer.alloc(Math.max(12, n), 3); b.write('RIFF', 0, 'latin1'); b.write('WEBP', 8, 'latin1'); return b; };
+const PHOTO_URL_RE = /^\/photos\/\d+-[a-f0-9]{8}\.(jpg|png|webp)$/;
+const upload = (srv, s, id, type, body, extra = {}) => raw(srv, 'POST', `${srv.base}/api/staff/menu/items/${id}/photo`, { ...(type ? { 'content-type': type } : {}), cookie: s.cookieHeader(), ...extra }, body);
+const photoFiles = (srv) => fs.readdirSync(path.join(srv.data, 'photos')).sort();
+const body = (r) => JSON.parse(r.text);
+// a request that is streamed (chunked, no Content-Length) or announces a huge length, answered as soon as the server decides
+function rawStream(srv, p, headers, chunks) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: srv.port, method: 'POST', path: p, headers }, (res) => {
+      let t = ''; res.on('data', (d) => { t += d; });
+      res.on('end', () => resolve({ status: res.statusCode, text: t, headers: res.headers }));
+    });
+    req.on('error', (e) => { if (e.code === 'ECONNRESET' || e.code === 'EPIPE') return; reject(e); });
+    (async () => { for (const c of chunks) { if (req.destroyed) return; req.write(c); await delay(5); } req.end(); })();
+  });
+}
+
+test('photos: staff upload, public serving with fixed headers, menu JSON carries a BASE-relative url', async () => {
+  const srv = await boot();
+  try {
+    const s = await staffLogin(srv);
+    const id = (await s.get('/api/staff/state')).json.menu.items[0].id;
+    assert.equal((await new Client(srv).get('/api/menu')).json.items.find((i) => i.id === id).photo, null);
+    for (const [type, make, ext] of [['image/jpeg', jpg, 'jpg'], ['image/png', png, 'png'], ['image/webp', webp, 'webp']]) {
+      const bytes = make(500);
+      const r = await upload(srv, s, id, type, bytes, { 'content-disposition': 'attachment; filename="../../evil.php"' });
+      assert.equal(r.status, 200, r.text);
+      const item = body(r).item;
+      assert.match(item.photo, PHOTO_URL_RE);
+      assert.ok(item.photo.endsWith('.' + ext));
+      assert.ok(!item.photo.includes('evil'), 'client file names are never used');
+      assert.equal(body(r).menu.items.find((i) => i.id === id).photo, item.photo);
+      // guests and staff both see it
+      assert.equal((await new Client(srv).get('/api/menu')).json.items.find((i) => i.id === id).photo, item.photo);
+      assert.equal((await new Client(srv).get(`/api/t/${(await s.get('/api/staff/tables')).json.tables[0].token}`)).json.menu.items.find((i) => i.id === id).photo, item.photo);
+      // public file with fixed headers
+      const f = await fetch(srv.origin + item.photo);
+      assert.equal(f.status, 200);
+      assert.equal(f.headers.get('content-type'), type);
+      assert.equal(f.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(f.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+      assert.equal(f.headers.get('content-security-policy'), "default-src 'none'");
+      assert.ok(Buffer.from(await f.arrayBuffer()).equals(bytes));
+      assert.equal(photoFiles(srv).length, 1, 'a replace leaves exactly one file');
+    }
+    const url = (await new Client(srv).get('/api/menu')).json.items.find((i) => i.id === id).photo;
+    const head = await raw(srv, 'HEAD', url);
+    assert.equal(head.status, 200); assert.equal(head.text, '');
+    for (const m of ['POST', 'PUT', 'DELETE']) assert.equal((await raw(srv, m, url, { 'content-type': 'application/json' }, '{}')).status, 404, m);
+  } finally { await srv.stop(); }
+});
+
+test('photos: auth, same-origin, content-type and magic-byte validation, size limits', async () => {
+  const srv = await boot();
+  try {
+    const s = await staffLogin(srv);
+    const id = 'cola';
+    assert.equal((await raw(srv, 'POST', `/api/staff/menu/items/${id}/photo`, { 'content-type': 'image/png' }, png())).status, 401);
+    assert.equal((await raw(srv, 'POST', `/api/staff/menu/items/${id}/photo`, { 'content-type': 'image/png', cookie: 'booth_s=forged' }, png())).status, 401);
+    assert.equal((await upload(srv, s, id, 'image/png', png(), { origin: 'https://evil.example' })).status, 403);
+    assert.equal((await upload(srv, s, id, 'image/png', png(), { 'sec-fetch-site': 'cross-site' })).status, 403);
+    assert.equal((await upload(srv, s, id, 'image/png', png(), { 'sec-fetch-site': 'same-origin' })).status, 200);
+    // declared type
+    for (const t of ['application/json', 'text/plain', 'image/gif', 'image/svg+xml', 'application/octet-stream', 'multipart/form-data']) {
+      const r = await upload(srv, s, id, t, png());
+      assert.equal(r.status, 415, t); assert.equal(body(r).error, 'unsupported_media_type', t);
+    }
+    assert.equal((await upload(srv, s, id, null, png())).status, 415, 'no content-type');
+    // content must match the declared type
+    const cases = [
+      ['empty', 'image/png', Buffer.alloc(0), 400, 'bad_image'], ['text as png', 'image/png', Buffer.from('<svg onload=alert(1)>'), 400, 'bad_image'],
+      ['png bytes as jpeg', 'image/jpeg', png(), 415, 'type_mismatch'], ['jpeg bytes as png', 'image/png', jpg(), 415, 'type_mismatch'],
+      ['webp bytes as png', 'image/png', webp(), 415, 'type_mismatch'], ['truncated png signature', 'image/png', png().subarray(0, 7), 400, 'bad_image'],
+      ['riff without webp', 'image/webp', Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(8, 1)]), 400, 'bad_image'], ['two jpeg bytes', 'image/jpeg', Buffer.from([0xff, 0xd8]), 400, 'bad_image'],
+      ['gif bytes as png', 'image/png', Buffer.from('GIF89a......'), 400, 'bad_image'],
+    ];
+    for (const [name, type, bytes, status, code] of cases) {
+      const r = await upload(srv, s, id, type, bytes);
+      assert.equal(r.status, status, name); assert.equal(body(r).error, code, name);
+    }
+    assert.equal((await upload(srv, s, 'nope-item', 'image/png', png())).status, 404);
+    // size: exactly 400 KB passes, one byte more is refused
+    assert.equal((await upload(srv, s, id, 'image/jpeg', jpg(400 * 1024))).status, 200);
+    const tooBig = await upload(srv, s, id, 'image/jpeg', jpg(400 * 1024 + 1));
+    assert.equal(tooBig.status, 413); assert.equal(body(tooBig).error, 'too_large');
+    // a huge announced length is refused before the body is read; a streamed (chunked) body is cut off at the limit
+    const announced = await rawStream(srv, `/api/staff/menu/items/${id}/photo`, { 'content-type': 'image/jpeg', cookie: s.cookieHeader(), 'content-length': String(50 * 1024 * 1024) }, [jpg(1000)]);
+    assert.equal(announced.status, 413);
+    const chunks = Array.from({ length: 12 }, () => jpg(50 * 1024));
+    const streamed = await rawStream(srv, `/api/staff/menu/items/${id}/photo`, { 'content-type': 'image/jpeg', cookie: s.cookieHeader(), 'transfer-encoding': 'chunked' }, chunks);
+    assert.equal(streamed.status, 413);
+    assert.equal(photoFiles(srv).length, 1, 'refused uploads stored nothing (and no temp files are left)');
+    assert.ok(photoFiles(srv).every((f) => /^\d+-[a-f0-9]{8}\.(jpg|png|webp)$/.test(f)));
+    // the JSON limit (16 KB) still applies to JSON routes
+    const bigJson = await raw(srv, 'POST', '/api/staff/ordering', { 'content-type': 'application/json', cookie: s.cookieHeader() }, JSON.stringify({ open: true, pad: 'x'.repeat(20000) }));
+    assert.equal(bigJson.status, 413);
+  } finally { await srv.stop(); }
+});
+
+test('photos: replace removes the old file, delete / item delete remove files, orphans are cleaned at boot, reset keeps photos', async () => {
+  const srv = await boot();
+  let srv2;
+  try {
+    const s = await staffLogin(srv);
+    const a = await mkItem(s, '사진 메뉴 A', 1000, '안주');
+    const b = await mkItem(s, '사진 메뉴 B', 1000, '안주');
+    const first = body(await upload(srv, s, a, 'image/png', png(300))).item.photo;
+    const second = body(await upload(srv, s, a, 'image/jpeg', jpg(300))).item.photo;
+    assert.notEqual(first, second);
+    assert.equal((await fetch(srv.origin + first)).status, 404, 'the old URL is gone');
+    assert.equal((await fetch(srv.origin + second)).status, 200);
+    assert.equal(photoFiles(srv).length, 1);
+    const photoB = body(await upload(srv, s, b, 'image/webp', webp(300))).item.photo;
+    assert.equal(photoFiles(srv).length, 2);
+    // explicit delete (idempotent)
+    const del = await s.post(`/api/staff/menu/items/${b}/photo/delete`);
+    assert.equal(del.status, 200); assert.equal(del.json.item.photo, null);
+    assert.equal((await fetch(srv.origin + photoB)).status, 404);
+    assert.equal((await s.post(`/api/staff/menu/items/${b}/photo/delete`)).status, 200);
+    assert.equal((await s.post('/api/staff/menu/items/nope/photo/delete')).status, 404);
+    assert.equal((await new Client(srv).post(`/api/staff/menu/items/${b}/photo/delete`)).status, 401);
+    // deleting the item deletes its photo; an item that was ordered cannot be deleted and keeps its photo
+    const c = await mkItem(s, '사진 메뉴 C', 1000, '안주');
+    await upload(srv, s, c, 'image/png', png());
+    assert.equal(photoFiles(srv).length, 2);
+    assert.equal((await s.post(`/api/staff/menu/items/${c}/delete`)).status, 200);
+    assert.equal(photoFiles(srv).length, 1);
+    const tk = (await s.get('/api/staff/tables')).json.tables[0].token;
+    assert.equal((await order(new Client(srv), tk, [{ id: a, qty: 1 }])).status, 201);
+    assert.equal((await s.post(`/api/staff/menu/items/${a}/delete`)).json.error, 'in_use');
+    assert.equal(photoFiles(srv).length, 1);
+    // reset keeps the menu and its photos
+    await s.post('/api/staff/reset', { confirm: '초기화' });
+    assert.equal((await fetch(srv.origin + second)).status, 200);
+    assert.equal((await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === a).photo, second);
+    // orphans (crash leftovers, unreferenced files) are removed on boot; referenced files stay
+    await srv.stop({ keep: true });
+    const dir = path.join(srv.data, 'photos');
+    fs.writeFileSync(path.join(dir, '99-deadbeef.png'), png());
+    fs.writeFileSync(path.join(dir, '.abc123.tmp'), 'partial');
+    fs.writeFileSync(path.join(dir, 'random.txt'), 'x');
+    srv2 = await boot({ dir: srv.dir });
+    const s2 = await staffLogin(srv2);
+    assert.deepEqual(photoFiles(srv2), [second.slice('/photos/'.length)]);
+    assert.equal((await fetch(srv2.origin + second)).status, 200, 'photo survives a restart');
+    assert.equal((await s2.get('/api/staff/state')).json.menu.items.find((i) => i.id === a).photo, second);
+    // photos are not part of the SQLite backup
+    await s2.post('/api/staff/reset', { confirm: '초기화' }); // takes a safety backup
+    assert.ok(fs.readdirSync(path.join(srv2.data, 'backup')).every((f) => f.endsWith('.db')));
+  } finally { await srv.stop({ keep: true }); if (srv2) await srv2.stop(); else fs.rmSync(srv.dir, { recursive: true, force: true }); }
+});
+
+test('photos: total storage cap (409 photo_storage_full); replacing and deleting free space', async () => {
+  const srv = await boot({ env: { PHOTO_STORAGE_MAX: String(1000 * 1000) } });
+  try {
+    const s = await staffLogin(srv);
+    const ids = [];
+    for (let i = 0; i < 5; i++) ids.push(await mkItem(s, '캡 메뉴 ' + i, 1000, '안주'));
+    for (let i = 0; i < 3; i++) assert.equal((await upload(srv, s, ids[i], 'image/jpeg', jpg(300 * 1000))).status, 200, `photo ${i}`);
+    const full = await upload(srv, s, ids[3], 'image/jpeg', jpg(300 * 1000));
+    assert.equal(full.status, 409); assert.equal(body(full).error, 'photo_storage_full');
+    assert.equal((await upload(srv, s, ids[3], 'image/jpeg', jpg(90 * 1000))).status, 200, 'a smaller one still fits');
+    // replacing counts only the difference
+    assert.equal((await upload(srv, s, ids[0], 'image/png', png(300 * 1000))).status, 200);
+    assert.equal(body(await upload(srv, s, ids[0], 'image/png', png(400 * 1000))).error, 'photo_storage_full');
+    await s.post(`/api/staff/menu/items/${ids[1]}/photo/delete`);
+    assert.equal((await upload(srv, s, ids[4], 'image/jpeg', jpg(300 * 1000))).status, 200);
+  } finally { await srv.stop(); }
+});
+
+test('photos: only well-formed names are served; nothing outside the photos directory; works under BASE_PATH', async () => {
+  const srv = await boot({ base: '/booth' });
+  try {
+    const s = await staffLogin(srv);
+    const item = body(await upload(srv, s, 'cola', 'image/png', png())).item;
+    assert.match(item.photo, PHOTO_URL_RE);
+    assert.equal((await raw(srv, 'GET', '/booth' + item.photo)).status, 200, 'served under BASE');
+    assert.equal((await raw(srv, 'GET', item.photo)).status, 404, 'not at the root');
+    const name = item.photo.slice('/photos/'.length);
+    for (const p of ['/photos/..%2fdata%2fbooth.db', '/photos/..%2f..%2fserver.js', '/photos/x.jpg', '/photos/1-abcdef12.exe',
+      '/photos/1-ABCDEF12.jpg', '/photos/1-abcdef1.jpg', '/photos/1-abcdef123.jpg', `/photos/${name}%00.png`, '/photos/', '/photos/.' + name, '/photos/12-abcdef12.png', '/photos/booth.db']) {
+      const r = await raw(srv, 'GET', '/booth' + p);
+      assert.ok([404, 400].includes(r.status), `${p} -> ${r.status}`);
+      assert.ok(!r.text.includes('SQLite format') && !r.text.includes('createStore'), p);
+    }
+  } finally { await srv.stop(); }
+});
+
+// ======================= upgrade of a booth.db created by the previous release (HEAD 3ba4c20) =======================
+test('a database created by the previous release is upgraded in place: rewards, member settings and photo column', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-head-'));
+  fs.mkdirSync(path.join(dir, 'data'));
+  const old = new DatabaseSync(path.join(dir, 'data', 'booth.db'));
+  old.exec(HEAD_SCHEMA);
+  const tokensOld = [];
+  for (let i = 1; i <= 10; i++) { const t = crypto.randomBytes(12).toString('base64url'); tokensOld.push(t); old.prepare('INSERT INTO tables(id, token) VALUES(?,?)').run(i, t); } // production: 10 rows
+  old.prepare("INSERT INTO menu_categories(id, name, sort) VALUES(1, '안주', 0)").run();
+  old.prepare("INSERT INTO menu_items(id, name, price, category_id, descr, sort) VALUES('legacy-item', '레거시 메뉴', 5000, 1, '', 0)").run();
+  old.prepare("INSERT INTO settings(k, v) VALUES('menu_seeded', '1')").run();
+  old.prepare("INSERT INTO settings(k, v) VALUES('member_discount_pct', '15')").run();
+  old.prepare("INSERT INTO reward_stock(id, stock, issued) VALUES('drink', 9, 3)").run();
+  old.prepare("INSERT INTO reward_stock(id, stock, issued) VALUES('d1000', 40, 2)").run();
+  const mkCoupon = old.prepare("INSERT INTO coupons(code, reward_id, source, type, amount, label, item, table_id, seat, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,'issued',?)");
+  mkCoupon.run('LEGACY', 'drink', 'score', 'item', null, '옛 음료', '옛 음료', 1, 1, Date.now());
+  mkCoupon.run('LEGDSC', 'd1000', 'score', 'discount', 1000, '옛 할인', null, 2, 1, Date.now());
+  assert.ok(!old.prepare('PRAGMA table_info(menu_items)').all().some((c) => c.name === 'photo'), 'fixture has the previous schema');
+  assert.equal(old.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='rewards'").get().n, 0);
+  old.close();
+  let srv; let srv2;
+  try {
+    srv = await boot({ dir, tablesCount: 8, env: { COMS_ME_URL: fake.url + ME_PATH, PAY_BANK: '신한', PAY_ACCOUNT: '110-123-456789', PAY_HOLDER: '동아리' } }); // production tables.json now says 8
+    const s = await staffLogin(srv);
+    const st = (await s.get('/api/staff/state')).json;
+    const byId = Object.fromEntries(st.rewards.map((r) => [r.id, r]));
+    assert.deepEqual([byId.drink.stock, byId.drink.issued, byId.drink.remaining], [9, 3, 6], 'live stock and issued counts carried over');
+    assert.deepEqual([byId.d1000.stock, byId.d1000.issued], [40, 2]);
+    assert.deepEqual([byId.dbig.stock, byId.dbig.issued], [50, 0], 'rewards without a legacy row start from rewards.json');
+    assert.ok(st.rewards.every((r) => r.active === true));
+    assert.deepEqual(st.menu.items.map((i) => [i.id, i.photo]), [['legacy-item', null]], 'menu comes from the DB, not menu.json');
+    assert.deepEqual(st.memberDiscount, { enabled: true, mode: 'percent', pct: 15, amount: 1000, minOrder: 0, maxDiscount: 0, includeAssociate: true, perMemberLimit: 20, stackWithCoupon: true });
+    assert.equal(st.memberDiscountPct, 15);
+    assert.deepEqual((await s.get('/api/staff/tables')).json.tables.map((t) => t.token), tokensOld.slice(0, 8), 'effective count is 8 (tables.json seeds the new setting); tokens 1..8 unchanged');
+    assert.equal(st.tableCount, 8);
+    assert.deepEqual(st.tables.map((t) => t.number), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(await guestOk(srv, tokensOld[8]), 404, 'table 9 stays hidden');
+    // payment settings were seeded from the environment; deposit notices and the hook secret exist
+    assert.deepEqual(st.pay, { bank: '신한', account: '110-123-456789', holder: '동아리', tossEnabled: false, kakaoPayUrl: '', requireDepositor: false, changedAt: null });
+    assert.deepEqual(st.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000 }, 'auto-confirm ships OFF');
+    assert.match((await s.get('/api/staff/deposit-hook')).json.secret, /^[a-f0-9]{64}$/);
+    assert.deepEqual((await s.get('/api/staff/deposits')).json.notices, []);
+    assert.deepEqual((await new Client(srv).get(`/api/t/${tokensOld[0]}`)).json.pay, { bank: '신한', account: '110-123-456789', holder: '동아리', tossEnabled: false, kakaoPayUrl: '', requireDepositor: false });
+    // old coupons keep their own stored label/type/amount and still work
+    const g = new Client(srv);
+    const snap1 = (await g.get(`/api/t/${tokensOld[0]}`)).json;
+    assert.deepEqual(snap1.coupons.map((c) => [c.code, c.label, c.type]), [['LEGACY', '옛 음료', 'item']]);
+    assert.equal((await s.post('/api/staff/coupons/redeem', { code: 'LEGACY' })).status, 200);
+    const m = new Client(srv); m.jar.token = fake.member(9901); m.jar.booth_d = await realDevice(srv);
+    const o = await order(m, tokensOld[1], [{ id: 'legacy-item', qty: 1 }], { couponCode: 'LEGDSC' });
+    assert.equal(o.status, 201, o.text);
+    assert.deepEqual([o.json.order.memberDiscount, o.json.order.couponDiscount, o.json.order.total], [700, 1000, 3300], '15% of 5,000 = 750 -> 700, then the stored 1,000 coupon');
+    // the migrated menu accepts photos and the new reward API works
+    assert.match(body(await upload(srv, s, 'legacy-item', 'image/png', png())).item.photo, PHOTO_URL_RE);
+    assert.equal((await s.post('/api/staff/rewards', { label: '새 보상', game: 'pour', threshold: 10, type: 'item', stock: 1 })).status, 200);
+    assert.equal((await s.post('/api/staff/rewards/drink', { stock: 2 })).json.error, 'stock_below_issued');
+    // the old orders table gets the new columns: an order with a depositor, paid by an automatic deposit notice
+    const dep = await order(new Client(srv), tokensOld[2], [{ id: 'legacy-item', qty: 1 }], { depositor: '홍길동' });
+    assert.equal(dep.json.order.depositor, '홍길동');
+    assert.equal((await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: true })).status, 200);
+    const hook = (await s.get('/api/staff/deposit-hook')).json.secret;
+    assert.equal(JSON.parse((await hookPost(srv, hook, { text: smsText(5000, '홍길동', 3) })).text).status, 'matched');
+    assert.equal((await s.get('/api/staff/state')).json.orders.find((x) => x.id === dep.json.order.id).paidBy, 'auto');
+    // raising the count brings the hidden tables (and their printed QR codes) back; the old rows were kept
+    assert.equal((await s.post('/api/staff/tables/count', { count: 10 })).status, 200);
+    assert.equal(await guestOk(srv, tokensOld[8]), 200);
+    assert.deepEqual((await s.get('/api/staff/tables')).json.tables.map((t) => t.token), tokensOld);
+    assert.equal((await s.post('/api/staff/tables/count', { count: 12 })).status, 200);
+    assert.equal((await s.get('/api/staff/tables')).json.tables.length, 12);
+    assert.equal((await s.post('/api/staff/tables/count', { count: 8 })).status, 200);
+    await srv.stop({ keep: true });
+    // booting again changes nothing (no duplicate rewards, no failing ALTERs, nothing re-seeded)
+    srv2 = await boot({ dir, tablesCount: 40, env: { PAY_BANK: '우리' } });
+    const s2 = await staffLogin(srv2);
+    const st2 = (await s2.get('/api/staff/state')).json;
+    assert.equal(st2.tableCount, 8, 'the setting wins over tables.json after the first boot');
+    assert.equal(st2.pay.bank, '신한', 'and the DB wins over env for payment settings');
+    assert.equal(st2.rewards.length, 4);
+    assert.deepEqual(st2.rewards.find((r) => r.id === 'drink').stock, 9);
+    assert.equal(st2.menu.items.length, 1);
+    assert.equal(st2.memberDiscount.pct, 15);
+    const chk = new DatabaseSync(path.join(dir, 'data', 'booth.db'), { readOnly: true });
+    assert.ok(chk.prepare('PRAGMA table_info(menu_items)').all().some((c) => c.name === 'photo'));
+    assert.equal(chk.prepare("SELECT v FROM settings WHERE k='rewards_seeded'").get().v, '1');
+    chk.close();
+  } finally { if (srv) await srv.stop({ keep: true }); if (srv2) await srv2.stop({ keep: true }); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ======================= D. table count / E. QR rotation =======================
+const tablesOf = async (s) => (await s.get('/api/staff/tables')).json.tables;
+const guestOk = async (srv, token) => (await new Client(srv).get(`/api/t/${token}`)).status;
+const pageOk = async (srv, token) => (await new Client(srv).get(`/t/${token}`)).status;
+
+test('table count: live setting; raising adds tokens, lowering hides tables but keeps their rows and QR codes', async () => {
+  const srv = await boot({ tablesCount: 3 });
+  let srv2;
+  try {
+    const s = await staffLogin(srv);
+    assert.equal((await s.get('/api/staff/state')).json.tableCount, 3);
+    assert.equal((await new Client(srv).post('/api/staff/tables/count', { count: 4 })).status, 401);
+    for (const bad of [0, 51, -1, 1.5, '3', null, undefined, 100]) {
+      const r = await s.post('/api/staff/tables/count', { count: bad });
+      assert.equal(r.status, 400, String(bad)); assert.equal(r.json.error, 'bad_count', String(bad));
+    }
+    const before = await tablesOf(s);
+    const up = await s.post('/api/staff/tables/count', { count: 5 });
+    assert.deepEqual([up.status, up.json.ok, up.json.tableCount], [200, true, 5]);
+    const t5 = await tablesOf(s);
+    assert.deepEqual(t5.map((t) => t.number), [1, 2, 3, 4, 5]);
+    assert.deepEqual(t5.slice(0, 3), before, 'existing tokens unchanged');
+    assert.equal(new Set(t5.map((t) => t.token)).size, 5);
+    for (const t of t5) { assert.equal(await guestOk(srv, t.token), 200); assert.equal(await pageOk(srv, t.token), 200); }
+    assert.equal((await s.get('/api/staff/state')).json.tables.length, 5);
+    assert.equal((await s.post('/api/staff/tables/count', { count: 50 })).json.tableCount, 50);
+    assert.equal((await tablesOf(s)).length, 50);
+    assert.equal((await s.post('/api/staff/tables/count', { count: 1 })).json.tableCount, 1);
+    assert.equal((await s.post('/api/staff/tables/count', { count: 5 })).json.tableCount, 5);
+    // a game at table 5 shows on the board; a guest stream is open at table 3
+    const g = new Client(srv);
+    await playOnce(g, t5[4].token, 'cheers', 700);
+    assert.ok((await g.get('/api/board')).json.games.cheers.some((r) => r.table === 5));
+    const g3 = new Client(srv); await g3.get(`/api/t/${t5[2].token}`);
+    const ev = await openSse(srv, `/api/t/${t5[2].token}/events`, { cookie: g3.cookieHeader() });
+    try {
+      await ev.until((b) => b.includes('event: state'));
+      assert.equal((await s.post('/api/staff/tables/count', { count: 2 })).json.tableCount, 2);
+      await assert.rejects(ev.until(() => false, 2000), /closed/, 'streams of removed tables are closed');
+    } finally { ev.close(); }
+    // lowered: tables 3..5 stop working exactly like a lowered tables.json
+    for (const t of t5.slice(2)) {
+      assert.equal(await guestOk(srv, t.token), 404);
+      assert.equal(await pageOk(srv, t.token), 404);
+      assert.equal((await order(new Client(srv), t.token, [{ id: 'cola', qty: 1 }])).status, 404);
+    }
+    assert.equal(await guestOk(srv, t5[0].token), 200);
+    assert.deepEqual((await s.get('/api/staff/state')).json.tables.map((t) => t.number), [1, 2]);
+    assert.deepEqual((await tablesOf(s)).map((t) => t.number), [1, 2]);
+    assert.ok(!(await g.get('/api/board')).json.games.cheers.some((r) => r.table === 5), 'hidden from the board');
+    // raising again brings the old QR codes back
+    await s.post('/api/staff/tables/count', { count: 5 });
+    assert.deepEqual((await tablesOf(s)), t5);
+    assert.equal(await guestOk(srv, t5[4].token), 200);
+    // persisted: tables.json (3) is only the first-boot seed
+    await srv.stop({ keep: true });
+    srv2 = await boot({ dir: srv.dir });
+    assert.equal((await (await staffLogin(srv2)).get('/api/staff/state')).json.tableCount, 5);
+  } finally { await srv.stop({ keep: true }); if (srv2) await srv2.stop(); else fs.rmSync(srv.dir, { recursive: true, force: true }); }
+});
+
+test('table count: lowering refuses tables with unpaid or unserved orders unless force', async () => {
+  const srv = await boot({ tablesCount: 5 });
+  try {
+    const s = await staffLogin(srv);
+    const t = await tablesOf(s);
+    const g = new Client(srv);
+    const place = async (n) => (await order(g, t[n - 1].token, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    const o3 = await place(3); const o4 = await place(4); const o5 = await place(5);
+    await s.post(`/api/staff/orders/${o3.id}/status`, { status: 'served' }); await s.post(`/api/staff/orders/${o3.id}/paid`, { paid: true }); // settled
+    await s.post(`/api/staff/orders/${o4.id}/status`, { status: 'served' }); // served but unpaid
+    await s.post(`/api/staff/orders/${o5.id}/paid`, { paid: true }); // paid but still pending (unserved)
+    const refused = await s.post('/api/staff/tables/count', { count: 2 });
+    assert.equal(refused.status, 409); assert.equal(refused.json.error, 'unsettled');
+    assert.deepEqual(refused.json.tables, [4, 5]);
+    assert.equal((await s.get('/api/staff/state')).json.tableCount, 5, 'nothing changed');
+    assert.equal((await s.post('/api/staff/tables/count', { count: 2, force: 'true' })).status, 409, 'only literal true forces');
+    assert.deepEqual((await s.post('/api/staff/tables/count', { count: 4 })).json.tables, [5]);
+    // a cancelled order never blocks
+    await s.post(`/api/staff/orders/${o5.id}/status`, { status: 'cancelled' });
+    assert.equal((await s.post('/api/staff/tables/count', { count: 4 })).status, 200);
+    assert.deepEqual((await s.post('/api/staff/tables/count', { count: 3 })).json.tables, [4]);
+    // raising is never refused; force overrides
+    assert.equal((await s.post('/api/staff/tables/count', { count: 6 })).status, 200);
+    assert.equal((await s.post('/api/staff/tables/count', { count: 2, force: true })).json.tableCount, 2);
+    // the orders of the hidden tables are kept: raising shows them again
+    await s.post('/api/staff/tables/count', { count: 5 });
+    assert.ok((await s.get('/api/staff/state')).json.orders.some((o) => o.id === o4.id));
+  } finally { await srv.stop(); }
+});
+
+test('tables.json above 50 is refused', async () => {
+  await assert.rejects(boot({ tablesCount: 51 }), /bad count/);
+});
+
+test('QR rotation: new token, old one dead at once, streams closed, orders and seat untouched', async () => {
+  const srv = await boot({ tablesCount: 3, env: { PUBLIC_ORIGIN: 'https://coms.kw.ac.kr' } });
+  let srv2;
+  try {
+    const s = await staffLogin(srv);
+    const before = await tablesOf(s);
+    const g = new Client(srv);
+    const o = await order(g, before[0].token, [{ id: 'cola', qty: 1 }]);
+    assert.equal(o.status, 201);
+    let rotated;
+    const open = await openSse(srv, `/api/t/${before[0].token}/events`, { cookie: `booth_d=${await realDevice(srv)}` });
+    const other = await openSse(srv, `/api/t/${before[1].token}/events`, { cookie: `booth_d=${await realDevice(srv)}` });
+    try {
+      await open.until((b) => b.includes('event: state'));
+      await other.until((b) => b.includes('event: state'));
+      assert.equal((await new Client(srv).post('/api/staff/tables/1/rotate')).status, 401);
+      const r = await s.post('/api/staff/tables/1/rotate');
+      rotated = r.json.token;
+      assert.equal(r.status, 200, r.text);
+      assert.deepEqual([r.json.ok, r.json.table], [true, 1]);
+      assert.match(r.json.token, /^[A-Za-z0-9_-]{16}$/);
+      assert.notEqual(r.json.token, before[0].token);
+      assert.equal(r.json.url, `https://coms.kw.ac.kr/t/${r.json.token}`);
+      await assert.rejects(open.until(() => false, 2000), /closed/, 'stream opened with the old QR code is closed');
+      // the neighbour's stream stays open
+      assert.equal((await s.post('/api/staff/tables/3/rotate')).status, 200);
+      await assert.rejects(other.until(() => false, 600), /timeout/, 'a neighbouring table keeps its stream');
+    } finally { open.close(); other.close(); }
+    // old token: dead everywhere, immediately
+    assert.equal(await guestOk(srv, before[0].token), 404);
+    assert.equal(await pageOk(srv, before[0].token), 404);
+    assert.equal((await order(new Client(srv), before[0].token, [{ id: 'cola', qty: 1 }])).status, 404);
+    // new token: same table, same seat, same orders
+    const after = await tablesOf(s);
+    assert.equal(after[0].token, rotated);
+    assert.equal(after[1].token, before[1].token, 'other tables untouched');
+    assert.notEqual(after[2].token, before[2].token);
+    const snap = (await new Client(srv).get(`/api/t/${after[0].token}`)).json;
+    assert.deepEqual([snap.table.number, snap.table.seat, snap.orders.map((x) => x.id)], [1, 1, [o.json.order.id]]);
+    assert.equal(await pageOk(srv, after[0].token), 200);
+    assert.equal((await s.get('/api/staff/state')).json.orders.filter((x) => x.table === 1).length, 1);
+    // rotating twice gives yet another token; unknown / hidden tables are 404
+    const again = (await s.post('/api/staff/tables/1/rotate')).json.token;
+    assert.notEqual(again, after[0].token);
+    assert.equal(await guestOk(srv, after[0].token), 404);
+    assert.equal((await s.post('/api/staff/tables/99/rotate')).status, 404);
+    await s.post('/api/staff/tables/count', { count: 2 });
+    assert.equal((await s.post('/api/staff/tables/3/rotate')).status, 404, 'a table above the count cannot be rotated');
+    // survives a restart
+    await srv.stop({ keep: true });
+    srv2 = await boot({ dir: srv.dir });
+    const s2 = await staffLogin(srv2);
+    assert.equal((await tablesOf(s2))[0].token, again);
+    assert.equal(await guestOk(srv2, again), 200);
+    assert.equal(await guestOk(srv2, before[0].token), 404);
+  } finally { await srv.stop({ keep: true }); if (srv2) await srv2.stop(); else fs.rmSync(srv.dir, { recursive: true, force: true }); }
+});
+
+// ======================= F. service worker file =======================
+test('sw.js is served at BASE/sw.js with a BASE-wide scope, no-cache and __BASE__ substituted', async () => {
+  const r = await raw(main, 'GET', '/sw.js');
+  assert.equal(r.status, 200);
+  assert.match(r.headers['content-type'], /^text\/javascript/);
+  assert.equal(r.headers['cache-control'], 'no-cache');
+  assert.equal(r.headers['service-worker-allowed'], '/');
+  assert.equal(r.text, 'const BASE="";');
+  assert.match(r.headers['content-security-policy'], /worker-src 'self'/);
+  const head = await raw(main, 'HEAD', '/sw.js');
+  assert.deepEqual([head.status, head.text, head.headers['service-worker-allowed']], [200, '', '/']);
+  for (const m of ['POST', 'PUT', 'DELETE']) assert.equal((await raw(main, m, '/sw.js', { 'content-type': 'application/json' }, '{}')).status, 404, m);
+  assert.equal((await raw(main, 'GET', '/sw.js/')).status, 200, 'trailing slash is normalised like every route');
+  const srv = await boot({ base: '/booth' });
+  try {
+    const b = await raw(srv, 'GET', '/booth/sw.js');
+    assert.equal(b.status, 200);
+    assert.equal(b.headers['service-worker-allowed'], '/booth/');
+    assert.equal(b.text, 'const BASE="/booth";');
+    assert.equal((await raw(srv, 'GET', '/sw.js')).status, 404, 'not at the root when BASE is set');
+  } finally { await srv.stop(); }
+  const none = await boot({ noSw: true });
+  try { assert.equal((await raw(none, 'GET', '/sw.js')).status, 404); } finally { await none.stop(); }
+});
+
+// ======================= G1/G2. payment settings =======================
+test('pay settings: validation, typed-twice guard, kakao url rules, env seeds once', async () => {
+  const srv = await boot({ env: { PAY_BANK: '신한', PAY_ACCOUNT: '110-123-456789', PAY_HOLDER: '동아리' } });
+  let srv2;
+  try {
+    const s = await staffLogin(srv);
+    const T = (await tablesOf(s))[0].token;
+    const guestPay = async () => (await new Client(srv).get(`/api/t/${T}`)).json.pay;
+    const seeded = { bank: '신한', account: '110-123-456789', holder: '동아리', tossEnabled: false, kakaoPayUrl: '', requireDepositor: false };
+    assert.deepEqual(await guestPay(), seeded);
+    assert.deepEqual((await s.get('/api/staff/state')).json.pay, { ...seeded, changedAt: null });
+    assert.equal((await new Client(srv).post('/api/staff/pay', { tossEnabled: true })).status, 401);
+    assert.equal((await s.post('/api/staff/pay', {})).json.error, 'nothing_to_update');
+    const bad = async (body, code) => { const r = await s.post('/api/staff/pay', body); assert.equal(r.status, 400, JSON.stringify(body)); assert.equal(r.json.error, code, JSON.stringify(body)); };
+    for (const bank of ['', '   ', 'a'.repeat(21), '\u3164', 5, null]) await bad({ bank }, 'bad_bank');
+    for (const holder of ['', 'x'.repeat(21), '\u200b', null]) await bad({ holder }, 'bad_holder');
+    for (const account of ['1234567', '12345678901234567890123', 'abcd1234567', '1234 5678 9012', '-12345678', '12345678-', '1234--56789', '1234-5678-9012-', 12345678901, null, '']) await bad({ account }, 'bad_account');
+    for (const tossEnabled of ['yes', 1, null]) await bad({ tossEnabled }, 'bad_toss_enabled');
+    for (const requireDepositor of ['yes', 0, null]) await bad({ requireDepositor }, 'bad_require_depositor');
+    for (const kakaoPayUrl of ['http://qr.kakaopay.com/abc', 'https://qr.kakaopay.com', 'https://qr.kakaopay.com/', 'https://qr.kakaopay.com.evil.com/abc', 'https://evil.com/qr.kakaopay.com/abc',
+      'https://qr.kakaopay.com@evil.com/abc', 'https://user:pw@qr.kakaopay.com/abc', 'https://qr.kakaopay.com:444/abc', 'https://QR.KAKAOPAY.COM.evil.io/x', 'javascript:alert(1)', 'qr.kakaopay.com/abc',
+      'https://kakaopay.com/abc', 'https://www.qr.kakaopay.com/abc', 5, null, 'https://qr.kakaopay.com/' + 'a'.repeat(200)]) await bad({ kakaoPayUrl }, 'bad_kakao_url');
+    assert.deepEqual(await guestPay(), seeded, 'failed updates change nothing');
+    // toggles and a kakao url need no account confirmation
+    const ok1 = await s.post('/api/staff/pay', { tossEnabled: true, requireDepositor: true, kakaoPayUrl: 'https://qr.kakaopay.com/Ab12Cd34' });
+    assert.equal(ok1.status, 200, ok1.text);
+    assert.deepEqual(ok1.json.pay, { ...seeded, tossEnabled: true, requireDepositor: true, kakaoPayUrl: 'https://qr.kakaopay.com/Ab12Cd34', changedAt: null });
+    assert.deepEqual(await guestPay(), { ...seeded, tossEnabled: true, requireDepositor: true, kakaoPayUrl: 'https://qr.kakaopay.com/Ab12Cd34' });
+    assert.equal((await s.post('/api/staff/pay', { kakaoPayUrl: '' })).json.pay.kakaoPayUrl, '', 'empty clears it');
+    // the money destination needs the account typed twice
+    for (const body of [{ account: '110-999-888777' }, { bank: '국민' }, { holder: '다른 사람' }, { account: '110-999-888777', confirmAccount: '110-999-888778' }, { account: '110-999-888777', confirmAccount: 1109998887770 },
+      { bank: '국민', confirmAccount: '110-123-45678' }]) {
+      const r = await s.post('/api/staff/pay', body);
+      assert.equal(r.status, 400, JSON.stringify(body)); assert.equal(r.json.error, 'account_mismatch', JSON.stringify(body));
+    }
+    assert.deepEqual(await guestPay(), { ...seeded, tossEnabled: true, requireDepositor: true, kakaoPayUrl: '' }, 'still the old destination');
+    const t0 = Date.now();
+    const ch = await s.post('/api/staff/pay', { bank: '국민', account: '110-999-888777', holder: '새 예금주', confirmAccount: '110999888777' });
+    assert.equal(ch.status, 200, ch.text);
+    assert.deepEqual([ch.json.pay.bank, ch.json.pay.account, ch.json.pay.holder], ['국민', '110-999-888777', '새 예금주']);
+    assert.ok(ch.json.pay.changedAt >= t0 && ch.json.pay.changedAt <= Date.now());
+    assert.equal((await guestPay()).account, '110-999-888777');
+    assert.ok(!('changedAt' in (await guestPay())), 'guests do not see changedAt');
+    assert.equal((await s.get('/api/staff/state')).json.pay.changedAt, ch.json.pay.changedAt);
+    // unchanged destination values need no confirmation and keep changedAt
+    const same = await s.post('/api/staff/pay', { bank: '국민', account: '110-999-888777', holder: '새 예금주', tossEnabled: false });
+    assert.equal(same.status, 200); assert.equal(same.json.pay.changedAt, ch.json.pay.changedAt);
+    // reset keeps pay settings
+    await s.post('/api/staff/reset', { confirm: '초기화' });
+    assert.equal((await guestPay()).bank, '국민');
+    // after the first boot the DB wins over env
+    await srv.stop({ keep: true });
+    srv2 = await boot({ dir: srv.dir, env: { PAY_BANK: '우리', PAY_ACCOUNT: '999-9999-9999', PAY_HOLDER: '환경변수' } });
+    const T2 = (await tablesOf(await staffLogin(srv2)))[0].token;
+    assert.equal((await new Client(srv2).get(`/api/t/${T2}`)).json.pay.bank, '국민');
+  } finally { await srv.stop({ keep: true }); if (srv2) await srv2.stop(); else fs.rmSync(srv.dir, { recursive: true, force: true }); }
+});
+
+// ======================= G3. depositor on orders =======================
+test('depositor: optional unless required, cleaned, stored with the order, replays unchanged, guest may fix it while unpaid', async () => {
+  const srv = await boot();
+  try {
+    const s = await staffLogin(srv);
+    const tk = (await tablesOf(s)).map((t) => t.token);
+    const g = new Client(srv);
+    const place = (body = {}, T = tk[0]) => g.post(`/api/t/${T}/orders`, { key: newKey(), items: [{ id: 'cola', qty: 1 }], ...body });
+    // not required: absent, empty and valid values
+    let r = await place();
+    assert.deepEqual([r.status, r.json.order.depositor, r.json.order.paidBy], [201, null, null]);
+    r = await place({ depositor: '' });
+    assert.equal(r.json.order.depositor, null);
+    r = await place({ depositor: '  홍 길   동  ' });
+    assert.equal(r.json.order.depositor, '홍 길 동');
+    for (const bad of ['x'.repeat(11), '\u3164', '\u200b\u200b', 5, {}, ['a']]) {
+      const b = await place({ depositor: bad });
+      assert.equal(b.status, 400, JSON.stringify(bad)); assert.equal(b.json.error, 'bad_depositor', JSON.stringify(bad));
+    }
+    assert.equal((await place({ depositor: 'ab\u3164' })).json.order.depositor, 'ab');
+    assert.equal((await place({ depositor: 'x'.repeat(10) })).status, 201);
+    // required
+    assert.equal((await s.post('/api/staff/pay', { requireDepositor: true })).status, 200);
+    for (const missing of [{}, { depositor: '' }, { depositor: null }]) {
+      const m = await place(missing, tk[1]);
+      assert.equal(m.status, 400, JSON.stringify(missing)); assert.equal(m.json.error, 'depositor_required');
+    }
+    const key = newKey();
+    const a = await g.post(`/api/t/${tk[1]}/orders`, { key, items: [{ id: 'cola', qty: 1 }], depositor: '김철수' });
+    assert.equal(a.status, 201); assert.equal(a.json.order.depositor, '김철수');
+    // replays return the stored order, even without or with another depositor name (and after the setting changed)
+    await s.post('/api/staff/pay', { requireDepositor: false });
+    const rep = await g.post(`/api/t/${tk[1]}/orders`, { key, items: [{ id: 'cola', qty: 1 }], depositor: '다른이름' });
+    assert.deepEqual([rep.status, rep.json.duplicate, rep.json.order.depositor], [200, true, '김철수']);
+    // staff and guest views carry it
+    assert.equal((await s.get('/api/staff/state')).json.orders.find((o) => o.id === a.json.order.id).depositor, '김철수');
+    assert.equal((await g.get(`/api/t/${tk[1]}`)).json.orders.find((o) => o.id === a.json.order.id).depositor, '김철수');
+    // change it while unpaid
+    const url = (T, id) => `/api/t/${T}/orders/${id}/depositor`;
+    const ch = await g.post(url(tk[1], a.json.order.id), { depositor: ' 이영희 ' });
+    assert.deepEqual([ch.status, ch.json.order.depositor], [200, '이영희']);
+    for (const bad of ['', 'x'.repeat(11), '\u3164', null, 5]) assert.equal((await g.post(url(tk[1], a.json.order.id), { depositor: bad })).json.error, 'bad_depositor', JSON.stringify(bad));
+    assert.equal((await g.post(url(tk[0], a.json.order.id), { depositor: '남의 주문' })).status, 404, 'another table cannot touch it');
+    assert.equal((await g.post(url(tk[1], 99999), { depositor: 'x' })).status, 404);
+    await s.post(`/api/staff/orders/${a.json.order.id}/paid`, { paid: true });
+    const paid = await g.post(url(tk[1], a.json.order.id), { depositor: '늦은변경' });
+    assert.equal(paid.status, 409); assert.equal(paid.json.error, 'already_paid');
+    const c = (await place({ depositor: '취소될사람' }, tk[1])).json.order;
+    await s.post(`/api/staff/orders/${c.id}/status`, { status: 'cancelled' });
+    assert.equal((await g.post(url(tk[1], c.id), { depositor: '무효' })).json.error, 'order_cancelled');
+    assert.equal((await s.get('/api/staff/state')).json.orders.find((o) => o.id === a.json.order.id).paidBy, 'staff');
+  } finally { await srv.stop(); }
+});
+
+// ======================= G4. deposit notices =======================
+const smsText = (amount, name, n = 0, bank = '신한') => `[Web발신]\n${bank} 11/13 22:${String(n % 60).padStart(2, '0')}\n110-639-***394\n입금 ${amount.toLocaleString('en-US')}\n잔액 123,456\n${name}`;
+const hookPost = (srv, secret, body, type = 'application/json', extra = {}) => raw(srv, 'POST', `${srv.base}/api/deposit-hook/${secret}`, { 'content-type': type, ...extra }, typeof body === 'string' ? body : JSON.stringify(body));
+async function depositSetup(env = {}, opts = {}) {
+  const srv = await boot({ env: { PUBLIC_ORIGIN: 'https://coms.kw.ac.kr', ...env }, ...opts });
+  const s = await staffLogin(srv);
+  await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: true }); // ships OFF: these tests exercise the automatic path, so staff switch it on
+  const tk = (await tablesOf(s)).map((t) => t.token);
+  const secret = (await s.get('/api/staff/deposit-hook')).json.secret;
+  let n = 0;
+  return {
+    srv, s, tk, secret,
+    notice: async (text) => JSON.parse((await hookPost(srv, secret, { text: text ?? smsText(8000, 'x', ++n) })).text),
+    sms: async (amount, name) => JSON.parse((await hookPost(srv, secret, { text: smsText(amount, name, ++n) })).text),
+    place: async (T, depositor, item = 'tteokbokki', qty = 1) => (await order(new Client(srv), T, [{ id: item, qty }], depositor === undefined ? {} : { depositor })).json.order,
+    notices: async () => (await s.get('/api/staff/deposits')).json.notices,
+    order: async (id) => (await s.get('/api/staff/state')).json.orders.find((o) => o.id === id),
+  };
+}
+
+test('deposit parsing: the common bank SMS shapes, hardened for automatic confirmation', () => {
+  const { parseDeposit, sameDepositor } = require('./db');
+  const pick = (t) => { const p = parseDeposit(t); return { kind: p.kind, amount: p.amount ?? null, depositor: p.depositor ?? null, auto: !!p.autoEligible }; };
+  const reasons = (t) => parseDeposit(t).reasons ?? [];
+  const want = { kind: 'deposit', amount: 16000, depositor: '홍길동', auto: true };
+  // auto-eligible: exactly one amount, exactly one name, name and amount on different lines or separated by the word 입금
+  assert.deepEqual(pick('[Web발신]\n신한 11/13 22:31\n110-639-***394\n입금 16,000\n잔액 123,456\n홍길동'), want);
+  assert.deepEqual(pick('입금 16,000원\n홍길동 → 내 입출금통장'), want, 'KakaoBank: 입출금통장 is a template word, not a withdrawal');
+  assert.deepEqual(pick('[KB국민]\n11/13 22:31\n123456-**-***789\n홍길동\n입금 16,000원\n잔액 1,000,000원'), want);
+  assert.deepEqual(pick('홍길동 입금 16,000원'), want, 'name, then the literal word 입금, then the amount');
+  assert.deepEqual(pick('입금 5,000원\n잔액 999,999원\n김철수'), { kind: 'deposit', amount: 5000, depositor: '김철수', auto: true });
+  assert.deepEqual(pick('잔액 999,999원\n입금 5,000원\n김철수'), { kind: 'deposit', amount: 5000, depositor: '김철수', auto: true });
+  assert.deepEqual(pick('2026-11-13 22:31:05\n입금 16,000원\n홍길동\n스마트폰뱅킹'), want, 'template words are not names');
+  assert.deepEqual(pick('입금 １６，０００원\n홍길동'), want, 'full-width digits are normalised');
+  assert.deepEqual(pick('입금 100원\n홍길동'), { kind: 'deposit', amount: 100, depositor: '홍길동', auto: true });
+  assert.equal(pick('입금 10,000,000원\n홍길동').amount, 10000000);
+  // single-line shapes are display-only: the sender's text touches the amount, or a mid-line "잔액" is a second number
+  assert.deepEqual(pick('신한은행 입금 16,000원 홍길동 잔액123,456원'), { ...want, auto: false });
+  assert.ok(reasons('신한은행 입금 16,000원 홍길동 잔액123,456원').includes('multiple_amounts'));
+  assert.deepEqual(reasons('[신한은행] 홍길동님이 16,000원을 입금했습니다'), ['amount_adjacent_to_name']);
+  assert.deepEqual(pick('[신한은행] 홍길동님이 16,000원을 입금했습니다'), { ...want, auto: false });
+  assert.deepEqual(reasons('입금 16000원 Hong'), ['amount_adjacent_to_name']);
+  assert.deepEqual(reasons('입금 16,000원 홍길동'), ['amount_adjacent_to_name']);
+  // no usable amount
+  assert.deepEqual(pick('입금되었습니다'), { kind: 'deposit', amount: null, depositor: null, auto: false });
+  assert.ok(reasons('입금되었습니다').includes('no_amount'));
+  assert.equal(pick('입금 50원\n홍길동').amount, null, 'below 100 won'); assert.ok(reasons('입금 50원\n홍길동').includes('amount_range'));
+  assert.equal(pick('입금 10,000,001원\n홍길동').amount, null, 'above 10,000,000 won');
+  // withdrawals and anything that is not a deposit: ignored
+  for (const t of ['신한 출금 5,000원 잔액 100,000원', '[Web발신] 출금 2,000원', '안녕하세요 광고 메시지 12345', '']) assert.deepEqual(parseDeposit(t), { kind: 'ignore' }, t);
+  // a deposit text that also contains a reversal / correction / withdrawal word: manual review, never auto
+  for (const t of ['출금 3,000원 입금 3,000원 이체', '[Web발신] 신한 출금 16,000원 홍길동 입금계좌 110-123-4567 잔액 5,000원', '입금취소 16,000원 홍길동', '입금 취소 16,000원 홍길동', '입금정정 16,000원 홍길동',
+    '입금오류 16,000원', '입금 반환 16,000원 홍길동', '입금실패 16,000원', '입금 계좌 110-123-4567 16,000원', '입금예정 16,000원 홍길동', '입금한도 초과 16,000원', '입금은행 신한 16,000원 홍길동',
+    '[Web발신]\n신한11/13 21:03\n110-***-123456\n입금 16,000\n잔액 1,234,567\n 정정훈', '입금 16,000원\n오류동상회']) {
+    const p = parseDeposit(t);
+    assert.equal(p.kind, 'review', t); assert.equal(p.autoEligible, false, t); assert.ok(p.reasons.includes('ignore_word'), t);
+  }
+  assert.deepEqual(pick('[Web발신]\n신한11/13 21:03\n110-***-123456\n입금 16,000\n잔액 1,234,567\n 정정훈'), { kind: 'review', amount: 16000, depositor: '정정훈', auto: false });
+  const long = parseDeposit(`입금 16,000원\n홍길동\n${'x'.repeat(300)}`);
+  assert.deepEqual([long.kind, long.autoEligible, long.reasons.includes('text_too_long')], ['review', false, true]);
+  // injections: the sender controls the name printed in the SMS
+  const injections = [
+    '[Web발신]\n신한 11/13 22:31\n110-639-***394\n입금 100\n잔액 123,456\n9000원김철',
+    '[KB국민] 11/13 22:31\n801302**364\n9000원김철\n입금\n100\n잔액 123,456',
+    '[Web발신]\n신한 11/13 22:31\n입금 100\n잔액 123,456\n김철입금9000원', '입금 100원 52000원홍길동', '입금 16,000원\n김철９０００', '입금 16,000원\n김철9',
+    // the review's blocker: a sender-typed "잔액" in the middle of a line must not hide the real amount
+    '[Web발신]\n신한 11/13 22:31 김철16000잔액 1원 입금', '[Web발신]\n신한 11/13 22:31 김철 16000 잔액 1원 입금', '[Web발신]\n신한 11/13 22:31\n김철16000잔액 1원\n입금',
+    '입금 1원\u2028잔액 16000\n김철', '입금 1원\u2029잔액 16000\n김철',
+  ];
+  for (const t of injections) {
+    const p = parseDeposit(t);
+    assert.equal(p.autoEligible, false, JSON.stringify(t));
+    assert.ok(p.reasons.includes('multiple_amounts'), JSON.stringify(t) + ' ' + p.reasons);
+  }
+  // shape of the name
+  assert.ok(reasons('입금 16,000원\n홍길동 김철수').includes('several_names'));
+  assert.ok(reasons('From: 홍길동\n입금 16,000원\n김철수').includes('several_names'));
+  assert.ok(reasons('입금 16,000원\nИван').includes('name_shape'));
+  assert.ok(reasons('입금 16,000원\n홍길동홍길동홍길동홍길').includes('name_shape'), '11+ characters');
+  assert.ok(reasons('입금 16,000원\n김철٣').includes('name_has_digit'), 'other Unicode digits');
+  assert.ok(reasons('입금 16,000원').includes('no_name'));
+  assert.ok(reasons('입금 16,000원\n홍.길동').includes('name_shape'));
+  assert.ok(reasons('입금 16,000원\n김 → 내 통장').includes('no_name'), 'a template word never becomes the name');
+  // balance, dates, times and masked accounts never count as amounts
+  assert.equal(parseDeposit('[Web발신]\n신한 2026-11-13 22:31:05\n110-***-123456\n입금 16,000\n잔액 123,456\n홍길동').autoEligible, true);
+  assert.equal(parseDeposit('입금 16,000원\n잔액 16,000원\n홍길동').autoEligible, true, 'a line-start balance equal to the amount is not a second amount');
+  // names: sameDepositor(noticeName, orderName): equal after normalisation, nothing else (no prefix rule)
+  assert.ok(sameDepositor('홍길동', ' 홍 길동 ') && sameDepositor('Hong', 'HONG') && sameDepositor('ＡＬＩＣＥ', 'alice'));
+  assert.ok(!sameDepositor('가나다라마바', '가나다라마바사아') && !sameDepositor('가나다라마바사아', '가나다라마바') && !sameDepositor('홍길', '홍길동') && !sameDepositor('홍길동동', '홍길동'));
+  assert.ok(!sameDepositor('홍', '홍길동') && !sameDepositor('홍길동', '김길동') && !sameDepositor('', '홍길동') && !sameDepositor('길동', '홍길동'));
+});
+
+test('deposit hook: secret in the URL, content types, size, rate cap, no session and no origin check', async () => {
+  const d = await depositSetup({}, { base: '/booth' });
+  try {
+    const { srv, s, secret } = d;
+    // exact URL text staff copy
+    const info = (await s.get('/api/staff/deposit-hook')).json;
+    assert.match(secret, /^[a-f0-9]{64}$/);
+    assert.equal(info.url, `https://coms.kw.ac.kr/booth/api/deposit-hook/${secret}`);
+    assert.equal(info.path, `/booth/api/deposit-hook/${secret}`);
+    assert.equal((await new Client(srv).get('/api/staff/deposit-hook')).status, 401);
+    // wrong secrets: 404 after a small fixed delay
+    for (const bad of ['0'.repeat(64), secret.slice(0, 63) + (secret.endsWith('0') ? '1' : '0'), 'short', secret + 'a', secret.toUpperCase()]) {
+      const t0 = Date.now();
+      const r = await hookPost(srv, bad, { text: smsText(1000, 'x') });
+      assert.equal(r.status, 404, bad);
+      assert.ok(Date.now() - t0 >= 250, 'fixed delay');
+    }
+    assert.equal((await d.notices()).length, 0);
+    assert.equal((await raw(srv, 'GET', `/booth/api/deposit-hook/${secret}`)).status, 404, 'GET is not a route');
+    // both content types, no session, no same-origin check (automation apps send odd headers)
+    const a = await hookPost(srv, secret, { text: smsText(8000, '김철수', 1) }, 'application/json', { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' });
+    assert.deepEqual([a.status, JSON.parse(a.text).ok, JSON.parse(a.text).status], [200, true, 'pending']);
+    const b = await hookPost(srv, secret, smsText(9000, '이영희', 2), 'text/plain; charset=utf-8');
+    assert.equal(JSON.parse(b.text).status, 'pending');
+    for (const type of ['application/x-www-form-urlencoded', 'multipart/form-data', 'text/html', 'application/xml']) assert.equal((await hookPost(srv, secret, 'text=x', type)).status, 415, type);
+    assert.equal((await raw(srv, 'POST', `/booth/api/deposit-hook/${secret}`, {}, 'x')).status, 415, 'no content type');
+    assert.equal(JSON.parse((await hookPost(srv, secret, '{nope')).text).error, 'bad_json');
+    for (const body of [{ text: 5 }, {}, [], 'null', { message: 'x' }]) assert.equal(JSON.parse((await hookPost(srv, secret, body)).text).error, 'bad_body', JSON.stringify(body));
+    const big = await hookPost(srv, secret, 'x'.repeat(2049), 'text/plain');
+    assert.equal(big.status, 413);
+    assert.equal((await hookPost(srv, secret, 'x'.repeat(2048), 'text/plain')).status, 200, 'exactly 2 KB is fine');
+    // raw text is kept to 300 chars
+    const long = await hookPost(srv, secret, `입금 7,000원 길동 ${'a'.repeat(600)}`, 'text/plain');
+    assert.equal(JSON.parse(long.text).status, 'review', 'texts over 300 characters are reviewed by hand');
+    assert.ok((await d.notices()).every((n) => n.text.length <= 300));
+    assert.ok((await d.notices())[0].reasons.includes('text_too_long'));
+    // 출금 is `ignored` (stored for staff, never matchable), garbage is stored as unparsed
+    const before = (await d.notices()).length;
+    assert.equal(JSON.parse((await hookPost(srv, secret, { text: '신한 출금 5,000원 잔액 1,000원' })).text).status, 'ignored');
+    assert.equal((await d.notices()).length, before + 1);
+    assert.equal((await d.notices())[0].status, 'ignored');
+    assert.equal((await s.get('/api/staff/state')).json.hookRateLimited, false);
+    assert.equal(JSON.parse((await hookPost(srv, secret, { text: '광고 메시지입니다' })).text).status, 'ignored', 'no 입금: ignored');
+    assert.equal(JSON.parse((await hookPost(srv, secret, { text: '입금되었습니다' })).text).status, 'unparsed', '입금 without an amount: unparsed');
+    assert.equal((await d.notices()).filter((n) => n.status === 'unparsed').length, 1);
+    // the rate cap (60 notices per minute) counts accepted notices
+    let capped = null;
+    for (let i = 0; i < 70; i++) { const r = await hookPost(srv, secret, { text: smsText(1000 + i, '이름', 100 + i) }); if (r.status === 429) { capped = i; break; } }
+    assert.ok(capped !== null && capped >= 35 && capped <= 62, `cap hit after ${capped}`);
+    assert.equal(JSON.parse((await hookPost(srv, secret, { text: '입금 1,000원 홍' })).text).error, 'rate_limited');
+    assert.equal((await s.get('/api/staff/state')).json.hookRateLimited, true, 'staff learn that the hook is being flooded');
+    // wrong secrets are not rate limited into the real forwarder's budget
+    assert.equal((await hookPost(srv, 'f'.repeat(64), { text: 'x' })).status, 404);
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit matching: auto-confirm only when exactly one unpaid order has both the amount and the name', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    // unique amount + equal name -> auto paid
+    const o1 = await d.place(tk[0], '홍길동');
+    const gs = await openSse(d.srv, '/api/staff/events', { cookie: s.cookieHeader() });
+    try {
+      await gs.until((b) => b.includes('event: state'));
+      const m = await d.sms(8000, '홍길동');
+      assert.deepEqual([m.status, m.orderId === undefined], ['matched', true]); // the hook answer never reveals the order
+      await gs.until((b) => b.includes('event: deposit_matched'));
+      const p = await d.sms(6000, '아무개');
+      assert.equal(p.status, 'pending');
+      await gs.until((b) => b.includes('event: new_deposit'));
+    } finally { gs.close(); }
+    const paid = await d.order(o1.id);
+    assert.deepEqual([paid.paid, paid.paidBy], [true, 'auto']);
+    assert.equal((await new Client(d.srv).get(`/api/t/${tk[0]}`)).json.orders[0].paid, true, 'guest gets the normal paid update');
+    const list = await d.notices();
+    const matched = list.find((n) => n.status === 'matched');
+    assert.deepEqual([matched.amount, matched.depositor, matched.orderId, matched.matchedBy], [8000, '홍길동', o1.id, 'auto']);
+    // amount matches but the name differs -> pending, with the candidate listed
+    const o2 = await d.place(tk[1], '김철수');
+    const diff = await d.sms(8000, '박다른');
+    assert.equal(diff.status, 'pending');
+    const pend = (await d.notices()).find((n) => n.id === diff.id);
+    assert.deepEqual(pend.candidates.map((c) => [c.id, c.table, c.total, c.depositor]), [[o2.id, 2, 8000, '김철수']]);
+    assert.equal((await d.order(o2.id)).paid, false);
+    // order without a depositor name -> pending, never auto
+    const o3 = await d.place(tk[2]);
+    assert.equal((await d.sms(8000, '이영희')).status, 'pending');
+    assert.equal((await d.order(o3.id)).paid, false);
+    // a notice without a readable name never auto-confirms
+    assert.equal(JSON.parse((await hookPost(d.srv, d.secret, { text: '입금 8,000원 잔액 1,000원' })).text).status, 'pending');
+    assert.equal((await d.order(o2.id)).paid, false);
+    // wrong amount: pending without candidates
+    const none = await d.sms(12345, '김철수');
+    assert.equal((await d.notices()).find((n) => n.id === none.id).candidates.length, 0);
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit matching (strict): exactly ONE unpaid order with that amount, equal name; prefix only for long names, never the reverse', async () => {
+  const d = await depositSetup();
+  try {
+    const { tk } = d;
+    const paid = async (o) => (await d.order(o.id)).paid;
+    // review case: payer A left the name empty and pays as 김철수; guest B guessed "김철" on a same-amount order -> pending, both listed
+    const A = await d.place(tk[0]); const B = await d.place(tk[1], '김철');
+    const steal = await d.sms(8000, '김철수');
+    assert.equal(steal.status, 'pending');
+    const n = (await d.notices()).find((x) => x.id === steal.id);
+    assert.deepEqual(n.candidates.map((c) => c.id).sort(), [A.id, B.id].sort());
+    assert.deepEqual([await paid(A), await paid(B)], [false, false]);
+    // even an exactly matching name is not enough while another order has the same amount
+    assert.equal((await d.sms(8000, '김철')).status, 'pending');
+    assert.deepEqual([await paid(A), await paid(B)], [false, false]);
+    const C = await d.place(tk[2], '홍길동', 'odeng'); const E = await d.place(tk[3], '박철수', 'odeng'); // 9,000 each
+    assert.equal((await d.sms(9000, '홍길동')).status, 'pending');
+    assert.deepEqual([await paid(C), await paid(E)], [false, false]);
+    // exactly one order at the amount and an equal name -> confirmed (case / width / spaces normalised)
+    const F = await d.place(tk[4], '이 영희', 'fries'); // 6,000 (the order's name has a space)
+    assert.equal((await d.sms(6000, '이영희')).status, 'matched');
+    assert.equal(await paid(F), true);
+    const K = await d.place(tk[5], 'Alice', 'cola', 6); // 12,000
+    assert.equal((await d.sms(12000, 'ＡＬＩＣＥ')).status, 'matched');
+    assert.equal(await paid(K), true);
+    // reverse direction: the order has the short name, the notice is longer -> pending
+    const G = await d.place(tk[6], '김철', 'cola'); // 2,000
+    assert.equal((await d.sms(2000, '김철수')).status, 'pending');
+    assert.equal(await paid(G), false);
+    // short notice names are never prefixes: 2 characters of a 4-character name
+    const H = await d.place(tk[7], '남궁민수', 'cola', 2); // 4,000
+    assert.equal((await d.sms(4000, '남궁')).status, 'pending');
+    assert.equal(await paid(H), false);
+    // no prefix rule: a truncated long name is NOT enough, however long the prefix (a guest could guess the first characters of someone's name)
+    const I = await d.place(tk[8], '가나다라마바사아', 'cola', 3); // 6,000 (F is paid, so this is the only unpaid 6,000)
+    assert.equal((await d.sms(6000, '가나다라마')).status, 'pending');
+    assert.equal((await d.sms(6000, '가나다라마바')).status, 'pending');
+    assert.equal((await d.sms(6000, '가나다라마바사')).status, 'pending');
+    assert.equal(await paid(I), false);
+    assert.equal((await d.sms(6000, '가나다라마바사아')).status, 'matched', 'the full name matches');
+    assert.equal(await paid(I), true);
+    // an order without a depositor never auto-confirms, whatever the notice says
+    const J = await d.place(tk[9], undefined, 'cola', 5); // 10,000
+    assert.equal((await d.sms(10000, '아무개')).status, 'pending');
+    assert.equal(await paid(J), false);
+    // a paid order cannot be paid again by another notice
+    assert.equal((await d.sms(12000, 'ＡＬＩＣＥ')).status, 'pending');
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit notices: reversal / withdrawal texts never pay an order: reviewable (入金 present) or ignored (withdrawal only)', async () => {
+  const d = await depositSetup();
+  try {
+    const o = await d.place(d.tk[0], '홍길동', 'tteokbokki', 2); // 16,000
+    const t1 = '[Web발신] 신한 출금 16,000원 홍길동 입금계좌 110-123-4567 잔액 5,000원';
+    const t2 = '입금취소 16,000원 홍길동';
+    const t3 = '신한 11/13 22:31 출금 16,000원 홍길동';
+    const t4 = '[Web발신]\n신한11/13 21:03\n110-***-123456\n입금 16,000\n잔액 1,234,567\n 정정훈'; // a real deposit from a person named 정정훈
+    for (const [text, status] of [[t1, 'review'], [t2, 'review'], [t3, 'ignored'], [t4, 'review']]) {
+      assert.equal((await d.notice(text)).status, status, text);
+      assert.equal((await d.order(o.id)).paid, false, text);
+    }
+    const list = await d.notices();
+    assert.deepEqual(list.map((n) => n.status), ['review', 'ignored', 'review', 'review']);
+    const rev = list.filter((n) => n.status === 'review');
+    assert.ok(rev.every((n) => n.reasons.includes('ignore_word') && n.amountGuessed === true && n.amount === 16000 && n.candidates.length === 0));
+    assert.deepEqual((await d.s.get('/api/staff/state')).json.deposit, { pending: 3, unparsed: 0, ignored: 1, review: 3, autoConfirm: true, autoConfirmMaxAmount: 30000 }, 'review notices are counted in the pending badge');
+    // review notices are manual: assignable only with force, dismissable; ignored ones are final
+    const asg = (id, body) => d.s.post(`/api/staff/deposits/${id}/assign`, { orderId: o.id, ...body });
+    assert.equal((await asg(rev[0].id, {})).json.error, 'review_needs_force');
+    assert.equal((await asg(list[1].id, { force: true })).json.error, 'notice_closed');
+    assert.equal((await d.s.post(`/api/staff/deposits/${list[1].id}/dismiss`)).json.error, 'notice_closed');
+    const done = await asg(rev[0].id, { force: true }); // t4 (the 정정훈 deposit) newest first
+    assert.equal(done.status, 200, done.text);
+    assert.deepEqual([done.json.order.paid, done.json.order.paidBy], [true, 'staff']);
+    assert.equal((await d.s.post(`/api/staff/deposits/${rev[1].id}/dismiss`)).json.notice.status, 'dismissed');
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit notices: an identical text collapses into one row (repeatCount / lastAt), never auto-confirmed; only a retry within 5 seconds is dropped', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const text = '입금 8,000원\n홍길동'; // a forwarder that sends no time or balance: identical texts for identical deposits
+    const o1 = await d.place(tk[0], '홍길동');
+    const first = await d.notice(text);
+    assert.equal(first.status, 'matched');
+    assert.equal((await d.order(o1.id)).paid, true);
+    assert.equal((await d.notice(text)).status, 'duplicate', 'a retry within seconds is the only silent drop');
+    assert.equal((await d.notices()).length, 1);
+    // the same payer pays a SECOND order later: same text, 20 s afterwards. The matched row is final, so this is a new pending row (never auto).
+    const o2 = await d.place(tk[1], '홍길동');
+    const db = new DatabaseSync(path.join(d.srv.data, 'booth.db'));
+    db.exec('PRAGMA busy_timeout=3000');
+    const back = (ms) => db.prepare('UPDATE deposit_notices SET received_at=received_at-?1, last_at=COALESCE(last_at, received_at)-?1').run(ms);
+    back(20000);
+    const second = await d.notice(text);
+    assert.equal(second.status, 'pending', 'not dropped, not auto-confirmed');
+    assert.equal((await d.order(o2.id)).paid, false);
+    const row = (await d.notices()).find((n) => n.id === second.id);
+    assert.deepEqual([row.repeatCount, row.status, row.reasons.includes('duplicate'), row.candidates.map((c) => c.id)], [1, 'pending', true, [o2.id]]);
+    // ... and every further identical text collapses into THAT row instead of creating rows
+    back(20000);
+    const again = await d.notice(text);
+    assert.deepEqual([again.status, again.id], ['pending', second.id]);
+    back(20000);
+    assert.equal((await d.notice(text)).id, second.id);
+    const list = await d.notices();
+    assert.equal(list.length, 2, 'no new rows');
+    const collapsed = list.find((n) => n.id === second.id);
+    assert.equal(collapsed.repeatCount, 3);
+    assert.ok(collapsed.lastAt >= collapsed.receivedAt);
+    assert.equal((await d.order(o2.id)).paid, false, 'still not auto-confirmed');
+    // staff can assign it
+    assert.equal((await s.post(`/api/staff/deposits/${second.id}/assign`, { orderId: o2.id })).status, 200);
+    // after the 6-hour window the same text is an ordinary notice again (and may auto-confirm)
+    const o3 = await d.place(tk[2], '홍길동');
+    back(7 * 3600e3);
+    const fresh = await d.notice(text);
+    assert.equal(fresh.status, 'matched');
+    assert.equal((await d.notices()).find((n) => n.id === fresh.id).repeatCount, 1);
+    assert.equal((await d.order(o3.id)).paid, true);
+    db.close();
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit hook: the secret may also come in an X-Booth-Hook header', async () => {
+  const d = await depositSetup({}, { base: '/booth' });
+  try {
+    const { srv, s, secret } = d;
+    const info = (await s.get('/api/staff/deposit-hook')).json;
+    assert.deepEqual([info.header, info.headerUrl, info.url, info.path], ['X-Booth-Hook', 'https://coms.kw.ac.kr/booth/api/deposit-hook', `https://coms.kw.ac.kr/booth/api/deposit-hook/${secret}`, `/booth/api/deposit-hook/${secret}`]);
+    const viaHeader = (body, h, type = 'application/json') => raw(srv, 'POST', '/booth/api/deposit-hook', { 'content-type': type, ...h }, typeof body === 'string' ? body : JSON.stringify(body));
+    const ok = await viaHeader({ text: smsText(1000, '헤더', 1) }, { 'x-booth-hook': secret });
+    assert.deepEqual([ok.status, JSON.parse(ok.text).status], [200, 'pending']);
+    assert.equal((await viaHeader(smsText(1100, '헤더', 2), { 'x-booth-hook': secret }, 'text/plain')).status, 200);
+    for (const h of [{}, { 'x-booth-hook': '' }, { 'x-booth-hook': '0'.repeat(64) }, { 'x-booth-hook': secret.toUpperCase() }, { 'x-booth-hook': secret + 'x' }, { authorization: secret }]) {
+      const t0 = Date.now();
+      assert.equal((await viaHeader({ text: smsText(1200, 'x', 3) }, h)).status, 404, JSON.stringify(h));
+      assert.ok(Date.now() - t0 >= 250);
+    }
+    assert.equal((await hookPost(srv, secret, { text: smsText(1300, '경로', 4) })).status, 200, 'the path form still works');
+    assert.equal((await new Client(srv).get('/api/staff/deposit-hook')).status, 401);
+    const rot = (await s.post('/api/staff/deposit-hook/rotate')).json;
+    assert.equal((await viaHeader({ text: smsText(1400, 'x', 5) }, { 'x-booth-hook': secret })).status, 404, 'rotation invalidates both forms');
+    assert.equal((await viaHeader({ text: smsText(1400, 'y', 6) }, { 'x-booth-hook': rot.secret })).status, 200);
+    assert.equal((await hookPost(srv, secret, { text: smsText(1500, 'z', 7) })).status, 404);
+  } finally { await d.srv.stop(); }
+});
+
+test('open orders on tables above the table count are reported (boot warning + staff state)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-hidden-'));
+  fs.mkdirSync(path.join(dir, 'data'));
+  const old = new DatabaseSync(path.join(dir, 'data', 'booth.db'));
+  old.exec(HEAD_SCHEMA);
+  const toks = [];
+  for (let i = 1; i <= 10; i++) { const t = crypto.randomBytes(12).toString('base64url'); toks.push(t); old.prepare('INSERT INTO tables(id, token) VALUES(?,?)').run(i, t); }
+  const ins = old.prepare("INSERT INTO orders(table_id,seat,key,status,paid,subtotal,discount,total,note,created_at,updated_at) VALUES(?,1,?,?,?,5000,0,5000,'',?,?)");
+  const ts = Date.now();
+  ins.run(8, 'key-table-08', 'pending', 0, ts, ts); // visible table: not reported
+  ins.run(9, 'key-table-09', 'served', 0, ts, ts); // served but unpaid
+  ins.run(10, 'key-table-10', 'served', 1, ts, ts); // settled: not reported
+  ins.run(10, 'key-table-10b', 'cooking', 1, ts, ts); // paid but not served
+  old.close();
+  const srv = await boot({ dir, tablesCount: 8 });
+  try {
+    assert.match(srv.log(), /WARNING: tables above the table count \(8\) have open orders.*: 9, 10/);
+    const s = await staffLogin(srv);
+    const st = (await s.get('/api/staff/state')).json;
+    assert.deepEqual([st.tableCount, st.hiddenTablesWithOpenOrders], [8, [9, 10]]);
+    assert.equal((await s.post('/api/staff/tables/count', { count: 10 })).status, 200);
+    assert.deepEqual((await s.get('/api/staff/state')).json.hiddenTablesWithOpenOrders, []);
+    await s.post('/api/staff/tables/count', { count: 9, force: true });
+    assert.deepEqual((await s.get('/api/staff/state')).json.hiddenTablesWithOpenOrders, [10]);
+    await s.post('/api/staff/tables/count', { count: 10 });
+    for (const o of (await s.get('/api/staff/state')).json.orders.filter((x) => x.table === 9 || x.table === 10)) {
+      await s.post(`/api/staff/orders/${o.id}/status`, { status: 'served' });
+      await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
+    }
+    await s.post('/api/staff/tables/count', { count: 8 }); // nothing open any more: no force needed
+    assert.deepEqual((await s.get('/api/staff/state')).json.hiddenTablesWithOpenOrders, []);
+  } finally { await srv.stop(); }
+  // a clean database logs no warning
+  const clean = await boot({ tablesCount: 3 });
+  try { assert.ok(!/WARNING: tables above/.test(clean.log())); } finally { await clean.stop(); }
+});
+
+test('deposit notices: the manual queue never refuses while something can be evicted (unparsed first, then ignored); matched / pending / review are kept', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-prune-'));
+  const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 });
+  try {
+    store.setAutoConfirm({ autoConfirm: true });
+    const tk = store.tokens();
+    const o = store.createOrder(tk[0].id, { key: 'prune-key-0001', items: [{ id: 'cola', qty: 1 }], depositor: '홍길동' }).order;
+    assert.equal(store.ingestDeposit('입금 2,000원\n홍길동').status, 'matched');
+    const rows = () => { const db = new DatabaseSync(path.join(dir, 'booth.db'), { readOnly: true }); const r = db.prepare('SELECT status, COUNT(*) n FROM deposit_notices GROUP BY status').all(); db.close(); return Object.fromEntries(r.map((x) => [x.status, x.n])); };
+    // ignored rows are capped at 2000 by pruning; with the queue cap (1500) they are also evicted when room is needed
+    for (let i = 0; i < 2010; i++) assert.equal(store.ingestDeposit(`광고 메시지 #${i}`).status, 'ignored');
+    assert.ok(rows().ignored <= 1500, JSON.stringify(rows()));
+    assert.equal(rows().matched, 1, 'the matched notice survived');
+    // a fresh store for the eviction order: 1 unparsed + 1 ignored + 1498 pending = full
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-prune2-'));
+    const st2 = createStore({ dataDir: dir2, menu: MENU, rewards: REWARDS, tableCount: 2 });
+    try {
+      assert.equal(st2.ingestDeposit('입금되었습니다 xqz').status, 'unparsed');
+      assert.equal(st2.ingestDeposit('광고 gggg').status, 'ignored');
+      const pend = (i) => st2.ingestDeposit(`입금 ${1000 + (i % 300)}원 누구 #${i}`);
+      for (let i = 0; i < 1498; i++) assert.equal(pend(i).status, 'pending');
+      const db2 = () => new DatabaseSync(path.join(dir2, 'booth.db'), { readOnly: true });
+      const counts = () => { const d = db2(); const r = Object.fromEntries(d.prepare('SELECT status, COUNT(*) n FROM deposit_notices GROUP BY status').all().map((x) => [x.status, x.n])); d.close(); return r; };
+      assert.deepEqual(counts(), { pending: 1498, unparsed: 1, ignored: 1 });
+      assert.equal(pend(1498).status, 'pending'); // evicts the unparsed row first
+      assert.deepEqual(counts(), { pending: 1499, ignored: 1 });
+      assert.equal(pend(1499).status, 'pending'); // then the ignored one
+      assert.deepEqual(counts(), { pending: 1500 });
+      assert.equal(pend(1500).status, 'queue_full', 'only when nothing is evictable');
+      assert.equal(st2.depositCounts().pending, 1500);
+    } finally { st2.close(); fs.rmSync(dir2, { recursive: true, force: true }); }
+    void o;
+  } finally { try { store.close(); } catch { /* already closed */ } fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('deposit matching: candidate rules (age, cancelled, paid, table count, past seats) and duplicates', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    // too old (> 6 h): not a candidate
+    const old = await d.place(tk[0], '홍길동');
+    const raw2 = new DatabaseSync(path.join(d.srv.data, 'booth.db'));
+    raw2.exec('PRAGMA busy_timeout=3000');
+    raw2.prepare('UPDATE orders SET created_at=created_at-? WHERE id=?').run(6 * 3600e3 + 60000, old.id);
+    assert.equal((await d.sms(8000, '홍길동')).status, 'pending');
+    assert.equal((await d.order(old.id)).paid, false);
+    raw2.prepare('UPDATE orders SET created_at=created_at+? WHERE id=?').run(60 * 60000, old.id); // 5 h old: eligible again
+    assert.equal((await d.sms(8000, '홍길동')).status, 'matched');
+    raw2.close();
+    // cancelled and already-paid orders are not candidates
+    const canc = await d.place(tk[1], '김철수'); await s.post(`/api/staff/orders/${canc.id}/status`, { status: 'cancelled' });
+    assert.equal((await d.sms(8000, '김철수')).status, 'pending');
+    const manual = await d.place(tk[2], '이영희'); await s.post(`/api/staff/orders/${manual.id}/paid`, { paid: true });
+    assert.equal((await d.sms(8000, '이영희')).status, 'pending');
+    // an order of a previous seating (table force-cleared) is invisible to staff and must never be paid automatically
+    const past = await d.place(tk[3], '박과거', 'fries'); await s.post(`/api/staff/orders/${past.id}/status`, { status: 'served' });
+    assert.equal((await s.post('/api/staff/tables/4/clear', { force: true })).status, 200);
+    const pastN = await d.sms(6000, '박과거');
+    assert.equal(pastN.status, 'pending');
+    assert.ok((await d.notices()).find((n) => n.id === pastN.id).reasons.includes('no_candidate'));
+    assert.equal((await d.order(past.id)), undefined, 'the order is not even in the staff state any more');
+    // ... and the current order of that table is the one that can be matched
+    const current = await d.place(tk[3], '박과거', 'fries');
+    assert.equal((await d.sms(6000, '박과거')).status, 'matched');
+    assert.equal((await d.order(current.id)).paid, true);
+    // tables above the table count are out
+    const hidden = await d.place(tk[7], '최숨김', 'odeng');
+    await s.post('/api/staff/tables/count', { count: 7, force: true });
+    assert.equal((await d.sms(9000, '최숨김')).status, 'pending');
+    await s.post('/api/staff/tables/count', { count: 8 });
+    assert.equal((await d.sms(9000, '최숨김')).status, 'matched');
+    assert.equal((await d.order(hidden.id)).paid, true);
+    // duplicates: same normalised text within 10 minutes is ignored (forwarders retry)
+    const t = smsText(2000, '정중복', 7);
+    const before = (await d.notices()).length;
+    assert.equal(JSON.parse((await hookPost(d.srv, d.secret, { text: t })).text).status, 'pending');
+    for (const variant of [t, t.replace(/\n/g, ' '), `  ${t.toUpperCase()}  `, t.replace('입금 ', '입금  ')]) {
+      assert.equal(JSON.parse((await hookPost(d.srv, d.secret, { text: variant })).text).status, 'duplicate', variant);
+    }
+    assert.equal((await d.notices()).length, before + 1);
+    // ... but not after 10 minutes (stored as pending for staff)
+    const raw3 = new DatabaseSync(path.join(d.srv.data, 'booth.db'));
+    raw3.exec('PRAGMA busy_timeout=3000');
+    raw3.prepare('UPDATE deposit_notices SET received_at=received_at-?1, last_at=COALESCE(last_at, received_at)-?1').run(11 * 60000);
+    raw3.close();
+    assert.equal(JSON.parse((await hookPost(d.srv, d.secret, { text: t })).text).status, 'pending');
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit notices: undo, assign, dismiss, auto-confirm switch, unparsed, secret rotation, reset, never visible to guests', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk, srv } = d;
+    // ---- undo of an automatic confirmation frees the notice ----
+    const o1 = await d.place(tk[0], '홍길동');
+    const auto = await d.sms(8000, '홍길동');
+    assert.equal(auto.status, 'matched');
+    const un = await s.post(`/api/staff/orders/${o1.id}/paid`, { paid: false });
+    assert.deepEqual([un.json.order.paid, un.json.order.paidBy], [false, null]);
+    let n1 = (await d.notices()).find((n) => n.id === auto.id);
+    assert.deepEqual([n1.status, n1.orderId, n1.matchedBy, n1.candidates.map((c) => c.id)], ['pending', null, null, [o1.id]]);
+    // staff marks paid manually: paid_by staff, the notice stays pending (not linked)
+    assert.equal((await s.post(`/api/staff/orders/${o1.id}/paid`, { paid: true })).json.order.paidBy, 'staff');
+    assert.equal((await d.notices()).find((n) => n.id === auto.id).status, 'pending');
+    await s.post(`/api/staff/orders/${o1.id}/paid`, { paid: false });
+    // ---- assign ----
+    const asg = async (nid, body) => s.post(`/api/staff/deposits/${nid}/assign`, body);
+    assert.equal((await new Client(srv).post(`/api/staff/deposits/${auto.id}/assign`, { orderId: o1.id })).status, 401);
+    assert.equal((await asg(auto.id, {})).json.error, 'bad_order');
+    assert.equal((await asg(9999, { orderId: o1.id })).status, 404);
+    assert.equal((await asg(auto.id, { orderId: 9999 })).json.error, 'no_order');
+    const ok = await asg(auto.id, { orderId: o1.id });
+    assert.equal(ok.status, 200, ok.text);
+    assert.deepEqual([ok.json.order.paid, ok.json.order.paidBy, ok.json.notice.status, ok.json.notice.matchedBy, ok.json.notice.orderId], [true, 'staff', 'matched', 'staff', o1.id]);
+    assert.equal((await asg(auto.id, { orderId: o1.id })).json.error, 'notice_closed', 'a notice matches at most one order');
+    // an order is paid by at most one notice
+    const second = await d.sms(8000, '아무개');
+    assert.equal((await asg(second.id, { orderId: o1.id })).json.error, 'order_paid');
+    // amount mismatch needs force
+    const o2 = await d.place(tk[1], '김철수', 'odeng'); // 9,000
+    const mm = await asg(second.id, { orderId: o2.id });
+    assert.equal(mm.status, 409); assert.deepEqual([mm.json.error, mm.json.noticeAmount, mm.json.orderTotal], ['amount_mismatch', 8000, 9000]);
+    assert.equal((await asg(second.id, { orderId: o2.id, force: 'true' })).json.error, 'amount_mismatch', 'only literal true forces');
+    assert.equal((await asg(second.id, { orderId: o2.id, force: true })).status, 200);
+    // cancelled orders cannot be assigned
+    const o3 = await d.place(tk[2], '이영희'); await s.post(`/api/staff/orders/${o3.id}/status`, { status: 'cancelled' });
+    const third = await d.sms(8000, '이영희');
+    assert.equal((await asg(third.id, { orderId: o3.id })).json.error, 'order_cancelled');
+    // ---- dismiss ----
+    const dis = await s.post(`/api/staff/deposits/${third.id}/dismiss`);
+    assert.deepEqual([dis.status, dis.json.notice.status], [200, 'dismissed']);
+    assert.equal((await s.post(`/api/staff/deposits/${third.id}/dismiss`)).json.error, 'notice_closed');
+    assert.equal((await s.post(`/api/staff/deposits/${auto.id}/dismiss`)).json.error, 'notice_closed', 'matched notices cannot be dismissed');
+    assert.equal((await s.post('/api/staff/deposits/9999/dismiss')).status, 404);
+    assert.equal((await asg(third.id, { orderId: o1.id })).json.error, 'notice_closed');
+    // ---- unparsed ----
+    const garbage = JSON.parse((await hookPost(srv, d.secret, { text: '입금되었습니다 (금액 미표시)' })).text);
+    assert.equal(garbage.status, 'unparsed');
+    const st = (await s.get('/api/staff/state')).json.deposit;
+    assert.deepEqual([st.pending, st.unparsed, st.autoConfirm], [0, 1, true]);
+    const o4 = await d.place(tk[3], '박넷째');
+    assert.equal((await asg(garbage.id, { orderId: o4.id })).json.error, 'amount_mismatch', 'no amount known: staff has to force it');
+    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true })).status, 200);
+    assert.equal((await s.post(`/api/staff/deposits/${garbage.id}/dismiss`)).json.error, 'notice_closed');
+    // ---- the auto-confirm switch ----
+    for (const bad of ['yes', 1, null, undefined]) assert.equal((await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: bad })).json.error, 'bad_auto_confirm', String(bad));
+    assert.equal((await new Client(srv).post('/api/staff/deposits/autoconfirm', { autoConfirm: false })).status, 401);
+    assert.equal((await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false })).json.autoConfirm, false);
+    assert.equal((await s.get('/api/staff/state')).json.deposit.autoConfirm, false);
+    const o5 = await d.place(tk[4], '최다섯');
+    assert.equal((await d.sms(8000, '최다섯')).status, 'pending', 'everything stays pending when auto-confirm is off');
+    assert.equal((await d.order(o5.id)).paid, false);
+    const pend = (await d.notices()).find((n) => n.status === 'pending' && n.depositor === '최다섯');
+    assert.deepEqual(pend.candidates.map((c) => c.id), [o5.id]);
+    assert.equal((await asg(pend.id, { orderId: o5.id })).status, 200, 'one-tap assignment');
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: true });
+    const o6 = await d.place(tk[5], '정여섯');
+    assert.equal((await d.sms(8000, '정여섯')).status, 'matched');
+    // ---- the secret ----
+    const oldSecret = d.secret;
+    const rot = await s.post('/api/staff/deposit-hook/rotate');
+    assert.equal(rot.status, 200);
+    assert.notEqual(rot.json.secret, oldSecret);
+    assert.match(rot.json.secret, /^[a-f0-9]{64}$/);
+    assert.equal(rot.json.url, `https://coms.kw.ac.kr/api/deposit-hook/${rot.json.secret}`);
+    assert.equal((await s.get('/api/staff/deposit-hook')).json.secret, rot.json.secret);
+    assert.equal((await hookPost(srv, oldSecret, { text: smsText(1000, 'x', 33) })).status, 404, 'the old secret stops working at once');
+    assert.equal((await hookPost(srv, rot.json.secret, { text: smsText(1000, '새비밀', 34) })).status, 200);
+    assert.equal((await new Client(srv).post('/api/staff/deposit-hook/rotate')).status, 401);
+    // ---- guests never see notices or the secret ----
+    const g = new Client(srv);
+    const everything = [(await g.get(`/api/t/${tk[0]}`)).text, (await g.get('/api/board')).text, (await g.get('/api/menu')).text];
+    for (const text of everything) assert.ok(!text.includes(rot.json.secret) && !/notice/i.test(text) && !text.includes('Web발신'), 'no notice data for guests');
+    for (const p of ['/api/staff/deposits', '/api/staff/deposit-hook']) assert.equal((await g.get(p)).status, 401, p);
+    assert.equal((await g.get(`/api/deposit-hook/${rot.json.secret}`)).status, 404);
+    // ---- reset clears notices, keeps the secret and the pay settings ----
+    await s.post('/api/staff/pay', { requireDepositor: true });
+    assert.ok((await d.notices()).length > 0);
+    assert.equal((await s.post('/api/staff/reset', { confirm: '초기화' })).status, 200);
+    assert.deepEqual(await d.notices(), []);
+    assert.deepEqual([(await s.get('/api/staff/state')).json.deposit.pending, (await s.get('/api/staff/state')).json.deposit.unparsed], [0, 0]);
+    assert.equal((await s.get('/api/staff/deposit-hook')).json.secret, rot.json.secret);
+    assert.equal((await s.get('/api/staff/state')).json.pay.requireDepositor, true);
+    assert.equal((await hookPost(srv, rot.json.secret, { text: smsText(1000, '리셋후', 35) })).status, 200);
+    void o6;
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit notices: the staff list is capped at the newest 200', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-dep-'));
+  const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 });
+  try {
+    for (let i = 0; i < 205; i++) store.ingestDeposit(`입금 ${1000 + i}원 홍길동 #${i}`);
+    const list = store.listDeposits();
+    assert.equal(list.length, 200);
+    assert.equal(list[0].amount, 1204);
+    assert.deepEqual(store.depositCounts(), { pending: 205, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000 });
+  } finally { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ======================= deposit notices: second-model review fixes =======================
+test('deposit injection: the sender-controlled name can never make a 100 won transfer pay a 9,000 won order', async () => {
+  const d = await depositSetup();
+  try {
+    const { tk, s } = d;
+    const o = await d.place(tk[0], '김철', 'odeng'); // 9,000
+    const shinhan = '[Web발신]\n신한 11/13 22:31\n110-639-***394\n입금 100\n잔액 123,456\n9000원김철';
+    const kb = '[KB국민] 11/13 22:31\n801302**364\n9000원김철\n입금\n100\n잔액 123,456';
+    const mixed = '[Web발신]\n신한 11/13 22:31\n입금 100\n잔액 123,456\n김철입금9000원';
+    const big = '입금 100원 52000원홍길동';
+    for (const text of [shinhan, kb, mixed, big]) {
+      const r = await d.notice(text);
+      assert.equal(r.status, 'pending', text);
+      assert.equal((await d.order(o.id)).paid, false, text);
+      const n = (await d.notices()).find((x) => x.id === r.id);
+      assert.ok(n.reasons.includes('multiple_amounts'), text);
+      assert.equal(n.amountGuessed, true, 'shown as an estimated amount');
+    }
+    // the same texts through the staff preview: eligible = false, nothing matched
+    const pv = (await s.post('/api/staff/deposit-hook/test', { text: shinhan })).json;
+    assert.deepEqual([pv.parsed.autoEligible, pv.wouldMatch.status], [false, 'pending']);
+    // staff can still assign it by hand; a guessed amount that differs from the order total needs force
+    const stray = (await d.notices()).find((n) => n.status === 'pending');
+    const noForce = await s.post(`/api/staff/deposits/${stray.id}/assign`, { orderId: (await d.place(tk[1], '박다른', 'cola')).id });
+    assert.equal(noForce.json.error, 'amount_mismatch');
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit matching: a hand-paid order with the same amount blocks auto-confirm; attach links the notice without touching payment', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const X = await d.place(tk[0], '홍길동', 'fries'); const Y = await d.place(tk[0], '홍길동', 'fries'); // 6,000 each, same name
+    await s.post(`/api/staff/orders/${X.id}/paid`, { paid: true }); // staff marked X by hand (guest showed the transfer screen)
+    const late = await d.sms(6000, '홍길동'); // the SMS of that very transfer arrives afterwards
+    assert.equal(late.status, 'pending', 'Y must not be paid for the transfer that belongs to X');
+    assert.equal((await d.order(Y.id)).paid, false);
+    const n = (await d.notices()).find((x) => x.id === late.id);
+    assert.ok(n.reasons.includes('maybe_already_handled'));
+    assert.deepEqual([n.candidates.map((c) => c.id), n.handledOrders.map((c) => c.id)], [[Y.id], [X.id]]);
+    // attach errors
+    const attach = (id, body) => s.post(`/api/staff/deposits/${id}/attach`, body);
+    assert.equal((await new Client(d.srv).post(`/api/staff/deposits/${late.id}/attach`, { orderId: X.id })).status, 401);
+    assert.equal((await attach(late.id, {})).json.error, 'bad_order');
+    assert.equal((await attach(late.id, { orderId: Y.id })).json.error, 'order_unpaid');
+    assert.equal((await attach(late.id, { orderId: 99999 })).status, 404);
+    assert.equal((await attach(99999, { orderId: X.id })).status, 404);
+    const ok = await attach(late.id, { orderId: X.id });
+    assert.equal(ok.status, 200, ok.text);
+    assert.deepEqual([ok.json.notice.status, ok.json.notice.matchedBy, ok.json.notice.orderId, ok.json.order.paid, ok.json.order.paidBy], ['matched', 'staff', X.id, true, 'staff']);
+    assert.equal((await d.order(Y.id)).paid, false, 'the other order is untouched');
+    assert.equal((await attach(late.id, { orderId: X.id })).json.error, 'notice_closed');
+    // an order linked to a notice does not count as hand-paid any more: a second real transfer for Y confirms normally
+    const second = await d.sms(6000, '홍길동');
+    assert.equal(second.status, 'matched');
+    assert.equal((await d.order(Y.id)).paidBy, 'auto');
+    const another = await d.sms(6000, '홍길동');
+    assert.equal(another.status, 'pending');
+    assert.ok((await d.notices()).find((x) => x.id === another.id).reasons.includes('no_candidate'));
+    // amount mismatch needs force on attach, and undoing the payment releases the notice
+    const Z = await d.place(tk[1], '김철수', 'odeng'); await s.post(`/api/staff/orders/${Z.id}/paid`, { paid: true });
+    assert.equal((await attach(another.id, { orderId: Z.id })).json.error, 'amount_mismatch');
+    assert.equal((await attach(another.id, { orderId: Z.id, force: true })).status, 200);
+    assert.equal((await s.post(`/api/staff/orders/${Z.id}/paid`, { paid: false })).status, 200);
+    assert.equal((await d.notices()).find((x) => x.id === another.id).status, 'pending');
+    assert.equal((await attach(another.id, { orderId: X.id, force: true })).json.error, 'order_has_notice');
+    // auto-confirmed order undone, identical text replayed later: not re-paid automatically
+    const Q = await d.place(tk[2], '정재생', 'cola');
+    const text = '입금 2,000원\n정재생';
+    assert.equal((await d.notice(text)).status, 'matched');
+    await s.post(`/api/staff/orders/${Q.id}/paid`, { paid: false });
+    const raw5 = new DatabaseSync(path.join(d.srv.data, 'booth.db'));
+    raw5.exec('PRAGMA busy_timeout=3000');
+    raw5.prepare('UPDATE deposit_notices SET received_at=received_at-?1, last_at=COALESCE(last_at, received_at)-?1').run(11 * 60000);
+    raw5.close();
+    assert.equal((await d.notice(text)).status, 'pending');
+    assert.equal((await d.order(Q.id)).paid, false);
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit test endpoint: real parser and matcher, stores and changes nothing', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const o = await d.place(tk[0], '홍길동', 'tteokbokki', 2); // 18,000 would need 9,000 x2
+    const o18 = await d.place(tk[1], '홍길동', 'odeng', 2); // 18,000
+    void o;
+    const sample = '입금 18,000원\n홍길동';
+    const call = (body) => s.post('/api/staff/deposit-hook/test', body);
+    const r = await call({ text: sample });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.parsed, { kind: 'deposit', amount: 18000, name: '홍길동', autoEligible: true, reasons: [] });
+    assert.deepEqual([r.json.wouldMatch.status, r.json.wouldMatch.orderId, r.json.wouldMatch.reasons], ['matched', o18.id, []]);
+    // nothing happened
+    assert.equal((await d.order(o18.id)).paid, false);
+    assert.deepEqual(await d.notices(), []);
+    assert.deepEqual((await s.get('/api/staff/state')).json.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: true, autoConfirmMaxAmount: 30000 });
+    // the real hook with the same text DOES pay it (and the preview afterwards reports the duplicate)
+    assert.equal((await d.notice(sample)).status, 'matched');
+    assert.equal((await d.order(o18.id)).paidBy, 'auto');
+    const again = (await call({ text: sample })).json;
+    assert.ok(again.wouldMatch.reasons.includes('duplicate'));
+    assert.equal((await d.notices()).length, 1, 'previews never store');
+    // other outcomes
+    assert.equal((await call({ text: '신한 출금 5,000원' })).json.wouldMatch.status, 'ignored');
+    assert.equal((await call({ text: '입금취소 5,000원 홍길동' })).json.wouldMatch.status, 'review');
+    assert.deepEqual((await call({ text: '입금되었습니다' })).json.wouldMatch.status, 'unparsed');
+    const ambiguous = (await call({ text: shinhanLike() })).json;
+    assert.deepEqual([ambiguous.parsed.autoEligible, ambiguous.wouldMatch.status], [false, 'pending']);
+    // guards
+    assert.equal((await new Client(d.srv).post('/api/staff/deposit-hook/test', { text: sample })).status, 401);
+    assert.equal((await raw(d.srv, 'POST', '/api/staff/deposit-hook/test', { 'content-type': 'application/json', cookie: s.cookieHeader(), origin: 'https://evil.example' }, JSON.stringify({ text: sample }))).status, 403);
+    for (const bad of [{}, { text: 5 }, { text: 'x'.repeat(2049) }]) assert.equal((await call(bad)).json.error, 'bad_body', JSON.stringify(bad).slice(0, 30));
+    assert.equal((await d.notices()).length, 1);
+  } finally { await d.srv.stop(); }
+  function shinhanLike() { return '[Web발신]\n신한 11/13 22:31\n입금 100\n잔액 123,456\n9000원김철'; }
+});
+
+test('deposit notices carry reason codes and obey the auto-confirm ceiling', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const reasonsOf = async (r) => (await d.notices()).find((n) => n.id === r.id).reasons;
+    // no candidate
+    assert.deepEqual(await reasonsOf(await d.sms(2000, '아무개')), ['no_candidate']);
+    // no depositor on the order / name mismatch / several candidates
+    await d.place(tk[0], undefined, 'cola');
+    assert.deepEqual(await reasonsOf(await d.sms(2000, '아무개')), ['no_depositor_on_order']);
+    await d.place(tk[1], '김철수', 'fries');
+    assert.deepEqual(await reasonsOf(await d.sms(6000, '박다른')), ['name_mismatch']);
+    await d.place(tk[2], '김철수', 'fries');
+    assert.deepEqual(await reasonsOf(await d.sms(6000, '김철수')), ['several_candidates']);
+    // parse reasons are carried over; auto off; duplicate
+    assert.deepEqual(await reasonsOf(await d.notice('입금 6,000원 김철수 박다른')), ['several_names', 'several_candidates']);
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
+    const o = await d.place(tk[3], '최단독', 'odeng');
+    assert.deepEqual(await reasonsOf(await d.sms(9000, '최단독')), ['auto_off']);
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: true });
+    const dupText = '입금 9,000원\n최단독';
+    const first = await d.notice(dupText);
+    assert.equal(first.status, 'matched');
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: false });
+    const raw6 = new DatabaseSync(path.join(d.srv.data, 'booth.db'));
+    raw6.exec('PRAGMA busy_timeout=3000');
+    raw6.prepare('UPDATE deposit_notices SET received_at=received_at-?1, last_at=COALESCE(last_at, received_at)-?1').run(30 * 1000);
+    raw6.close();
+    const dup = await d.notice(dupText);
+    // the undone notice is pending again, so the repeat collapses into it (repeatCount) and nothing is paid
+    assert.equal(dup.id, first.id);
+    assert.equal((await d.notices()).find((n) => n.id === first.id).repeatCount, 2);
+    assert.equal((await d.order(o.id)).paid, false);
+    // ceiling
+    const base = { autoConfirm: true };
+    for (const bad of [-1, 1000001, 1.5, '5000', null]) { const r = await s.post('/api/staff/deposits/autoconfirm', { ...base, autoConfirmMaxAmount: bad }); assert.equal(r.json.error, 'bad_auto_max', String(bad)); }
+    assert.equal((await s.post('/api/staff/deposits/autoconfirm', {})).json.error, 'bad_auto_confirm');
+    assert.equal((await new Client(d.srv).post('/api/staff/deposits/autoconfirm', { autoConfirmMaxAmount: 5 })).status, 401);
+    assert.equal((await s.get('/api/staff/state')).json.deposit.autoConfirmMaxAmount, 30000, 'default ceiling');
+    const huge = await d.place(tk[4], '최고액', 'tteokbokki', 15); // 120,000
+    assert.deepEqual(await reasonsOf(await d.sms(120000, '최고액')), ['over_max_amount']);
+    assert.equal((await d.order(huge.id)).paid, false);
+    const set = await s.post('/api/staff/deposits/autoconfirm', { autoConfirmMaxAmount: 120000 });
+    assert.deepEqual([set.json.autoConfirm, set.json.autoConfirmMaxAmount], [true, 120000]);
+    assert.equal((await d.sms(120000, '최고액')).status, 'matched', 'exactly at the ceiling is allowed');
+    assert.equal((await d.order(huge.id)).paidBy, 'auto');
+    // 0 = never automatic; the maximum value is accepted
+    assert.equal((await s.post('/api/staff/deposits/autoconfirm', { autoConfirmMaxAmount: 0 })).json.autoConfirmMaxAmount, 0);
+    await d.place(tk[5], '이영영', 'cola');
+    assert.ok((await reasonsOf(await d.sms(2000, '이영영'))).includes('over_max_amount'));
+    assert.equal((await s.post('/api/staff/deposits/autoconfirm', { autoConfirmMaxAmount: 1000000 })).json.autoConfirmMaxAmount, 1000000);
+    // the ignore-word reason
+    const rv = await d.notice('입금취소 2,000원 이영영');
+    assert.ok((await reasonsOf(rv)).includes('ignore_word'));
+  } finally { await d.srv.stop(); }
+});
+
+// ======================= deposit notices: third review =======================
+test('auto-confirm ships OFF: fresh databases, and existing ones are forced off once (then staff may switch it on)', async () => {
+  const srv = await boot();
+  let a; let b; let c;
+  try {
+    const s = await staffLogin(srv);
+    assert.deepEqual((await s.get('/api/staff/state')).json.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000 });
+    assert.equal((await s.get('/api/staff/deposits')).json.autoConfirm, false);
+    // with it off a perfect notice stays pending (reason auto_off) and nothing is paid
+    const T = (await tablesOf(s))[0].token;
+    const o = (await order(new Client(srv), T, [{ id: 'tteokbokki', qty: 1 }], { depositor: '홍길동' })).json.order;
+    const secret = (await s.get('/api/staff/deposit-hook')).json.secret;
+    const r = JSON.parse((await hookPost(srv, secret, { text: '입금 8,000원\n홍길동' })).text);
+    assert.equal(r.status, 'pending');
+    assert.deepEqual((await s.get('/api/staff/deposits')).json.notices[0].reasons, ['auto_off']);
+    assert.equal((await s.get('/api/staff/state')).json.orders.find((x) => x.id === o.id).paid, false);
+    // staff switches it on: survives restarts
+    assert.equal((await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: true })).json.autoConfirm, true);
+    await srv.stop({ keep: true });
+    a = await boot({ dir: srv.dir });
+    const sa = await staffLogin(a);
+    assert.equal((await sa.get('/api/staff/state')).json.deposit.autoConfirm, true, 'a restart does not switch it off again');
+    // an older database (released with auto-confirm ON, no migration flag yet): forced off exactly once
+    await a.stop({ keep: true });
+    const db = new DatabaseSync(path.join(srv.dir, 'data', 'booth.db'));
+    db.exec('PRAGMA busy_timeout=3000');
+    db.prepare("DELETE FROM settings WHERE k='auto_confirm_default_v2'").run();
+    db.prepare("INSERT INTO settings(k,v) VALUES('deposit_auto_confirm','1') ON CONFLICT(k) DO UPDATE SET v='1'").run();
+    db.prepare("INSERT INTO settings(k,v) VALUES('deposit_auto_max','80000') ON CONFLICT(k) DO UPDATE SET v='80000'").run();
+    db.close();
+    b = await boot({ dir: srv.dir });
+    const sb = await staffLogin(b);
+    const dep = (await sb.get('/api/staff/state')).json.deposit;
+    assert.deepEqual([dep.autoConfirm, dep.autoConfirmMaxAmount], [false, 80000], 'forced off; an explicit ceiling chosen by staff is kept');
+    await sb.post('/api/staff/deposits/autoconfirm', { autoConfirm: true });
+    await b.stop({ keep: true });
+    c = await boot({ dir: srv.dir });
+    assert.equal((await (await staffLogin(c)).get('/api/staff/state')).json.deposit.autoConfirm, true, 'the migration runs only once');
+  } finally { await srv.stop({ keep: true }); for (const x of [a, b]) if (x) await x.stop({ keep: true }); if (c) await c.stop(); else fs.rmSync(srv.dir, { recursive: true, force: true }); }
+});
+
+test('review blocker: a sender-typed 잔액 in the middle of a line cannot make a 1 won transfer pay a 16,000 won order', async () => {
+  const d = await depositSetup();
+  try {
+    const o = await d.place(d.tk[0], '김철', 'tteokbokki', 2); // 16,000
+    const attacks = ['[Web발신]\n신한 11/13 22:31 김철16000잔액 1원 입금', '[Web발신]\n신한 11/13 22:31 김철 16000 잔액 1원 입금', '입금 1원\u2028잔액 16000\n김철', '입금 2원\u2029잔액 16000\n김철'];
+    for (const text of attacks) {
+      const r = await d.notice(text);
+      assert.equal(r.status, 'pending', JSON.stringify(text));
+      assert.equal((await d.order(o.id)).paid, false, JSON.stringify(text));
+      assert.ok((await d.notices()).find((n) => n.id === r.id).reasons.includes('multiple_amounts'));
+    }
+    // the same transfer after an undo cannot re-pay it either
+    assert.equal((await d.s.post('/api/staff/deposit-hook/test', { text: attacks[0] })).json.parsed.autoEligible, false);
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit matching only considers the CURRENT seat of visible tables; manual assign is limited to orders staff can see', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const old = await d.place(tk[4], '최하늘', 'odeng'); // 9,000, then the table is force-cleared: invisible to staff
+    assert.equal((await s.post('/api/staff/tables/5/clear', { force: true })).status, 200);
+    const n = await d.notice('입금 9,000원\n최하늘');
+    assert.equal(n.status, 'pending');
+    assert.deepEqual((await d.notices()).find((x) => x.id === n.id).reasons, ['no_candidate']);
+    const real = await d.place(tk[4], '최하늘', 'odeng'); // the guest's current order at that table
+    // a hand-paid order of the OLD seat is not a competitor either
+    const handOld = await d.place(tk[5], '정옛날', 'fries'); await s.post(`/api/staff/orders/${handOld.id}/paid`, { paid: true });
+    await s.post('/api/staff/tables/6/clear', { force: true });
+    const cur = await d.place(tk[5], '정옛날', 'fries');
+    assert.equal((await d.sms(6000, '정옛날')).status, 'matched', 'only the visible order counts');
+    assert.equal((await d.order(cur.id)).paid, true);
+    // manual assign / attach of an order that is not the current seat of a visible table: refused
+    const other = await d.sms(9000, '아무개');
+    assert.equal((await s.post(`/api/staff/deposits/${other.id}/assign`, { orderId: old.id, force: true })).status, 404);
+    assert.equal((await s.post(`/api/staff/deposits/${other.id}/attach`, { orderId: handOld.id, force: true })).status, 404);
+    assert.equal((await s.post(`/api/staff/deposits/${other.id}/assign`, { orderId: real.id })).status, 200, 'the visible order can be assigned');
+    // hidden tables are out too
+    const hid = await d.place(tk[7], '최숨김', 'cola');
+    await s.post('/api/staff/tables/count', { count: 7, force: true });
+    const nn = await d.sms(2000, '최숨김');
+    assert.equal(nn.status, 'pending');
+    assert.equal((await s.post(`/api/staff/deposits/${nn.id}/assign`, { orderId: hid.id })).status, 404);
+  } finally { await d.srv.stop(); }
+});
+
+test('KakaoBank shape: 입출금통장 is a template word, not a withdrawal; the ceiling default is 30,000', async () => {
+  const d = await depositSetup();
+  try {
+    const o = await d.place(d.tk[0], '홍길동', 'tteokbokki', 2);
+    const r = await d.notice('입금 16,000원\n홍길동 → 내 입출금통장');
+    assert.equal(r.status, 'matched');
+    assert.equal((await d.order(o.id)).paidBy, 'auto');
+    const big = await d.place(d.tk[1], '최고액', 'tteokbokki', 5); // 40,000 > 30,000
+    const n = await d.notice('입금 40,000원\n최고액');
+    assert.equal(n.status, 'pending');
+    assert.deepEqual((await d.notices()).find((x) => x.id === n.id).reasons, ['over_max_amount']);
+    assert.equal((await d.order(big.id)).paid, false);
+  } finally { await d.srv.stop(); }
+});
+
+test('deposit hook: wrong-secret attempts have their own small budget; malformed requests with the right secret cost nothing', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, secret } = d;
+    // 30 concurrent wrong secrets: at most 20 are delayed, the rest answer at once; none consumes the real budget
+    const t0 = Date.now();
+    const res = await Promise.all(Array.from({ length: 30 }, async (_, i) => { const t = Date.now(); const r = await hookPost(srv, 'e'.repeat(63) + (i % 10), { text: 'x' }); return [r.status, Date.now() - t]; }));
+    assert.ok(res.every(([st]) => st === 404));
+    assert.ok(res.filter(([, ms]) => ms < 150).length >= 8, 'over-budget attempts are answered immediately: ' + JSON.stringify(res.map((x) => x[1])));
+    assert.ok(res.filter(([, ms]) => ms >= 250).length <= 20 + 2, 'at most ~20 idle sockets');
+    void t0;
+    // after more than 20 bad attempts in a minute no more delays at all
+    const t1 = Date.now();
+    assert.equal((await hookPost(srv, 'f'.repeat(64), { text: 'x' })).status, 404);
+    assert.ok(Date.now() - t1 < 150);
+    // the real forwarder is unaffected, and malformed requests with the right secret do not use up its 60/min
+    for (let i = 0; i < 70; i++) assert.equal((await hookPost(srv, secret, 'x', 'application/xml')).status, 415);
+    for (let i = 0; i < 5; i++) assert.equal((await hookPost(srv, secret, { text: smsText(2000 + i, '이름', i + 1) })).status, 200);
+    assert.equal((await d.s.get('/api/staff/state')).json.hookRateLimited, false);
+  } finally { await d.srv.stop(); }
 });

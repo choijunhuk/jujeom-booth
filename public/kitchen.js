@@ -1,28 +1,21 @@
-/* Kitchen display: aggregated "what to cook" + cooking orders oldest first. */
+/* Kitchen display: aggregated "what to cook" + cooking orders oldest first. Same components as the staff board, larger scale. */
 (function () {
   'use strict';
   var SC = window.SC, h = SC.h, $ = SC.$;
   var TITLE = '주방 · 주점 부스';
-  var seen = null, live = null, lockUntil = 0;
-
-  SC.onUnauthorized = function () { location.replace(SC.BASE + '/staff?next=kitchen'); };
-
-  var conn = SC.connIndicator();
-  $('#top').append(h('h1', null, '주방 ', h('span', null, '화면')), conn, SC.soundButton(), h('a', { class: 'btn', href: SC.BASE + '/staff' }, '스태프 화면'));
+  var seen = null, live = null, lockUntil = 0, shell = null, gate = null;
 
   var make = $('#make'), jobs = $('#jobs');
-  var emptyMake = h('div', { class: 'empty k-empty' }, '만들 음식이 없어요'), emptyJobs = h('div', { class: 'empty k-empty' }, '조리 중인 주문이 없어요');
+  var emptyMake = h('div', { class: 'empty' }, '만들 음식이 없어요'), emptyJobs = h('div', { class: 'empty' }, '조리 중인 주문이 없어요');
 
-  function lateClass(since) { var m = (Date.now() - since) / 60000; return m >= 20 ? 'l2' : m >= 10 ? 'l1' : ''; }
-  function lateLabel(since) { var m = (Date.now() - since) / 60000; return m >= 20 ? '지연' : m >= 10 ? '오래 걸림' : ''; }
+  function lateOf(since) { var m = (Date.now() - since) / 60000; return m >= 20 ? 2 : m >= 10 ? 1 : 0; }
   function paintLate() {
-    jobs.querySelectorAll('.job').forEach(function (el) {
-      var since = Number(el.dataset.since), c = lateClass(since), w = el.querySelector('.w');
-      el.classList.toggle('l1', c === 'l1'); el.classList.toggle('l2', c === 'l2');
-      var t = lateLabel(since);
-      w.textContent = t ? '! ' + t : '';
-      w.className = 'w tag ' + (c === 'l2' ? 'bad solid' : 'warn');
-      w.hidden = !t;
+    jobs.querySelectorAll('.ocard').forEach(function (el) {
+      var l = lateOf(Number(el.dataset.since)), w = el.querySelector('.late');
+      el.classList.toggle('late1', l === 1); el.classList.toggle('late2', l === 2);
+      w.hidden = !l;
+      w.textContent = l === 2 ? '! 지연' : '! 오래 걸림';
+      w.className = 'tag late ' + (l === 2 ? 'bad solid' : 'warn');
     });
   }
 
@@ -40,38 +33,52 @@
         });
       });
     } }, '완료');
-    var el = SC.timeEl(o.since, 'dur');
-    el.classList.add('t');
     b.appendChild(h('span', { class: 'vh' }, ' ' + o.table + '번 테이블'));
-    return h('article', { class: 'job', dataset: { since: o.since } },
-      h('div', { class: 'job-head' },
-        h('div', { class: 'tn' }, String(o.table), h('small', null, '번 테이블 · #' + o.id)),
-        h('div', { class: 'el' }, el, h('span', { class: 'w tag', hidden: true }))),
-      o.member ? h('div', null, h('span', { class: 'tag info' }, '★ COMS 회원')) : null,
+    return h('article', { class: 'ocard st-cooking xl', dataset: { since: o.since } },
+      h('div', { class: 'ohead' },
+        h('div', { class: 'tno' }, h('span', { class: 'n', text: o.table }), h('span', { class: 'u', text: '번 테이블' })),
+        h('div', { class: 'ometa' },
+          h('div', { class: 'line' }, h('span', { class: 'oid' }, '#' + o.id), SC.timeEl(o.since, 'dur')),
+          h('div', { class: 'line' }, h('span', { class: 'tag info' }, '조리 중'), o.member ? h('span', { class: 'tag info' }, '★ COMS 회원') : null, h('span', { class: 'tag late', hidden: true })))),
       h('ul', { class: 'items' }, o.items.map(function (i) { return h('li', null, h('span', { class: 'q' }, '×' + i.qty), h('span', null, i.name)); })),
       o.note ? h('p', { class: 'note' }, h('b', null, '요청'), o.note) : null,
-      b);
+      h('div', { class: 'oact' }, b));
   }
 
   function onState(d) {
     var ids = new Set(d.orders.map(function (o) { return o.id; }));
     if (seen) {
       var fresh = d.orders.filter(function (o) { return !seen.has(o.id); });
+      fresh.forEach(function (o) { SC.notif.show('새 조리 주문 · ' + o.table + '번 테이블', SC.itemsText(o.items), 'cook-' + o.id); });
       if (fresh.length) { SC.attention('kitchen'); SC.toast('새 주문 · ' + fresh.map(function (o) { return o.table + '번'; }).join(', ') + ' 테이블', 'ok'); }
     }
     seen = ids;
-    $('#mk-n').textContent = d.items.reduce(function (a, i) { return a + i.qty; }, 0) ? '총 ' + d.items.reduce(function (a, i) { return a + i.qty; }, 0) + '개' : '';
-    $('#jb-n').textContent = d.orders.length ? d.orders.length + '건' : '';
+    var total = d.items.reduce(function (a, i) { return a + i.qty; }, 0);
+    $('#mk-n').textContent = total ? '총 ' + total + '개' : ''; $('#mk-n').hidden = !total;
+    $('#jb-n').textContent = d.orders.length ? d.orders.length + '건' : ''; $('#jb-n').hidden = !d.orders.length;
     SC.reconcile(make, d.items, function (i) { return i.id; }, JSON.stringify, function (i) {
-      return h('div', { class: 'mk' }, h('span', { class: 'q' }, String(i.qty)), h('span', { class: 'nm' }, i.name));
+      return h('div', { class: 'tile xl' }, h('span', { class: 'q' }, String(i.qty)), h('span', { class: 'nm' }, i.name));
     }, emptyMake);
     SC.reconcile(jobs, d.orders, function (o) { return o.id; }, JSON.stringify, jobCard, emptyJobs);
     SC.setTitle(d.orders.length, TITLE);
     paintLate();
   }
 
+  function start() {
+    var app = $('#app');
+    if (!shell) {
+      SC.prefs.defaults({ vol: 2 }); // kitchen is noisy: loudest by default
+      shell = SC.shell({ page: 'kitchen', label: '주방', kinds: ['kitchen'], onLogout: function () { gate.logout(); } });
+      app.insertBefore(SC.audioStrip(), app.firstChild);
+      app.insertBefore(shell.el, $('#main'));
+    }
+    seen = null;
+    shell.conn.set('wait');
+    live = SC.live({ sse: '/api/kitchen/events', poll: '/api/kitchen', onState: onState, onStatus: function (s) { shell.conn.set(s); } });
+    SC.wake.sync();
+  }
+  function stop() { if (live) { live.close(); live = null; } document.querySelectorAll('dialog[open]').forEach(function (d) { d.close(); }); }
+
   setInterval(paintLate, 15000);
-  SC.api('/api/staff/me', { noAuthRedirect: true }).then(function () {
-    live = SC.live({ sse: '/api/kitchen/events', poll: '/api/kitchen', onState: onState, onStatus: conn.set });
-  }, function () { SC.onUnauthorized(); });
+  gate = SC.gate({ app: $('#app'), start: start, stop: stop, where: '주방' });
 })();

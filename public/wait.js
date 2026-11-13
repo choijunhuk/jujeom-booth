@@ -6,6 +6,7 @@
   var main = $('#main'), calledEl = $('#called'), connEl = $('#conn');
   var entry = null, live = null, prevStatus = null, vibTimer = 0, size = 2, infoTimer = 0;
 
+  SC.wake.active = function () { return !!entry; }; // keep the screen on only while waiting
   function save(v) { try { if (v) localStorage.setItem(KEY, JSON.stringify(v)); else localStorage.removeItem(KEY); } catch (e) { /* storage blocked */ } }
   function load() { try { var v = JSON.parse(localStorage.getItem(KEY)); return v && v.id && v.secret ? v : null; } catch (e) { return null; } }
   function q() { return '?secret=' + encodeURIComponent(entry.secret); }
@@ -65,9 +66,33 @@
     } }, '대기 취소');
     T.cancel = cancel;
     main.replaceChildren(
+      SC.audioStrip(),
       h('div', { class: 'ticket' }, h('div', { class: 'k' }, '내 순번'), T.pos, T.ahead, h('div', { class: 'perf' }), T.who, T.total),
       h('p', { class: 'hint' }, '순서가 되면 이 화면이 "입장하세요"로 바뀌어요. 다른 앱을 쓰다 와도 괜찮지만 이 페이지는 닫지 말아 주세요.'),
+      alertControls(),
       cancel);
+  }
+
+  // Optional helpers for the guest: notification on call, keep screen on. Permission is requested only on tap.
+  function alertControls() {
+    var box = h('div', { class: 'ctl' });
+    function draw() {
+      var nWhy = SC.notif.reason(), wWhy = SC.wake.reason();
+      var nOn = SC.prefs.get('notify') && !nWhy && Notification.permission === 'granted';
+      var nb = h('button', { class: 'btn btn-block', type: 'button', 'aria-pressed': nOn ? 'true' : 'false', onclick: function () {
+        if (nOn) { SC.prefs.set('notify', false); draw(); return; }
+        SC.notif.enable().then(function (ok) { if (!ok) SC.toast(SC.notif.reason() || '알림이 허용되지 않았어요.', 'error'); draw(); });
+      } }, nOn ? '✓ 순서가 되면 알림 받기 (켜짐)' : '순서가 되면 알림 받기');
+      if (nWhy) nb.disabled = true;
+      var wOn = SC.prefs.get('wake') && !wWhy;
+      var wb = h('button', { class: 'btn btn-block', type: 'button', 'aria-pressed': wOn ? 'true' : 'false', onclick: function () {
+        SC.prefs.set('wake', !wOn); SC.wake.sync(); draw();
+      } }, wOn ? '✓ 화면 켜 두기 (켜짐)' : '화면 켜 두기');
+      if (wWhy) wb.disabled = true;
+      SC.fill(box, nb, nWhy ? h('p', { class: 'hint' }, nWhy) : null, wb, wWhy ? h('p', { class: 'hint' }, wWhy) : null);
+    }
+    draw();
+    return box;
   }
 
   function render(d) {
@@ -89,19 +114,24 @@
       h('h1', { id: 'called-h' }, '입장하세요'),
       h('p', null, d.nick + ' · ' + d.size + '명'),
       h('p', null, '입구 스태프에게 이 화면을 보여 주세요'),
-      h('button', { class: 'btn', type: 'button', onclick: function () { calledEl.hidden = true; } }, '화면 작게 보기'));
+      h('button', { class: 'btn', type: 'button', onclick: function () { calledEl.hidden = true; clearInterval(vibTimer); try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) { /* ignore */ } } }, '확인했어요'));
     calledEl.hidden = false;
   }
+  // Chime (+ vibration) every 4 s for up to 2 minutes, or until the guest taps 확인.
+  var CHIME_MS = 4000, CHIME_MAX_MS = 120000;
   function notifyCalled() {
-    SC.audio.beep('called');
     function vib() { try { if (navigator.vibrate) navigator.vibrate([500, 200, 500, 200, 800]); } catch (e) { /* unsupported */ } }
-    vib();
+    SC.audio.beep('called'); vib(); SC.flash();
+    SC.notif.show('입장하세요!', '대기 순서가 되었어요. 입구로 와 주세요.', 'wait-called');
     clearInterval(vibTimer);
-    var n = 0;
-    vibTimer = setInterval(function () { if (++n > 40 || calledEl.hidden && n > 3) { clearInterval(vibTimer); return; } if (document.visibilityState === 'visible') { vib(); if (n % 3 === 0) SC.audio.beep('called'); } }, 3000);
+    var t0 = Date.now();
+    vibTimer = setInterval(function () {
+      if (Date.now() - t0 >= CHIME_MAX_MS || calledEl.hidden) { clearInterval(vibTimer); return; }
+      SC.audio.beep('called'); vib();
+    }, CHIME_MS);
   }
   function end(kind) {
-    stopLive(); save(null); entry = null; T = {};
+    stopLive(); save(null); entry = null; T = {}; SC.wake.sync();
     document.title = '주점 부스';
     main.replaceChildren(h('div', { class: 'end' },
       h('h1', { class: 'w-h' }, kind === 'seated' ? '즐거운 시간 보내세요!' : '대기가 취소됐어요'),
@@ -110,7 +140,7 @@
   }
 
   function start() {
-    prevStatus = null; T = {};
+    prevStatus = null; T = {}; SC.wake.sync();
     main.replaceChildren(h('p', { class: 'w-sub' }, '순번을 불러오는 중…'));
     live = SC.live({
       sse: '/api/wait/' + entry.id + '/events' + q(), poll: '/api/wait/' + entry.id + q(),

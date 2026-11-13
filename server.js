@@ -61,10 +61,11 @@ try { menu = readJson('menu.json'); } catch (e) { console.error(`menu.json could
 const rewards = readJson('rewards.json');
 const tablesCfg = readJson('tables.json');
 (function validateConfig() {
-  for (const r of rewards.rewards) {
-    if (!rewards.games[r.game] || !['discount', 'item'].includes(r.type)) throw new Error('rewards.json: bad reward ' + r.id);
+  if (!rewards.games || typeof rewards.games !== 'object') throw new Error('rewards.json: "games" is required');
+  for (const [name, g] of Object.entries(rewards.games)) {
+    if (!Number.isInteger(g.maxScore) || g.maxScore < 1 || !Number.isInteger(g.minDurationMs) || g.minDurationMs < 0) throw new Error('rewards.json: bad game ' + name);
   }
-  if (!Number.isInteger(tablesCfg.count) || tablesCfg.count < 1 || tablesCfg.count > 500) throw new Error('tables.json: bad count');
+  if (!Number.isInteger(tablesCfg.count) || tablesCfg.count < 1 || tablesCfg.count > 50) throw new Error('tables.json: bad count');
 }());
 
 const limits = {
@@ -73,10 +74,13 @@ const limits = {
   seatOpenMax: envInt('SEAT_OPEN_MAX', 20),
   memberOrderMax: envInt('MEMBER_ORDER_MAX', 20),
 };
-const storeOpts = { maxDbBytes: envInt('DB_MAX_BYTES', 256 * 1024 * 1024), backupSkipBytes: envInt('BACKUP_SKIP_BYTES', 128 * 1024 * 1024) };
-const store = createStore({ dataDir: DATA_DIR, menu, rewards, tableCount: tablesCfg.count, limits, memberEnabled: !!COMS_ME_URL, ...storeOpts });
+const PHOTO_MAX = 400 * 1024;
+const PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const storeOpts = { photoMaxBytes: envInt('PHOTO_STORAGE_MAX', 40 * 1024 * 1024), maxDbBytes: envInt('DB_MAX_BYTES', 256 * 1024 * 1024), backupSkipBytes: envInt('BACKUP_SKIP_BYTES', 128 * 1024 * 1024) };
+const store = createStore({ dataDir: DATA_DIR, menu, rewards, tableCount: tablesCfg.count, payEnv: { bank: PAY.bank, account: PAY.account, holder: PAY.holder }, limits, memberEnabled: !!COMS_ME_URL, ...storeOpts });
 const DEVICE_KEY = store.deviceSecret();
-const tokenToTable = new Map(store.tokens().map((t) => [t.token, t.id]));
+let tokenToTable = new Map(store.tokens().map((t) => [t.token, t.id]));
+const refreshTokens = () => { tokenToTable = new Map(store.tokens().map((t) => [t.token, t.id])); };
 
 // ---------- small helpers ----------
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest();
@@ -124,7 +128,7 @@ const SEC_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'same-origin',
   'X-Frame-Options': 'DENY',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+  'Content-Security-Policy': "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
 };
 
 function sendJson(res, status, obj) {
@@ -203,6 +207,7 @@ function hint(chan, event, obj) {
   const s = JSON.stringify(obj);
   for (const c of conns) if (c.chan === chan) sseWrite(c, event, s);
 }
+const closeGuestStreams = (keep) => { for (const c of [...conns]) if (c.chan[0] === 'g' && !keep(Number(c.chan.slice(2)))) { conns.delete(c); c.res.end(); } };
 // Limits close the OLDEST stream instead of rejecting: EventSource gives up for good on a non-200, but silently reconnects after a close.
 function evictOldest(pred, max) {
   const m = [...conns].filter(pred);
@@ -283,10 +288,10 @@ async function fetchComsMember(token) {
   }
   let j;
   try { j = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return { id: null, cache: false }; }
-  if (j && Number.isInteger(j.id) && j.id > 0 && ROLES.has(j.role)) return { id: j.id, cache: true };
+  if (j && Number.isInteger(j.id) && j.id > 0 && ROLES.has(j.role)) return { id: j.id, role: j.role, cache: true };
   return { id: null, cache: false };
 }
-// resolves to the club member id, or null. Never throws.
+// resolves to { id, role } (club member id and role; neither is ever sent to a client) or null. Never throws.
 // Requires an existing valid booth_d (a cookie minted by this very request does not count): no device, no lookup.
 async function verifyMember(req) {
   if (!COMS_ME_URL) return null;
@@ -297,7 +302,7 @@ async function verifyMember(req) {
   const key = crypto.createHash('sha256').update(token).digest('hex');
   const t = Date.now();
   const pos = memberPos.get(key);
-  if (pos && t - pos.at < MEMBER_CACHE_MS) return pos.id;
+  if (pos && t - pos.at < MEMBER_CACHE_MS) return pos.m;
   const neg = memberNeg.get(key);
   if (neg && t - neg.at < MEMBER_CACHE_MS) return null;
   if (memberPending.has(key)) return memberPending.get(key);
@@ -313,8 +318,9 @@ async function verifyMember(req) {
   memberInflight++;
   memberCalls.push(t);
   const p = fetchComsMember(token).catch(() => ({ id: null, cache: false })).then((r) => {
-    if (r.cache) { if (r.id != null) putCache(memberPos, key, { at: Date.now(), id: r.id }); else putCache(memberNeg, key, { at: Date.now() }); }
-    return r.id;
+    const m = r.id != null ? { id: r.id, role: r.role } : null;
+    if (r.cache) { if (m) putCache(memberPos, key, { at: Date.now(), m }); else putCache(memberNeg, key, { at: Date.now() }); }
+    return m;
   }).finally(() => { memberInflight--; memberPending.delete(key); });
   memberPending.set(key, p);
   return p;
@@ -322,7 +328,7 @@ async function verifyMember(req) {
 
 // ---------- routing ----------
 const routes = [];
-const route = (method, re, fn, opts = {}) => routes.push({ method, re: new RegExp(`^${re}$`), fn, staff: !!opts.staff });
+const route = (method, re, fn, opts = {}) => routes.push({ method, re: new RegExp(`^${re}$`), fn, staff: !!opts.staff, raw: !!opts.raw });
 const int = (s) => Number(s);
 const need = (cond, code, msg) => { if (!cond) throw new HttpError(400, code, msg); };
 function guestCtx(c) {
@@ -348,6 +354,13 @@ route('GET', '/staff/qr', (c) => servePage(c, 'qr.html'));
 route('GET', '/kitchen', (c) => servePage(c, 'kitchen.html'));
 route('GET', '/board', (c) => servePage(c, 'board.html'));
 route('GET', '/static/(.+)', serveStatic);
+// the booth service worker: scope is BASE/ (the worker itself does no caching)
+route('GET', '/sw.js', (c) => {
+  let buf;
+  try { buf = Buffer.from(fs.readFileSync(path.join(PUBLIC, 'sw.js'), 'utf8').replaceAll('__BASE__', BASE)); } catch { return notFoundPage(c.res); }
+  c.res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': `${BASE}/`, 'Content-Length': buf.length });
+  c.res.end(buf);
+});
 
 // public api
 route('GET', '/api/health', () => ({ ok: true, time: Date.now() }));
@@ -356,18 +369,20 @@ route('GET', '/api/board', () => store.boardState());
 route('GET', '/api/board/events', (c) => sse(c, 'board', () => store.boardState(), true));
 
 // guest api
-const guestSnap = (c) => ({ ...store.guestState(c.tableId, c.device), pay: PAY });
+const guestSnap = (c) => store.guestState(c.tableId, c.device);
 route('GET', G, (c) => guestSnap(guestCtx(c)));
 route('GET', G + '/events', (c) => { guestCtx(c); sse(c, 'g:' + c.tableId, () => guestSnap(c)); });
 route('GET', G + '/member', async (c) => {
   guestCtx(c);
-  const id = await verifyMember(c.req); // only the boolean leaves the server: no id, name or role
-  return { enabled: !!COMS_ME_URL, member: id != null, pct: store.memberPct() };
+  const ms = store.memberSettings();
+  const m = ms.enabled ? await verifyMember(c.req) : null; // staff switch off = no lookup at all
+  const eligible = !!m && (ms.includeAssociate || m.role !== 'ASSOCIATE'); // only booleans / rule values leave the server
+  return { enabled: !!COMS_ME_URL && ms.enabled, member: eligible, mode: ms.mode, pct: ms.pct, amount: ms.amount, minOrder: ms.minOrder, maxDiscount: ms.maxDiscount, stackWithCoupon: ms.stackWithCoupon };
 });
 route('POST', G + '/orders', async (c) => {
   guestCtx(c);
-  const memberId = await verifyMember(c.req); // a client-sent "member" field is never read
-  const r = store.createOrder(c.tableId, c.body, { memberId });
+  const m = store.memberSettings().enabled ? await verifyMember(c.req) : null; // a client-sent "member" field is never read
+  const r = store.createOrder(c.tableId, c.body, { memberId: m ? m.id : null, memberRole: m ? m.role : null });
   if (!r.duplicate) {
     c.status = 201;
     touchTable(c.tableId);
@@ -378,6 +393,12 @@ route('POST', G + '/orders', async (c) => {
 route('POST', G + '/orders/(\\d{1,9})/cancel', (c) => {
   guestCtx(c);
   const order = store.guestCancel(c.tableId, int(c.m[2]));
+  touchTable(c.tableId);
+  return { order };
+});
+route('POST', G + '/orders/(\\d{1,9})/depositor', (c) => {
+  guestCtx(c);
+  const order = store.setDepositor(c.tableId, int(c.m[2]), c.body.depositor);
   touchTable(c.tableId);
   return { order };
 });
@@ -450,8 +471,8 @@ route('GET', '/api/staff/me', () => ({ ok: true }), { staff: true });
 
 // staff api
 const S = { staff: true };
-route('GET', '/api/staff/state', () => store.staffState(), S);
-route('GET', '/api/staff/events', (c) => sse(c, 'staff', () => store.staffState(), true), S);
+route('GET', '/api/staff/state', () => staffSnap(), S);
+route('GET', '/api/staff/events', (c) => sse(c, 'staff', () => staffSnap(), true), S);
 route('GET', '/api/staff/tables', () => ({
   tables: store.tokens().map((t) => ({ number: t.id, token: t.token, url: `${PUBLIC_ORIGIN}${BASE}/t/${t.token}` })),
   waitUrl: `${PUBLIC_ORIGIN}${BASE}/wait`,
@@ -471,6 +492,61 @@ route('POST', '/api/staff/menu/([A-Za-z0-9_-]{1,40})/soldout', (c) => {
   touchAll();
   return { ok: true, menu: store.menuView(true) };
 }, S);
+// ---- payment settings, deposit notices ----
+const hookUrl = () => {
+  const secret = store.depositSecret();
+  return { secret, path: `${BASE}/api/deposit-hook/${secret}`, url: `${PUBLIC_ORIGIN}${BASE}/api/deposit-hook/${secret}`, header: 'X-Booth-Hook', headerUrl: `${PUBLIC_ORIGIN}${BASE}/api/deposit-hook` };
+};
+let hookLimitedAt = 0; // staff learn for 5 minutes that the hook hit its rate cap
+const staffSnap = () => ({ ...store.staffState(), hookRateLimited: Date.now() - hookLimitedAt < 5 * 60000 });
+route('POST', '/api/staff/pay', (c) => { const pay = store.setPay(c.body); touchAll(); return { ok: true, pay }; }, S);
+route('GET', '/api/staff/deposits', () => ({ notices: store.listDeposits(), ...store.depositCounts() }), S);
+route('POST', '/api/staff/deposits/(\\d{1,9})/assign', (c) => { const r = store.assignDeposit(int(c.m[1]), c.body.orderId, c.body.force); touchTable(r.order.table); return { ok: true, ...r }; }, S);
+route('POST', '/api/staff/deposits/(\\d{1,9})/dismiss', (c) => { const notice = store.dismissDeposit(int(c.m[1])); touch('staff'); return { ok: true, notice }; }, S);
+route('POST', '/api/staff/deposits/autoconfirm', (c) => { const r = store.setAutoConfirm(c.body); touch('staff'); return { ok: true, ...r }; }, S);
+route('POST', '/api/staff/deposits/(\\d{1,9})/attach', (c) => { const r = store.attachDeposit(int(c.m[1]), c.body.orderId, c.body.force); touchTable(r.order.table); return { ok: true, ...r }; }, S);
+// "테스트 보내기": the real parser and matcher, but nothing is stored and nothing changes
+route('POST', '/api/staff/deposit-hook/test', (c) => {
+  if (typeof c.body.text !== 'string' || c.body.text.length > 2048) throw new HttpError(400, 'bad_body', '{ "text": "..." } (최대 2KB) 형식이어야 합니다.');
+  return store.previewDeposit(c.body.text);
+}, S);
+route('GET', '/api/staff/deposit-hook', () => hookUrl(), S);
+route('POST', '/api/staff/deposit-hook/rotate', () => { store.rotateDepositSecret(); return { ok: true, ...hookUrl() }; }, S);
+// the phone automation posts bank SMS text here: no session, no same-origin check; the secret in the path is the credential
+const hookTimes = [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const badTimes = []; // attempts with a wrong secret have their own small budget, separate from the real forwarder's
+let badWaiting = 0;
+async function depositHook(c, secret) {
+  if (!store.checkDepositSecret(secret)) {
+    const now = Date.now();
+    while (badTimes.length && badTimes[0] < now - 60000) badTimes.shift();
+    badTimes.push(now);
+    if (badWaiting < 20 && badTimes.length <= 20) { badWaiting++; try { await sleep(300); } finally { badWaiting--; } } // over the budget: answered at once, no idle socket
+    throw new HttpError(404, 'not_found', '없는 API입니다.');
+  }
+  const t = Date.now();
+  while (hookTimes.length && hookTimes[0] < t - 60000) hookTimes.shift();
+  if (hookTimes.length >= 60) { hookLimitedAt = t; touch('staff'); throw new HttpError(429, 'rate_limited', '알림이 너무 많습니다.'); }
+  const type = (c.req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (type !== 'application/json' && type !== 'text/plain') throw new HttpError(415, 'unsupported_media_type', 'Content-Type은 application/json 또는 text/plain 이어야 합니다.');
+  const raw = (await readBody(c.req, 2048)).toString('utf8');
+  let text = raw;
+  if (type === 'application/json') {
+    let j;
+    try { j = JSON.parse(raw); } catch { throw new HttpError(400, 'bad_json', 'JSON 형식이 올바르지 않습니다.'); }
+    if (!j || typeof j.text !== 'string') throw new HttpError(400, 'bad_body', '{ "text": "..." } 형식이어야 합니다.');
+    text = j.text;
+  }
+  hookTimes.push(Date.now()); // counted once the request is well-formed
+  const r = store.ingestDeposit(text);
+  if (r.status === 'queue_full') { hookLimitedAt = Date.now(); touch('staff'); throw new HttpError(429, 'queue_full', '확인 대기 중인 입금 알림이 너무 많습니다.'); }
+  if (r.status === 'matched') touchTable(r.table); else touch('staff');
+  if (r.status !== 'ignored' && r.status !== 'duplicate') hint('staff', r.status === 'matched' ? 'deposit_matched' : 'new_deposit', { id: r.id, status: r.status, ...(r.status === 'matched' ? { orderId: r.orderId, table: r.table } : {}), ...(r.repeat ? { repeatCount: r.repeatCount } : {}) });
+  return { ok: true, status: r.status, ...(r.id ? { id: r.id } : {}) }; // never reveals the matched order
+}
+route('POST', '/api/deposit-hook/([^/]{1,200})', (c) => depositHook(c, c.m[1]), { raw: true }); // secret in the path
+route('POST', '/api/deposit-hook', (c) => depositHook(c, c.req.headers['x-booth-hook']), { raw: true }); // or in the X-Booth-Hook header (keeps it out of access logs)
 const menuDone = (extra = {}) => { touchAll(); return { ok: true, ...extra, menu: store.menuView(true) }; };
 route('POST', '/api/staff/menu/items', (c) => menuDone({ item: store.createItem(c.body) }), { staff: true });
 route('POST', '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})', (c) => menuDone({ item: store.updateItem(c.m[1], c.body) }), { staff: true });
@@ -479,9 +555,47 @@ route('POST', '/api/staff/menu/reorder', (c) => { store.reorderMenu(c.body); ret
 route('POST', '/api/staff/menu/categories', (c) => menuDone({ category: store.createCategory(c.body) }), { staff: true });
 route('POST', '/api/staff/menu/categories/(\\d{1,9})', (c) => menuDone({ category: store.renameCategory(int(c.m[1]), c.body) }), { staff: true });
 route('POST', '/api/staff/menu/categories/(\\d{1,9})/delete', (c) => { store.deleteCategory(int(c.m[1])); return menuDone(); }, { staff: true });
-route('POST', '/api/staff/member-discount', (c) => { store.setMemberPct(c.body.pct); touchAll(); return { ok: true, pct: c.body.pct }; }, { staff: true });
+route('POST', '/api/staff/member-discount', (c) => { const next = store.setMemberSettings(c.body); touchAll(); return { ok: true, ...next }; }, { staff: true });
+route('GET', '/api/staff/rewards', () => ({ rewards: store.listRewards(), hourly: store.hourlyReward(), games: rewards.games }), { staff: true });
+const rewardsDone = (extra = {}) => { touchAll(); return { ok: true, ...extra, rewards: store.listRewards() }; };
+route('POST', '/api/staff/rewards', (c) => rewardsDone({ reward: store.createReward(c.body) }), { staff: true });
+route('POST', '/api/staff/rewards/([A-Za-z0-9_-]{1,40})', (c) => rewardsDone({ reward: store.updateReward(c.m[1], c.body) }), { staff: true });
+route('POST', '/api/staff/rewards/([A-Za-z0-9_-]{1,40})/delete', (c) => { store.deleteReward(c.m[1]); return rewardsDone(); }, { staff: true });
+route('POST', '/api/staff/hourly-reward', (c) => { const hourly = store.setHourlyReward(c.body); touchAll(); return { ok: true, hourly }; }, { staff: true });
+// photo upload: the body is the raw image (not JSON), max 400 KB
+route('POST', '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})/photo', async (c) => {
+  const type = (c.req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (!PHOTO_TYPES.has(type)) throw new HttpError(415, 'unsupported_media_type', 'Content-Type은 image/jpeg, image/png, image/webp 중 하나여야 합니다.');
+  const buf = await readBody(c.req, PHOTO_MAX);
+  return menuDone({ item: store.setPhoto(c.m[1], buf, type) });
+}, { staff: true, raw: true });
+route('POST', '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})/photo/delete', (c) => menuDone({ item: store.deletePhoto(c.m[1]) }), { staff: true });
+// public photo files (names are <rowid>-<8 hex>.<ext>; the random suffix changes on every replace, hence "immutable")
+const PHOTO_MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+route('GET', '/photos/(\\d+-[a-f0-9]{8}\\.(?:jpg|png|webp))', (c) => {
+  let buf;
+  try { buf = fs.readFileSync(path.join(store.photosDir, c.m[1])); } catch { return sendText(c.res, 404, 'text/plain; charset=utf-8', 'not found', { 'Cache-Control': 'no-store' }); }
+  c.res.setHeader('Content-Security-Policy', "default-src 'none'");
+  c.res.writeHead(200, { 'Content-Type': PHOTO_MIME[c.m[1].split('.').pop()], 'Content-Length': buf.length, 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' });
+  c.res.end(buf);
+});
 route('POST', '/api/staff/ordering', (c) => { need(typeof c.body.open === 'boolean', 'bad_open', 'open은 true/false여야 합니다.'); store.setOrdering(c.body.open); touchAll(); return { ok: true, orderingOpen: c.body.open }; }, S);
 route('POST', '/api/staff/coupons/redeem', (c) => { const coupon = store.redeem(c.body.code); touchTable(coupon.table); return { coupon }; }, S);
+route('POST', '/api/staff/tables/count', (c) => {
+  const n = store.setTableCount(c.body.count, c.body.force === true);
+  refreshTokens();
+  closeGuestStreams((t) => t <= n); // guests of tables above the new count lose their live stream
+  touchAll();
+  return { ok: true, tableCount: n };
+}, S);
+route('POST', '/api/staff/tables/(\\d{1,4})/rotate', (c) => {
+  const n = int(c.m[1]);
+  const token = store.rotateToken(n);
+  refreshTokens();
+  closeGuestStreams((t) => t !== n); // streams opened with the old QR code end; the table's orders / seat are untouched
+  touchTable(n);
+  return { ok: true, table: n, token, url: `${PUBLIC_ORIGIN}${BASE}/t/${token}` };
+}, S);
 route('POST', '/api/staff/tables/move', (c) => {
   const r = store.moveTable(c.body.from, c.body.to);
   touchAll();
@@ -519,15 +633,15 @@ route('GET', '/api/kitchen', () => store.kitchenState(), S);
 route('GET', '/api/kitchen/events', (c) => sse(c, 'kitchen', () => store.kitchenState(), true), S);
 
 // ---------- request handling ----------
-function readBody(req) {
+function readBody(req, limit = BODY_LIMIT) {
   return new Promise((resolve, reject) => {
     const len = Number(req.headers['content-length'] || 0);
-    if (len > BODY_LIMIT) return reject(new HttpError(413, 'too_large', '요청이 너무 큽니다.'));
+    if (len > limit) return reject(new HttpError(413, 'too_large', '요청이 너무 큽니다.'));
     const chunks = [];
     let n = 0;
     req.on('data', (d) => {
       n += d.length;
-      if (n > BODY_LIMIT) { chunks.length = 0; reject(new HttpError(413, 'too_large', '요청이 너무 큽니다.')); req.removeAllListeners('data'); req.resume(); } else chunks.push(d);
+      if (n > limit) { chunks.length = 0; reject(new HttpError(413, 'too_large', '요청이 너무 큽니다.')); req.removeAllListeners('data'); req.resume(); } else chunks.push(d);
     });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
@@ -551,8 +665,8 @@ async function handle(req, res) {
   if (r.staff && !staffSession(req)) throw new HttpError(401, 'unauthorized', '직원 로그인이 필요합니다.');
   if (method === 'POST') {
     if (p.startsWith('/api/staff') && !sameOrigin(req)) throw new HttpError(403, 'bad_origin', '허용되지 않은 요청 출처입니다.');
-    if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) throw new HttpError(415, 'unsupported_media_type', 'Content-Type은 application/json이어야 합니다.');
-    const raw = await readBody(req);
+    if (!r.raw && !/^application\/json\b/i.test(req.headers['content-type'] || '')) throw new HttpError(415, 'unsupported_media_type', 'Content-Type은 application/json이어야 합니다.');
+    const raw = r.raw ? Buffer.alloc(0) : await readBody(req);
     if (raw.length) {
       try { c.body = JSON.parse(raw.toString('utf8')); } catch { throw new HttpError(400, 'bad_json', 'JSON 형식이 올바르지 않습니다.'); }
       if (!c.body || typeof c.body !== 'object' || Array.isArray(c.body)) throw new HttpError(400, 'bad_json', 'JSON 객체여야 합니다.');

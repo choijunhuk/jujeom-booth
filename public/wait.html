@@ -6,6 +6,7 @@
 <meta name="theme-color" content="#14110f">
 <title>대기 등록 · 주점 부스</title>
 <script src="__BASE__/static/base.js"></script>
+<script src="__BASE__/static/notify.js"></script>
 <link rel="stylesheet" href="__BASE__/static/staff.css">
 <style>
   body { min-height: 100dvh; }
@@ -40,6 +41,8 @@
   .called .btn { background: var(--accent-ink); color: var(--accent); border-color: var(--accent-ink); justify-self: center; }
   @keyframes calledpulse { to { background: #ffc85a; } }
   @media (prefers-reduced-motion: reduce) { .called { animation: none; } }
+  .ctl { display: grid; gap: 8px; }
+  .ctl .btn[aria-pressed="true"] { border-color: var(--success); color: var(--success); }
   .end { text-align: center; display: grid; gap: 16px; padding: 30px 0; }
 </style>
 </head>
