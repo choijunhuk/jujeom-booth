@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14110f">
+<title>대기 등록 · 주점 부스</title>
+<script src="__BASE__/static/base.js"></script>
+<link rel="stylesheet" href="__BASE__/static/staff.css">
+<style>
+  body { min-height: 100dvh; }
+  #main { padding: 0; max-width: none; margin: 0; display: grid; gap: 18px; }
+  .w-wrap { max-width: 480px; margin: 0 auto; padding: 22px 18px calc(30px + env(safe-area-inset-bottom)); display: grid; gap: 18px; align-content: start; min-height: 100dvh; }
+  .w-brand { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .w-brand b { font-size: 1.1rem; font-weight: 900; }
+  .w-brand b span { color: var(--accent); }
+  .w-h { font-size: 1.9rem; font-weight: 900; line-height: 1.2; }
+  .w-sub { color: var(--muted); font-weight: 600; }
+  .w-form { display: grid; gap: 18px; }
+  .lab { display: grid; gap: 8px; font-weight: 800; }
+  .stepper { display: grid; grid-template-columns: 64px 1fr 64px; gap: 10px; align-items: center; }
+  .stepper .btn { min-height: 64px; font-size: 1.8rem; }
+  .stepper output { text-align: center; font-size: 2.6rem; font-weight: 900; font-variant-numeric: tabular-nums; }
+  .stepper output small { font-size: 1rem; color: var(--muted); margin-left: 4px; }
+  .err { color: var(--danger); font-weight: 800; min-height: 1.4em; }
+  .ticket { position: relative; background: var(--surface); border: 2px solid var(--line); border-radius: 22px; padding: 22px 20px; display: grid; gap: 12px; text-align: center; }
+  .ticket::before, .ticket::after { content: ""; position: absolute; top: 58%; width: 26px; height: 26px; border-radius: 50%; background: var(--bg); border: 2px solid var(--line); }
+  .ticket::before { left: -14px; clip-path: inset(0 0 0 50%); }
+  .ticket::after { right: -14px; clip-path: inset(0 50% 0 0); }
+  .ticket .k { color: var(--muted); font-weight: 800; }
+  .ticket .pos { font-size: 7.5rem; line-height: 1; font-weight: 900; color: var(--accent); font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
+  .ticket .pos small { font-size: 2rem; color: var(--text); letter-spacing: 0; margin-left: 4px; }
+  .ticket .ahead { font-size: 1.5rem; font-weight: 900; }
+  .perf { border-top: 3px dashed var(--line); margin: 6px 0; }
+  .who { font-size: 1.2rem; font-weight: 800; overflow-wrap: anywhere; }
+  .hint { color: var(--muted); font-size: .95rem; }
+  .called { position: fixed; inset: 0; z-index: 50; background: var(--accent); color: var(--accent-ink); display: grid; place-content: center; text-align: center; gap: 18px; padding: 24px; animation: calledpulse 1.2s ease-in-out infinite alternate; }
+  .called h1 { font-size: clamp(3rem, 16vw, 6rem); font-weight: 900; line-height: 1.05; margin: 0; }
+  .called p { font-size: 1.4rem; font-weight: 800; }
+  .called .btn { background: var(--accent-ink); color: var(--accent); border-color: var(--accent-ink); justify-self: center; }
+  @keyframes calledpulse { to { background: #ffc85a; } }
+  @media (prefers-reduced-motion: reduce) { .called { animation: none; } }
+  .end { text-align: center; display: grid; gap: 16px; padding: 30px 0; }
+</style>
+</head>
+<body>
+<div class="w-wrap">
+  <div class="w-brand"><b>주점 부스 <span>대기</span></b><div class="conn" id="conn" data-s="wait" hidden><span class="dot"></span><span id="conn-t"></span></div></div>
+  <main id="main" aria-live="polite"></main>
+</div>
+<div id="called" class="called" hidden role="alertdialog" aria-labelledby="called-h"></div>
+<div id="toasts" role="status" aria-live="polite"></div>
+<script src="__BASE__/static/staff-common.js"></script>
+<script src="__BASE__/static/wait.js"></script>
+</body>
+</html>

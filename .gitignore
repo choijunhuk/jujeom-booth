@@ -1,0 +1,12 @@
+node_modules/
+data/
+.env
+*.db
+*.db-*
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+.omc/
+.ignore
+.playwright-mcp/
+graft/

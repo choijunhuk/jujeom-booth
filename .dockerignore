@@ -1,0 +1,7 @@
+.git
+.omc
+.env
+data
+node_modules
+*.md
+test.js

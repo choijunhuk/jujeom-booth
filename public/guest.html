@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14110f">
+<title>주점 부스</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="__BASE__/static/guest.css">
+<script src="__BASE__/static/base.js"></script>
+</head>
+<body>
+<header id="hd">
+  <h1 id="tno" class="tno">&nbsp;</h1>
+  <span id="conn" class="conn" hidden><i></i>재연결 중</span>
+</header>
+<div id="banner" class="banner" role="status" hidden></div>
+<main id="main"><section id="panel" aria-live="polite"><p class="empty">불러오는 중…</p></section></main>
+<button id="cartbar" class="cartbar" data-a="cart" hidden></button>
+<nav id="tabs" class="tabs" aria-label="메뉴 탭">
+  <button data-a="tab" data-v="menu" aria-label="메뉴"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14M5 9h14M5 14h9M5 19h6"/></svg><span>메뉴</span></button>
+  <button data-a="tab" data-v="orders" aria-label="주문현황"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/></svg><span>주문현황</span><b class="bdg" id="b-orders" hidden></b></button>
+  <button data-a="tab" data-v="game" aria-label="게임"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8l1 6a5 5 0 0 1-3 4v6H10v-6a5 5 0 0 1-3-4z"/></svg><span>게임</span></button>
+  <button data-a="tab" data-v="coupon" aria-label="쿠폰"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8a2 2 0 0 0 0 4v0a2 2 0 0 1 0 4v1h18v-1a2 2 0 0 1 0-4v0a2 2 0 0 0 0-4V7H3zM14 7v10"/></svg><span>쿠폰</span><b class="bdg" id="b-coupon" hidden></b></button>
+</nav>
+<div id="sheet-root"></div>
+<div id="game-root"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<noscript><p style="padding:24px;color:#f5efe6">이 페이지는 자바스크립트가 필요해요.</p></noscript>
+<script src="__BASE__/static/guest.js"></script>
+</body>
+</html>

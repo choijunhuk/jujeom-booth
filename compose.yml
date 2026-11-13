@@ -1,0 +1,34 @@
+# COMS 서버 배포용. 기존 사이트의 compose 와 완전히 분리된 프로젝트다.
+# 실행: docker compose -p booth up -d --build
+name: booth
+services:
+  booth:
+    build: .
+    restart: unless-stopped
+    env_file: .env            # STAFF_PIN, PAY_BANK, PAY_ACCOUNT, PAY_HOLDER (.env.example 참고)
+    environment:
+      NODE_ENV: production
+      BASE_PATH: /booth
+      PORT: "8787"
+      DATA_DIR: /data
+      COOKIE_SECURE: "1"
+      PUBLIC_ORIGIN: https://coms.kw.ac.kr
+    ports:
+      - "127.0.0.1:4200:8787"  # 외부에는 열지 않는다. nginx 만 접근한다.
+    volumes:
+      - booth-data:/data
+    mem_limit: 256m            # 부스에 접속이 몰려도 기존 사이트 자원을 넘보지 않게 한다
+    cpus: 1.0
+    pids_limit: 128
+    read_only: true            # /data 볼륨과 /tmp 외에는 쓸 수 없다
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  booth-data:

@@ -1,0 +1,12 @@
+{
+  "name": "jujeom-booth",
+  "version": "1.0.0",
+  "private": true,
+  "description": "QR table ordering + reward mini-games for a club pub booth",
+  "main": "server.js",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}

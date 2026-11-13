@@ -1,0 +1,11 @@
+{
+  "games": {
+    "pour": { "label": "생맥 따르기", "maxScore": 500, "minDurationMs": 8000 },
+    "cheers": { "label": "건배 타이밍", "maxScore": 1000, "minDurationMs": 10000 }
+  },
+  "rewards": [
+    { "id": "drink", "game": "pour", "threshold": 400, "type": "item", "item": "음료 1잔", "label": "음료 1잔", "stock": 20 },
+    { "id": "disc1000", "game": "cheers", "threshold": 700, "type": "discount", "amount": 1000, "label": "안주 1,000원 할인", "stock": 30 }
+  ],
+  "hourly": { "label": "안주 1개 서비스", "item": "안주 1개" }
+}

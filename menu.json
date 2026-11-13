@@ -1,0 +1,16 @@
+{
+  "categories": ["안주", "식사", "음료"],
+  "items": [
+    { "id": "tteokbokki", "name": "떡볶이", "price": 8000, "cat": "안주", "desc": "매콤달콤 기본 떡볶이" },
+    { "id": "odeng", "name": "어묵탕", "price": 9000, "cat": "안주", "desc": "뜨끈한 국물" },
+    { "id": "fries", "name": "감자튀김", "price": 6000, "cat": "안주" },
+    { "id": "chicken", "name": "치킨너겟", "price": 7000, "cat": "안주" },
+    { "id": "sausage", "name": "소시지 야채볶음", "price": 8000, "cat": "안주" },
+    { "id": "kimchijeon", "name": "김치전", "price": 7000, "cat": "안주" },
+    { "id": "ramen", "name": "라면", "price": 4000, "cat": "식사" },
+    { "id": "friedrice", "name": "볶음밥", "price": 6000, "cat": "식사" },
+    { "id": "cola", "name": "콜라", "price": 2000, "cat": "음료" },
+    { "id": "cider", "name": "사이다", "price": 2000, "cat": "음료" },
+    { "id": "ade", "name": "자몽에이드", "price": 3500, "cat": "음료" }
+  ]
+}
