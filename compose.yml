@@ -13,6 +13,8 @@ services:
       DATA_DIR: /data
       COOKIE_SECURE: "1"
       PUBLIC_ORIGIN: https://coms.kw.ac.kr
+      # COMS 로그인 확인 주소. 지우면 회원 할인이 꺼진다.
+      COMS_ME_URL: https://coms.kw.ac.kr/api/auth/me
     ports:
       - "127.0.0.1:4200:8787"  # 외부에는 열지 않는다. nginx 만 접근한다.
     volumes:

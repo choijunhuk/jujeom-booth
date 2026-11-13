@@ -38,21 +38,23 @@ Security headers on everything: `X-Content-Type-Options: nosniff`, `Referrer-Pol
 - Error response (any non-2xx): `{ "error": "<code>", "message": "<Korean text safe to show>", ...extra }`. Switch on `error`, not on `message`.
 - Common errors: 400 `bad_json`, 401 `unauthorized`, 403 `bad_origin`, 404 `not_found`/`no_table`, 413 `too_large`, 415 `unsupported_media_type`, 429 rate/limit codes, 500 `internal`, 503 `busy`.
 - `table` is always the table number (1..N). Table numbers are also their ids.
-- Cookies (both `HttpOnly`, `SameSite=Lax`, `Path=BASE||"/"`, `Secure` when `COOKIE_SECURE=1`): `booth_d` = anonymous device id (set automatically on guest pages/APIs, 3 days; used for nicknames, play limits, wait list), `booth_s` = staff session (default 72 h, env `SESSION_HOURS`), `booth_k` = staff trusted-device key (30 days, set on a successful login; see login). Names are prefixed so they cannot collide with the main site's cookies; if the browser sends duplicates of a name (different Paths), the server accepts any valid `booth_s` and the first well-formed `booth_d`. `fetch` on the same origin sends them automatically; no `credentials` option needed.
+- Cookies (both `HttpOnly`, `SameSite=Lax`, `Path=BASE||"/"`, `Secure` when `COOKIE_SECURE=1`): `booth_d` = anonymous device id, server-signed (`<id>.<signature>`; opaque to pages — never parse or forge it; an old or invalid value is silently replaced by a new one, so after an upgrade a browser just becomes a "new" device) (set automatically on guest pages/APIs, 3 days; used for nicknames, play limits, wait list), `booth_s` = staff session (default 72 h, env `SESSION_HOURS`), `booth_k` = staff trusted-device key (30 days, set on a successful login; see login). Names are prefixed so they cannot collide with the main site's cookies; if the browser sends duplicates of a name (different Paths), the server accepts any valid `booth_s` and the first well-formed `booth_d`. `fetch` on the same origin sends them automatically; no `credentials` option needed.
 - Staff POSTs are rejected with 403 `bad_origin` when `Sec-Fetch-Site` is present and not `same-origin`/`none`, or (if that header is absent) when `Origin` is present and differs from `PUBLIC_ORIGIN`/`Host`. Normal same-origin `fetch` is fine.
 
 ## 3. Shared object shapes
 
-**Menu item**: `{ id, name, price, cat, desc, soldOut }`. **Menu**: `{ categories: string[], items: MenuItem[] }`.
+**Menu item**: `{ id, name, price, cat, desc, soldOut }`. **Menu** (guest view): `{ categories: string[], items: MenuItem[] }` — items and categories come in the menu's display order; **hidden items never appear**, and a category with no visible item is omitted. The menu lives in the database and staff can edit it at any time (section 6, "Menu management"): re-render from every new `state`/`GET`, never cache prices for long. `price` is a multiple of 100 won. New item ids look like `m` + 10 hex chars; items seeded from `menu.json` keep their ids.
+**Staff menu view** (inside staff `state` and in every menu-management response, as `menu`): same shape but includes hidden items, each item additionally has `hidden: boolean`, `sortOrder: number`, `categoryId: number`, `inUse: boolean` (it appears in some order, so it cannot be deleted), and `categoryList: [ { id, name, sortOrder, itemCount } ]` lists every category including empty ones.
 
 **Order**
 ```json
 { "id": 12, "table": 3, "seat": 1, "status": "pending|cooking|served|cancelled", "paid": false,
   "items": [ { "id": "tteokbokki", "name": "떡볶이", "qty": 2, "unitPrice": 8000 } ],
-  "subtotal": 16000, "discount": 1000, "total": 15000, "couponCode": "K3F9X2" ,
+  "subtotal": 16000, "memberDiscount": 1600, "couponDiscount": 1000, "discount": 2600, "total": 13400,
+  "member": true, "couponCode": "K3F9X2",
   "note": "", "createdAt": 1731480000000, "updatedAt": 1731480000000, "cookingAt": null }
 ```
-`couponCode` is `null` when none. `total = max(0, subtotal - discount)`. Status flow: `pending` (waiting for staff accept) -> `cooking` -> `served`; `cancelled` is terminal.
+`couponCode` is `null` when none. `total = subtotal - memberDiscount - couponDiscount` (never below 0); `discount = memberDiscount + couponDiscount` is kept for older code. `member` is true when the order was placed by a verified COMS club member (the club id is never exposed). Amounts and item names/prices are frozen when the order is created: later menu edits, renames or price changes never alter an existing order. Status flow: `pending` (waiting for staff accept) -> `cooking` -> `served`; `cancelled` is terminal.
 
 **Coupon**
 ```json
@@ -72,7 +74,8 @@ Unknown token -> 404 `no_table`. Tokens are 16 chars of `[A-Za-z0-9_-]`. A guest
 ```json
 { "table": { "number": 3, "seat": 1 },
   "orderingOpen": true,
-  "menu": { "categories": [...], "items": [ MenuItem ] },
+  "memberDiscountPct": 10,                   // new: current member discount percent (0 = none); see GET .../member for whether THIS visitor is a member
+  "menu": { "categories": [...], "items": [ MenuItem ] },   // hidden items are never included
   "orders": [ Order ],                       // current seat, newest first; cancelled orders: only the newest 5 are included
   "coupons": [ Coupon ],                     // current seat, oldest first
   "calls": [ { "id": 5, "type": "물", "createdAt": 0 } ],   // open staff calls
@@ -86,16 +89,23 @@ Unknown token -> 404 `no_table`. Tokens are 16 chars of `[A-Za-z0-9_-]`. A guest
 `pay` is for the payment screen: show the account, a copy button, and a bank-app deep link.
 
 ### `POST /api/t/<token>/orders`
-Body `{ "key": "<8-64 chars [A-Za-z0-9_-]>", "items": [ { "id": "tteokbokki", "qty": 2 } ], "couponCode": "K3F9X2"?, "note": "덜 맵게"? }`.
+Body `{ "key": "<8-64 chars [A-Za-z0-9_-]>", "items": [ { "id": "tteokbokki", "qty": 2 } ], "couponCode": "K3F9X2"?, "note": "덜 맵게"?, "expectedTotal": 15000? }`.
+**New — `expectedTotal`** (optional integer, the total the guest saw on screen, after discounts): if it differs from the total the server computes now, the server answers **409 `price_changed`** and creates nothing. Payload: `{ error, message, expectedTotal, total, subtotal, memberDiscount, couponDiscount, items: [ { id, name, qty, unitPrice } ] }` with the fresh values. The page shows them, asks the guest to confirm, then resends with `expectedTotal` = the fresh `total`. **Nothing was created, so the client may reuse the same `key` or send a new one — both work.** Without `expectedTotal` the current price is charged as before. A non-integer value -> 400 `bad_expected_total`. Replays of an already-created key (`duplicate: true`) are answered before this check.
 Generate `key` once per cart submission (`crypto.randomUUID()`), reuse it on retries. Prices sent by the client are ignored.
-- 201 `{ "order": Order, "duplicate": false }`
+- 201 `{ "order": Order, "duplicate": false, "memberDiscountSkipped": "limit"?, "couponIgnored": true? }` — **`couponIgnored: true`** (new) appears when the sent `couponCode` is valid but would discount 0 won (e.g. a free item, or nothing left after the member discount): the order is created without it, `order.couponCode` is `null` and the coupon stays unused. Tell the guest the coupon was not applied and is still available. — `memberDiscountSkipped: "limit"` appears only when the guest is a member who would have got a discount but already used it on the maximum number of orders (default 20 per club member, env `MEMBER_ORDER_MAX`); the order was created at full price. Show a short notice.
 - 200 `{ "order": Order, "duplicate": true }` when this table **in its current seat** already used that key (the key is scoped to table+seat: after staff clears the table the same key creates a new order; returns the original; checked before everything else, even when ordering is closed).
-- 400 `bad_key`, `bad_items` (empty / malformed), `too_many_lines` (>30 lines), `bad_qty` (not integer 1..20; `id` in payload), `dup_item` (same id twice), `unknown_item` (`ids`), `bad_note` (>100 chars), `bad_coupon` (not found / not this table+seat), `coupon_not_discount`
+- 400 `bad_key`, `bad_items` (empty / malformed), `too_many_lines` (>30 lines), `bad_qty` (not integer 1..20; `id` in payload), `dup_item` (same id twice), `unknown_item` (`ids`; also returned for hidden items), `bad_note` (>100 chars), `bad_coupon` (not found / not this table+seat), `coupon_not_discount`
 - 409 `closed` (ordering switched off), `sold_out` (`ids`, `names`), `coupon_used`
 - 429 `too_many_pending` (10 orders waiting for acceptance at once)
 - 429 `too_many_orders` (**new**: at most 40 orders per table per seat, cancelled ones included; resets when staff clears the table). Message tells the guest to ask staff.
 
 A discount coupon is marked used together with the order; it returns to `issued` if the order is cancelled.
+
+**Member discount (new).** Membership is decided by the server only: it forwards the visitor's club-site login cookie to the club backend (feature off unless env `COMS_ME_URL` is set). The request body is never trusted for membership (fields like `member` are ignored). For a verified member the order gets `memberDiscount = floor(subtotal * pct / 100 / 100) * 100` won (rounded DOWN to 100 won; e.g. 8,500 won at 10% = 800, at 15% = 1,200; 900 won at 10% = 0), applied to the subtotal **first**; a coupon discount is then applied to what is left; the total never goes below 0. `pct` is the staff setting (0..50, default 10). Cancelling an order restores its coupon and frees its member-discount slot.
+
+### `GET /api/t/<token>/member`
+-> `{ "enabled": boolean, "member": boolean, "pct": number }`. `enabled` is false when the feature is off (no outbound request is made then). `member` is true when the browser's club login is valid right now (cached 60 s). Only these three fields are returned: never a name, id or role. Use it to show "COMS 회원 N% 할인 적용" before ordering; the actual discount is always decided again at order time. Cheap to call; do not poll faster than every ~30 s. Not logged in / expired / banned / club server down all simply give `member: false`.
+**Rules the page must know (new):** (1) a lookup needs a `booth_d` device cookie that already existed when the request arrived — the first request of a brand-new browser (which only mints the cookie) answers `member: false`; load the guest snapshot first (every guest page does), then call `/member`, and call it again once the first answer was `false` while a club login cookie is present only if you want a retry. The same applies to the member discount at order time. (2) Each device gets at most 6 uncached lookups per minute; beyond that it is simply treated as a non-member until the minute passes. (3) Only definitive answers are cached for 60 s: a valid member, or the club saying 401/403. Timeouts, 5xx, 429, redirects and unreadable answers are never cached (the next call asks again). (4) Any logged-in club account counts as a member, including the `ASSOCIATE` role. (5) A guest who logs out of the club site keeps the discount for up to 60 s (cache).
 
 ### `POST /api/t/<token>/orders/<orderId>/cancel` — body `{}`
 Only own-table, current-seat, `pending` and unpaid orders. 200 `{ order }`. 404 `no_order`, 409 `not_cancellable`.
@@ -130,7 +140,7 @@ Coupon rule: score >= reward `threshold`, stock left, and this table+seat has no
 | Endpoint | Response |
 |---|---|
 | `GET /api/health` | `{ ok: true, time }` |
-| `GET /api/menu` | `{ categories, items: [MenuItem], orderingOpen }` |
+| `GET /api/menu` | `{ categories, items: [MenuItem], orderingOpen }` (hidden items excluded) |
 | `GET /api/board` | board snapshot (below) |
 | `GET /api/board/events` | SSE, event `state` = same JSON |
 
@@ -176,13 +186,30 @@ Show "입장하세요" when `status === "called"`.
   "hourly": { "label": "안주 1개 서비스", "item": "..." },
   "hour":     { "start", "end", "ranking": [...], "top": { "table", "score", "games", "nick" } | null, "awarded": false },
   "prevHour": { same shape for the previous clock hour },
-  "menu": { "categories": [...], "items": [ MenuItem with soldOut ] } }
+  "memberDiscountPct": 10,        // new
+  "memberEnabled": true,          // new: true when the server has COMS_ME_URL set (member discount feature on); hide member-discount UI when false
+  "menu": { "categories": [...], "items": [ MenuItem + hidden, sortOrder, categoryId, inUse ], "categoryList": [ { "id", "name", "sortOrder", "itemCount" } ] } }   // staff menu view: includes hidden items
 ```
 Clearing a table makes its orders vanish from `orders` (they stay in sales). A table is `occupied` if its current seat has any non-cancelled order or any game started.
 
 ### Order actions
 - `POST /api/staff/orders/<id>/status` body `{ "status": "pending|cooking|served|cancelled" }` -> `{ order }`. Any change between the first three is allowed (undo a mis-tap); accept = `cooking`, done = `served`. `cancelled` restores an applied discount coupon and is terminal (409 `order_cancelled` afterwards). 400 `bad_status`, 404 `no_order`.
 - `POST /api/staff/orders/<id>/paid` body `{ "paid": true }` -> `{ order }`. (Cancelling a paid order keeps `paid: true`; staff refunds manually.)
+
+### Menu management (new)
+The menu is stored in the database. On the very first boot (empty menu tables, also when upgrading an older database) it is seeded once from `menu.json` and a `menu_seeded` flag is stored; after that the database is the source of truth and `menu.json` is never read again — not even if staff later delete every item and category, and not after a reset. All endpoints below need the staff session, same-origin and JSON; success responses are `{ ok: true, menu: <staff menu view>, item?: <staff item>, category?: { id, name } }` (re-render from `menu`). Every edit is pushed over SSE to guests and staff.
+Rules: item `name` 1..30 characters after control/invisible-character stripping (zero-width, bidi, Hangul fillers) and trimming, must contain at least one visible character (else 400 `bad_name`), stored exactly as typed (trimmed, inner whitespace collapsed), and unique among all items **on a normalised key** (NFKC, collapsed whitespace, case-insensitive: "Beer", "beer" and fullwidth "Ｂｅｅｒ" are the same name -> 409 `name_taken`; same rule for category names, and an item sent with `category: "dessert"` goes into the existing "Dessert" category); `price` integer 0..1,000,000 and a **multiple of 100**; `desc` 0..60 characters; category name 1..12 characters, unique; at most **100 items** and **12 categories**. Hidden items are not shown to guests and cannot be ordered (400 `unknown_item`, same as a nonexistent id); sold-out items are shown greyed and cannot be ordered (409 `sold_out`).
+- `POST /api/staff/menu/items` body `{ "name", "price", "category": "안주", "desc"?: "", "hidden"?: false }` (**new `hidden`**: create an item already hidden so guests never see it; non-boolean -> 400 `bad_hidden`) -> `{ ok, item, menu }`. `category` is a category NAME; it is created if missing. 400 `bad_name` / `bad_price` / `bad_desc` / `bad_category`, 409 `name_taken` / `too_many_items` / `too_many_categories`.
+- `POST /api/staff/menu/items/<id>` body: any of `{ "name", "price", "category" (name), "desc", "hidden": boolean, "sortOrder": integer 0..100000 }` -> `{ ok, item, menu }`. 400 `nothing_to_update` (empty body), `bad_hidden`, `bad_sort` and the validation codes above, 404 `no_item`, 409 `name_taken` / `too_many_categories`. Moving an item to another category never deletes the old category.
+- `POST /api/staff/menu/items/<id>/delete` body `{}` -> `{ ok, menu }`. **409 `in_use`** when the item was ever ordered since the last reset: hide it instead. 404 `no_item`.
+- `POST /api/staff/menu/reorder` body `{ "items"?: [ "<itemId>", ... ], "categories"?: [ <categoryId>, ... ] }` -> `{ ok, menu }`. Each listed id's `sortOrder` becomes its index in the list (send the complete list in the desired order; guests see categories in category order and items by sort order within their category). 400 `bad_reorder` (not a list / duplicates / non-ids), 404 `no_item` (unknown id).
+- `POST /api/staff/menu/categories` body `{ "name" }` -> `{ ok, category: { id, name }, menu }`. 400 `bad_category`, 409 `name_taken` / `too_many_categories`.
+- `POST /api/staff/menu/categories/<id>` body `{ "name" }` (rename) -> `{ ok, category, menu }`. 404 `no_category`, 409 `name_taken`.
+- `POST /api/staff/menu/categories/<id>/delete` body `{}` -> `{ ok, menu }`. **409 `category_not_empty`** while it still holds items (hidden ones count); 404 `no_category`. Empty categories are not removed automatically (staff delete them), but guests never see a category without visible items.
+- Existing `POST /api/staff/menu/<itemId>/soldout` now returns the staff menu view in `menu`.
+
+### Member discount setting (new)
+- `POST /api/staff/member-discount` body `{ "pct": 10 }` (integer 0..50; 0 turns the discount off) -> `{ ok, pct }`. 400 `bad_pct`. Current value: `memberDiscountPct` in staff state and in the guest snapshot. It is a setting: it survives `reset`.
 
 ### Menu / ordering switch
 - `POST /api/staff/menu/<itemId>/soldout` body `{ "soldOut": true }` -> `{ ok, menu }`. 404 `no_item`.
@@ -208,20 +235,20 @@ Clearing a table makes its orders vanish from `orders` (they stay in sales). A t
 ### Sales
 - `GET /api/staff/sales` ->
 ```json
-{ "totals": { "orders": 40, "revenue": 380000, "discount": 5000, "paidRevenue": 350000, "unpaidRevenue": 30000 },
+{ "totals": { "orders": 40, "revenue": 380000, "discount": 5000, "memberDiscount": 3200, "memberOrders": 11, "paidRevenue": 350000, "unpaidRevenue": 30000 },
   "byHour": [ { "hour": 1731478800000, "label": "2026-11-13 18:00", "orders": 12, "revenue": 90000, "discount": 1000 } ],
   "byItem": [ { "id", "name", "qty", "gross" } ],
   "coupons": [ { "rewardId": "d1000|hour", "label", "type", "issued", "used" } ] }
 ```
-Cancelled orders are excluded; covers every seat since the last reset. `label` is KST.
+Cancelled orders are excluded; covers every seat since the last reset. `label` is KST. `discount` = member discount + coupon discount; `memberDiscount` = won given as member discount, `memberOrders` = number of orders that got one. `revenue` is after all discounts. `byItem.name` is the name recorded on the most recent order of that item id. The CSV summary row gained two columns: 회원할인액, 회원할인 건수.
 - `GET /api/staff/sales.csv` -> `text/csv; charset=utf-8` attachment `booth-sales.csv`, starts with a UTF-8 BOM, sections: 요약, 시간대별 매출, 메뉴별 판매, 쿠폰. Use a plain link / `location.href`, it is a normal GET with the cookie.
-- `POST /api/staff/reset` body `{ "confirm": "초기화" }` -> `{ ok }`. Wipes orders, coupons, plays, nicknames, calls, waitlist, sold-out flags, resets seats to 1, ordering open, reward stock to `rewards.json` values. Table tokens are kept. A backup copy is taken right before the wipe (the server first waits for any backup already running, then takes its own). 400 `confirm_required`.
+- `POST /api/staff/reset` body `{ "confirm": "초기화" }` -> `{ ok }`. Wipes orders, coupons, plays, nicknames, calls, waitlist, sold-out flags (the flags only: **the menu itself — items, prices, hidden flags, categories — and the member-discount percent are kept**), resets seats to 1, ordering open, reward stock to `rewards.json` values. Table tokens are kept. A backup copy is taken right before the wipe (the server first waits for any backup already running, then takes its own). 400 `confirm_required`.
 
 ### Kitchen (same staff session)
 `GET /api/kitchen` ->
 ```json
 { "items": [ { "id": "tteokbokki", "name": "떡볶이", "qty": 3 } ],        // sum over cooking orders, qty desc
-  "orders": [ { "id": 12, "table": 3, "note": "", "items": [ { "id", "name", "qty" } ], "since": 1731480000000 } ] }   // cooking orders, oldest first
+  "orders": [ { "id": 12, "table": 3, "member": false, "note": "", "items": [ { "id", "name", "qty" } ], "since": 1731480000000 } ] }   // cooking orders, oldest first
 ```
 `GET /api/kitchen/events` SSE `state` = same JSON. Orders leave the kitchen view when set to `served`/`cancelled` or when the table is cleared.
 

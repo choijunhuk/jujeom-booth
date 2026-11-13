@@ -8,6 +8,7 @@
   var tab = 'menu', cat = '전체';
   var cart = { items: {}, note: '', coupon: '' };
   var pend = null;              // {key, body}: frozen order request, persisted until a definitive answer
+  var M = null, lastMemberCheck = 0, priceChg = null;   // M = {enabled, member, pct}
   var lastSse = 0, clearedSeat = null, gameSeq = 0;
   var sending = false, netFailed = false;
   var es = null, pollT = null, conn = true;
@@ -78,7 +79,9 @@
       if (clearedSeat === prev.table.seat) clearedSeat = null; else onCleared(true);
     }
     else detectChanges(prev, d);
-    sanitizeCart();
+    if (S.menu.categories.indexOf(cat) < 0) cat = '전체';
+    if (M && d.memberDiscountPct != null && d.memberDiscountPct !== M.pct) { M.pct = d.memberDiscountPct; checkMember(false); }
+    sanitizeCart(prev);
     render();
   }
   function detectChanges(p, d) {
@@ -100,9 +103,15 @@
     toast('새 손님을 환영해요!');
     if (!fromSeat && S) { /* state event follows */ }
   }
-  function sanitizeCart() {
-    var m = menuMap(), ch = false;
-    Object.keys(cart.items).forEach(function (id) { if (!m[id]) { delete cart.items[id]; ch = true; } });
+  function sanitizeCart(prev) {
+    var m = menuMap(), ch = false, gone = [], repriced = false, pm = {};
+    if (prev) prev.menu.items.forEach(function (i) { pm[i.id] = i; });
+    Object.keys(cart.items).forEach(function (id) {
+      if (!m[id]) { gone.push(pm[id] ? pm[id].name : '메뉴'); delete cart.items[id]; ch = true; }
+      else if (pm[id] && pm[id].price !== m[id].price) repriced = true;
+    });
+    if (gone.length) toast('메뉴에서 사라진 항목을 장바구니에서 뺐어요: ' + gone.join(', '));
+    else if (repriced) toast('장바구니 메뉴의 가격이 바뀌었어요. 금액을 확인해 주세요');
     if (cart.coupon) {
       var ok = S.coupons.some(function (c) { return c.code === cart.coupon && c.status === 'issued' && c.type === 'discount'; });
       if (!ok) { cart.coupon = ''; ch = true; }
@@ -113,12 +122,23 @@
     var m = menuMap();
     return Object.keys(cart.items).map(function (id) { return { id: id, it: m[id], qty: cart.items[id], soldOut: !!m[id].soldOut }; });
   }
+  function isMember() { return !!(M && M.enabled && M.member && M.pct > 0); }
+  function memberDisc(sub) { return isMember() ? Math.floor(sub * M.pct / 100 / 100) * 100 : 0; }
+  function checkMember(manual) {
+    lastMemberCheck = Date.now();
+    return api('/member').then(function (r) {
+      if (!r.ok) return;
+      var was = isMember(); M = r.data; if (!was && isMember() && !manual) toast('COMS 회원 할인이 적용돼요');
+      if (manual) toast(isMember() ? 'COMS 회원으로 확인됐어요' : '아직 로그인이 확인되지 않았어요. 로그인 후 다시 확인해 주세요');
+      render();
+    }, function () { if (manual) toast('네트워크 오류예요. 다시 눌러 주세요.'); });
+  }
   function totals() {
     var sub = 0, n = 0;
     lines().forEach(function (l) { if (!l.soldOut) { sub += l.it.price * l.qty; n += l.qty; } });
-    var disc = 0;
-    if (cart.coupon) { var c = S.coupons.filter(function (x) { return x.code === cart.coupon; })[0]; if (c) disc = Math.min(sub, c.amount || 0); }
-    return { n: n, sub: sub, disc: disc, total: Math.max(0, sub - disc) };
+    var mem = memberDisc(sub), disc = 0;
+    if (cart.coupon) { var c = S.coupons.filter(function (x) { return x.code === cart.coupon; })[0]; if (c) disc = Math.min(sub - mem, c.amount || 0); }
+    return { n: n, sub: sub, mem: mem, disc: disc, total: Math.max(0, sub - mem - disc) };
   }
   function setQty(id, q) {
     q = Math.max(0, Math.min(20, q));
@@ -131,6 +151,7 @@
     if (!S) return;
     $('#tno').innerHTML = '<b>' + S.table.number + '</b>번 테이블';
     $('#conn').hidden = conn;
+    var mb = $('#mb'); mb.hidden = !isMember(); if (isMember()) mb.textContent = 'COMS 회원 · ' + M.pct + '% 할인';
     var bn = $('#banner');
     bn.hidden = S.orderingOpen;
     if (!S.orderingOpen) bn.textContent = '지금은 주문을 받지 않아요. 게임은 계속 즐길 수 있어요!';
@@ -161,6 +182,11 @@
     }).join('') + '</ul>';
   }
 
+  function breakdown(o) {
+    var mem = o.memberDiscount || 0, cp = o.couponDiscount != null ? o.couponDiscount : (o.discount || 0) - mem;
+    if (!mem && !cp) return '';
+    return '<div class="sum"><span>주문 금액</span><span>' + won(o.subtotal) + '</span></div>' + (mem ? '<div class="sum"><span>COMS 회원 할인</span><span>-' + won(mem) + '</span></div>' : '') + (cp > 0 ? '<div class="sum"><span>쿠폰 할인</span><span>-' + won(cp) + '</span></div>' : '');
+  }
   function htmlOrders() {
     var live = S.orders.filter(function (o) { return o.status !== 'cancelled'; });
     var total = 0, unpaid = 0;
@@ -181,8 +207,8 @@
       if (o.status === 'pending' && !o.paid) acts += '<button class="btn sm danger" data-a="cancel" data-v="' + o.id + '">' + (cancelArm[o.id] ? '정말 취소할게요' : '주문 취소') + '</button>';
       return '<article class="card ord' + (cx ? ' cx' : '') + '"><header><b>#' + o.id + ' <small style="color:var(--muted);font-weight:600">' + hhmm(o.createdAt) + '</small></b><span>' + (cx ? trk : pay) + '</span></header>' + (cx ? '' : trk) +
         '<ul>' + o.items.map(function (i) { return '<li><span>' + esc(i.name) + ' x ' + i.qty + '</span><span>' + won(i.unitPrice * i.qty) + '</span></li>'; }).join('') + '</ul>' +
-        (o.discount ? '<div class="sum"><span>쿠폰 할인</span><span>-' + won(o.discount) + '</span></div>' : '') +
-        '<div class="tt"><span>합계</span><span class="' + (cx ? 'del' : '') + '">' + won(o.total) + '</span></div>' +
+        breakdown(o) +
+        '<div class="tt"><span>' + (breakdown(o) ? '결제 금액' : '합계') + '</span><span class="' + (cx ? 'del' : '') + '">' + won(o.total) + '</span></div>' +
         (o.note ? '<div class="nt">요청: ' + esc(o.note) + '</div>' : '') + (acts ? '<div class="acts">' + acts + '</div>' : '') + '</article>';
     }).join('');
   }
@@ -219,7 +245,8 @@
       '<h2>장바구니</h2><ul class="cl" id="cl"></ul>' +
       '<label class="fld">쿠폰<select id="cc"></select></label>' +
       '<label class="fld">요청사항 (선택)<input id="cn" maxlength="100" placeholder="예: 덜 맵게" autocomplete="off"></label>' +
-      '<div class="sum"><span>상품 금액</span><span id="cs"></span></div><div class="sum" id="cdr"><span>쿠폰 할인</span><span id="cd"></span></div>' +
+      '<div class="memrow" id="cnm" hidden><span id="cnmt"></span><span class="mr-btns"><a class="btn sm" href="/" target="_blank" rel="noopener">COMS 로그인</a><button class="btn sm" data-a="mrecheck">다시 확인</button></span></div>' +
+      '<div class="sum"><span>상품 금액</span><span id="cs"></span></div><div class="sum" id="cmr"><span>COMS 회원 할인</span><span id="cm"></span></div><div class="sum" id="cdr"><span>쿠폰 할인</span><span id="cd"></span></div>' +
       '<div class="sum tot"><span>결제 금액</span><span id="ct"></span></div>' +
       '<button class="btn pri big" id="csub" data-a="submit"></button><p class="err" id="cerr" role="alert"></p>');
     var cn = $('#cn', sh); cn.value = cart.note;
@@ -237,6 +264,8 @@
     var opts = '<option value="">쿠폰 사용 안 함</option>';
     S.coupons.forEach(function (c) { if (c.status === 'issued' && c.type === 'discount') opts += '<option value="' + esc(c.code) + '"' + (c.code === cart.coupon ? ' selected' : '') + '>' + esc(c.label) + ' (' + esc(c.code) + ')</option>'; });
     var sel = $('#cc'); if (sel.innerHTML !== opts) sel.innerHTML = opts;
+    $('#cm').textContent = '-' + won(t.mem); $('#cmr').hidden = !t.mem;
+    var nm = $('#cnm'); nm.hidden = !(M && M.enabled && !M.member && M.pct > 0); $('#cnmt').textContent = 'COMS 회원이면 ' + (M ? M.pct : 0) + '% 할인';
     $('#cs').textContent = won(t.sub); $('#cd').textContent = '-' + won(t.disc); $('#cdr').hidden = !t.disc; $('#ct').textContent = won(t.total);
     var b = $('#csub');
     b.disabled = sending || !t.n || !S.orderingOpen;
@@ -247,14 +276,16 @@
   function loadPend() { try { var p = JSON.parse(lsGet(pendKey()) || 'null'); if (p && p.key && p.body) pend = p; } catch (e) {} }
   function dropPend() { pend = null; netFailed = false; savePend(); }
   function cerr(m) { var e = $('#cerr'); if (e) e.textContent = m; }
+  var expectOverride = null;
   function submit() {
-    if (sending || !S.orderingOpen) return;
+    if (sending || !S.orderingOpen) { expectOverride = null; return; }
     if (!pend) {   // freeze body + key at first attempt; every retry (even after reload) resends exactly this
       var L = lines().filter(function (l) { return !l.soldOut; });
-      if (!L.length) return;
+      if (!L.length) { expectOverride = null; return; }
       var body = { items: L.map(function (l) { return { id: l.id, qty: l.qty }; }) };
       if (cart.coupon) body.couponCode = cart.coupon;
       if (cart.note.trim()) body.note = cart.note.trim();
+      body.expectedTotal = (expectOverride != null ? expectOverride : totals().total); expectOverride = null;
       pend = { key: newKey(), body: body }; savePend();
     }
     sendPend();
@@ -269,11 +300,14 @@
         dropPend(); cart = { items: {}, note: '', coupon: '' }; saveCart();
         if (!S.orders.some(function (x) { return x.id === o.id; })) S.orders.unshift(o);
         closeSheet(true); vib(40); openPay(o, true); render();
+        if (r.data.couponIgnored) toast('쿠폰은 사용되지 않았어요 (할인 금액 0원)');
+        else if (r.data.memberDiscountSkipped === 'limit') toast('회원 할인 한도를 넘어 이번 주문은 할인 없이 접수됐어요');
         return;
       }
       var d = r.data, e = d.error, msg = d.message || '주문하지 못했어요';
       if (r.status >= 500) { netFailed = true; render(); cerr(msg + ' 다시 시도를 눌러 주세요 (중복 주문은 되지 않아요).'); if (sheetKind !== '장바구니') toast(msg); return; }
       dropPend();   // definitive 4xx answer: the next attempt is a new request
+      if (e === 'price_changed') { priceChanged(d); return; }
       if (e === 'sold_out') {
         (d.ids || []).forEach(function (id) { delete cart.items[id]; }); saveCart();
         msg = (d.names && d.names.length ? d.names.join(', ') : '일부 메뉴') + ' 품절! 장바구니에서 뺐어요. 확인 후 다시 주문해 주세요.';
@@ -288,6 +322,16 @@
       cerr('네트워크가 불안정해요. 장바구니는 그대로예요. 다시 시도를 눌러 주세요 (중복 주문은 되지 않아요).');
       if (sheetKind !== '장바구니') toast('주문 전송을 확인하지 못했어요. 장바구니에서 다시 시도해 주세요.');
     });
+  }
+  function priceChanged(d) {
+    priceChg = d;
+    openSheet('가격이 바뀌었어요',
+      '<h2>가격이 바뀌었어요</h2><p class="note" style="margin:-6px 0 10px">메뉴 가격이나 할인이 달라져서 주문을 보내지 않았어요. 금액을 확인해 주세요.</p>' +
+      '<div class="sum"><span>이전 금액</span><span class="del">' + won(d.expectedTotal) + '</span></div>' +
+      '<div class="sum tot"><span>현재 금액</span><span>' + won(d.total) + '</span></div>' +
+      '<button class="btn pri big" data-a="pconfirm">' + won(d.total) + '으로 주문하기</button><button class="btn big" style="margin-top:10px" data-a="sclose">장바구니로 돌아가기</button>',
+      function () { openCart(); });
+    api('').then(function (r) { if (r.ok) applyState(r.data); }, function () {}); checkMember(false);
   }
   function resumePend() {
     if (!pend || sending) return;
@@ -307,7 +351,7 @@
     var p = S.pay || {}, has = p.account;
     openSheet('송금 안내',
       '<h2>' + (fresh ? '주문이 접수됐어요!' : '송금 안내') + '</h2><p class="note" style="margin:-6px 0 10px">#' + o.id + ' 주문 ' + (fresh ? '· 직원이 확인하면 조리를 시작해요' : '') + '</p>' +
-      (o.total > 0 ? '<div class="amt">' + won(o.total) + '</div>' + (has ? '<div class="acct"><div class="bank">' + esc(p.bank) + ' · 예금주 ' + esc(p.holder) + '</div><div class="no">' + esc(p.account) + '</div></div><button class="btn pri big" data-a="copy" data-v="' + esc(p.account) + '">계좌번호 복사</button>' : '<div class="acct">계좌 정보는 직원에게 문의해 주세요.</div>') +
+      (o.total > 0 ? breakdown(o) + (breakdown(o) ? '<div class="note" style="text-align:center;margin:8px 0 0">결제 금액</div>' : '') + '<div class="amt">' + won(o.total) + '</div>' + (has ? '<div class="acct"><div class="bank">' + esc(p.bank) + ' · 예금주 ' + esc(p.holder) + '</div><div class="no">' + esc(p.account) + '</div></div><button class="btn pri big" data-a="copy" data-v="' + esc(p.account) + '">계좌번호 복사</button>' : '<div class="acct">계좌 정보는 직원에게 문의해 주세요.</div>') +
         '<p class="note">송금 후 직원이 입금을 확인하면 주문현황에 "입금 확인"으로 바뀌어요.</p>' : '<div class="acct">쿠폰으로 전액 할인돼서 보낼 금액이 없어요.</div>') +
       '<button class="btn big" style="margin-top:14px" data-a="sclose">확인</button>',
       function () { if (fresh) { tab = 'orders'; render(); } });
@@ -459,6 +503,8 @@
         }, function () { delete callCd[v]; toast('네트워크 오류예요. 다시 눌러 주세요.'); render(); });
         break;
       case 'reload': location.reload(); break;
+      case 'mrecheck': checkMember(true); break;
+      case 'pconfirm': if (priceChg) { expectOverride = priceChg.total; priceChg = null; closeSheet(true); openCart(); submit(); } break;
       case 'nick': askNick(); break;
       case 'play': playGame(v); break;
       case 'gexit': closeGame(); break;
@@ -493,7 +539,7 @@
       if (es.readyState === 2 && !rcT) { es.close(); rcT = setTimeout(connect, 5000); }
     };
   }
-  document.addEventListener('visibilitychange', function () { if (!document.hidden && S) poll(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && S) { poll(); if (Date.now() - lastMemberCheck > 10000) checkMember(false); } });
   window.addEventListener('pagehide', function () { clearTimeout(rcT); if (es) { es.onopen = es.onerror = null; es.close(); es = null; } stopPoll(); });
   window.addEventListener('pageshow', function (e) { if (e.persisted && S) { connect(); poll(); } });
 
@@ -505,7 +551,7 @@
     api('').then(function (r) {
       if (r.status === 404) return fatal('QR 코드를 다시 찍어 주세요', '이 테이블 주소를 찾을 수 없어요. 테이블에 붙은 QR을 다시 찍어 주세요.');
       if (!r.ok) { $('#panel').innerHTML = '<p class="empty">' + esc(r.data.message || '불러오지 못했어요') + '</p><button class="btn pri big" data-a="reload">다시 불러오기</button>'; return; }
-      applyState(r.data); connect(); resumePend();
+      applyState(r.data); connect(); checkMember(false); resumePend();
     }, function () {
       $('#panel').innerHTML = '<p class="empty">연결할 수 없어요.<br>와이파이나 데이터를 확인해 주세요.</p><button class="btn pri big" data-a="reload">다시 불러오기</button>';
     });

@@ -144,3 +144,9 @@ main{padding:14px 16px calc(var(--tab) + var(--sb) + 96px)}
 .fatal p{color:var(--muted)}
 
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+.hr{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.mbadge{padding:4px 10px;border-radius:12px;border:1px solid var(--amber);color:var(--amber);font-size:13px;font-weight:800;background:rgba(255,176,32,.1)}
+.memrow{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding:8px 10px;border-radius:12px;background:var(--raised);color:var(--muted);font-size:15px}
+.mr-btns{display:flex;gap:6px}
+a.btn{display:inline-flex;align-items:center;justify-content:center;color:inherit;text-decoration:none}

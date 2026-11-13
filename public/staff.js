@@ -269,6 +269,8 @@
     bs.forEach(function (b) { b.disabled = true; });
     setTimeout(function () { bs.forEach(function (b) { if (!b.classList.contains('busy')) b.disabled = false; }); }, ms);
   }
+  function memDisc(o) { return o.memberDiscount || 0; }
+  function coupDisc(o) { return o.couponDiscount != null ? o.couponDiscount : Math.max(0, (o.discount || 0) - memDisc(o)); }
   function orderCard(o) {
     var card = orderCardBuild(o);
     if (Date.now() < lockUntil) lockButtons(card, lockUntil - Date.now());
@@ -278,6 +280,7 @@
     var live = o.status !== 'cancelled';
     var tags = [h('span', { class: 'tag ' + STTAG[o.status] }, LABEL[o.status])];
     if (live) tags.push(o.paid ? h('span', { class: 'tag ok' }, '✓ 입금 완료') : h('span', { class: 'tag bad solid' }, '! 미입금'));
+    if (o.member) tags.push(h('span', { class: 'tag info' }, '★ COMS 회원'));
     if (o.couponCode) tags.push(h('span', { class: 'tag info' }, '쿠폰 ' + o.couponCode));
     var act = h('div', { class: 'oact' });
     if (o.status === 'pending') act.appendChild(abtn('btn btn-primary btn-block', '접수 · 조리 시작', function () { return setStatus(o, 'cooking'); }));
@@ -302,7 +305,7 @@
           h('div', { class: 'line' }, tags))),
       h('ul', { class: 'items' }, o.items.map(function (i) { return h('li', null, h('span', { class: 'q' }, '×' + i.qty), h('span', null, i.name)); })),
       o.note ? h('p', { class: 'note' }, h('b', null, '요청'), o.note) : null,
-      h('div', { class: 'total' }, '합계 ' + won(o.total), o.discount > 0 ? h('s', null, won(o.subtotal)) : null, o.discount > 0 ? h('span', { class: 'disc' }, '쿠폰 −' + won(o.discount)) : null),
+      h('div', { class: 'total' }, '합계 ' + won(o.total), o.discount > 0 ? h('s', null, won(o.subtotal)) : null, memDisc(o) > 0 ? h('span', { class: 'disc' }, '회원 −' + won(memDisc(o))) : null, coupDisc(o) > 0 ? h('span', { class: 'disc' }, '쿠폰 −' + won(coupDisc(o))) : null),
       act);
   }
 
@@ -344,8 +347,8 @@
     if (bill._sig === s) return;
     bill._sig = s;
     var liveOrders = orders.filter(function (o) { return o.status !== 'cancelled'; });
-    var total = 0, paid = 0;
-    liveOrders.forEach(function (o) { total += o.total; if (o.paid) paid += o.total; });
+    var total = 0, paid = 0, sub = 0, mem = 0, cou = 0;
+    liveOrders.forEach(function (o) { total += o.total; sub += o.subtotal != null ? o.subtotal : o.total; mem += memDisc(o); cou += coupDisc(o); if (o.paid) paid += o.total; });
     var owe = total - paid;
     var body;
     if (S.moving) {
@@ -364,7 +367,10 @@
           h('button', { class: 'btn btn-sm', type: 'button', onclick: closeBill, 'aria-label': '닫기' }, '닫기')),
         h('div', { class: 'bill-list' }, orders.length ? orders.map(billOrder) : emptyEl('이 자리에는 주문이 없어요')),
         h('div', { class: 'bill-sum' },
-          h('div', null, h('span', null, '합계'), h('span', { class: 'num' }, won(total))),
+          mem || cou ? h('div', null, h('span', null, '주문 금액'), h('span', { class: 'num' }, won(sub))) : null,
+          mem ? h('div', null, h('span', null, '회원 할인'), h('span', { class: 'num' }, '−' + won(mem))) : null,
+          cou ? h('div', null, h('span', null, '쿠폰 할인'), h('span', { class: 'num' }, '−' + won(cou))) : null,
+          h('div', null, h('span', null, '결제 금액'), h('span', { class: 'num' }, won(total))),
           h('div', null, h('span', null, '입금 확인'), h('span', { class: 'num' }, won(paid))),
           h('div', { class: owe ? 'owe' : '' }, h('span', null, '미입금'), h('span', { class: 'num' }, won(owe)))),
         h('div', { class: 'dlg-actions' },
@@ -383,7 +389,8 @@
         live ? (o.paid ? h('span', { class: 'tag ok' }, '✓ 입금') : h('span', { class: 'tag bad' }, '미입금')) : null,
         h('b', { class: 'num', style: 'margin-left:auto' }, won(o.total))),
       h('ul', { class: 'items', style: 'font-size:1rem' }, o.items.map(function (i) { return h('li', null, h('span', { class: 'q' }, '×' + i.qty), h('span', null, i.name)); })),
-      o.couponCode ? h('div', { class: 'muted' }, '쿠폰 ' + o.couponCode + ' · −' + won(o.discount)) : null,
+      o.member ? h('div', null, h('span', { class: 'tag info' }, '★ COMS 회원'), memDisc(o) ? h('span', { class: 'muted' }, ' 회원 할인 −' + won(memDisc(o))) : null) : null,
+      o.couponCode ? h('div', { class: 'muted' }, '쿠폰 ' + o.couponCode + ' · −' + won(coupDisc(o))) : null,
       o.note ? h('p', { class: 'note' }, h('b', null, '요청'), o.note) : null,
       live ? payToggle(o, true) : null);
   }
@@ -624,41 +631,260 @@
   // =====================================================================
   // menu
   // =====================================================================
+  var MENU_ERR = {
+    bad_name: '이름은 1~30자로 입력해 주세요.',
+    bad_price: '가격은 100원 단위로 0~1,000,000원 사이여야 해요.',
+    bad_desc: '설명은 60자 이하로 입력해 주세요.',
+    bad_category: '분류 이름은 1~12자로 입력해 주세요.',
+    name_taken: '같은 이름이 이미 있어요. 다른 이름을 써 주세요.',
+    too_many_items: '메뉴는 최대 100개까지 만들 수 있어요.',
+    too_many_categories: '분류는 최대 12개까지 만들 수 있어요.',
+    in_use: '이미 주문된 메뉴는 삭제할 수 없어요.',
+    category_not_empty: '메뉴가 남아 있는 분류는 삭제할 수 없어요. 메뉴를 옮기거나 삭제한 뒤 다시 시도해 주세요.',
+    nothing_to_update: '바뀐 내용이 없어요.',
+    no_item: '이미 삭제된 메뉴예요. 화면을 새로 불러올게요.',
+    no_category: '이미 삭제된 분류예요. 화면을 새로 불러올게요.',
+    bad_reorder: '순서를 바꾸지 못했어요. 다시 시도해 주세요.',
+    bad_pct: '할인율은 0~50 사이 정수여야 해요.',
+  };
+  function menuMsg(e) { return MENU_ERR[e.code] || e.message; }
+  function menuFail(e) { SC.toast(menuMsg(e), 'error'); if (e.code === 'no_item' || e.code === 'no_category') refresh(); }
+  function catsOf(d) { return (d.menu.categoryList || []).slice().sort(function (x, y) { return x.sortOrder - y.sortOrder || x.id - y.id; }); }
+  function itemsByCat(d) {
+    var by = {};
+    d.menu.items.forEach(function (i) { (by[i.categoryId] = by[i.categoryId] || []).push(i); });
+    Object.keys(by).forEach(function (k) { by[k].sort(function (x, y) { return x.sortOrder - y.sortOrder; }); });
+    return by;
+  }
+  function mapErr(fn) { return fn().then(null, function (e) { menuFail(e); }); }
+
+  // small text prompt dialog -> Promise<string|null>
+  function askText(title, label, value, max) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var input = h('input', { class: 'field', type: 'text', maxlength: String(max), value: value || '', 'aria-label': label });
+      var dlg = h('dialog', { class: 'dlg' });
+      function finish(v) { if (done) return; done = true; dlg.close(); dlg.remove(); resolve(v); }
+      dlg.appendChild(h('form', { class: 'dlg-body', onsubmit: function (e) { e.preventDefault(); var v = input.value.trim(); if (v) finish(v); } },
+        h('h2', { class: 'dlg-title' }, title), h('label', { class: 'lab' }, label, input),
+        h('div', { class: 'dlg-actions' }, h('button', { class: 'btn', type: 'button', onclick: function () { finish(null); } }, '취소'), h('button', { class: 'btn btn-primary', type: 'submit' }, '저장'))));
+      dlg.addEventListener('cancel', function (e) { e.preventDefault(); finish(null); });
+      document.body.appendChild(dlg); dlg.showModal(); input.focus(); input.select();
+    });
+  }
+
   function buildMenu() {
     var root = h('section', { 'aria-label': '메뉴' });
-    var box = h('div');
-    root.append(h('div', { class: 'view-head' }, h('h2', null, '메뉴 · 주문 받기')), box);
+    var swBox = h('div'), listBox = h('div');
+    var member = buildMemberCard();
+    root.append(h('div', { class: 'view-head' }, h('h2', null, '메뉴 관리'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: function () { openItemDialog(null); } }, '+ 메뉴 추가'),
+      h('button', { class: 'btn', type: 'button', onclick: addCategory }, '+ 분류 추가')),
+      swBox, h('h3', { class: 'menu-cat' }, '설정'), member.el, listBox);
     function render() {
-      var d = S.data, s = sig([d.orderingOpen, d.menu]);
-      if (box._sig === s) return;
-      box._sig = s;
-      var open = d.orderingOpen;
-      var sw = h('div', { class: 'card switch-card ' + (open ? 'open' : 'closed') },
-        h('span', { class: 'big' }, open ? '주문 받는 중' : '주문 마감됨'),
-        h('span', { class: 'muted' }, open ? '손님이 지금 주문할 수 있어요' : '손님 화면의 주문이 막혀 있어요 (게임은 가능)'),
-        abtn('btn ' + (open ? 'btn-danger' : 'btn-primary'), open ? '주문 마감하기' : '주문 다시 받기', function () {
-          return SC.confirm({
-            title: open ? '주문을 마감할까요?' : '주문을 다시 받을까요?', danger: open, ok: open ? '주문 마감' : '주문 받기',
-            message: open ? '손님 화면에서 주문이 즉시 막혀요. 이미 들어온 주문은 그대로예요.' : '손님이 다시 주문할 수 있어요.',
-          }).then(function (ok) { if (ok) return api('/api/staff/ordering', { open: !open }).then(refresh); });
-        }));
-      var cats = (d.menu.categories || []).slice();
-      d.menu.items.forEach(function (i) { if (cats.indexOf(i.cat) < 0) cats.push(i.cat); });
-      var groups = cats.map(function (c) {
-        var items = d.menu.items.filter(function (i) { return i.cat === c; });
-        if (!items.length) return null;
-        return h('div', null, h('h3', { class: 'menu-cat' }, c), h('div', { class: 'menu-grid' }, items.map(function (i) {
-          return h('div', { class: 'menu-item' + (i.soldOut ? ' out' : '') },
-            h('div', { class: 'grow' }, h('span', { class: 'nm' }, i.name), h('span', { class: 'muted' }, won(i.price))),
-            i.soldOut ? h('span', { class: 'tag bad solid' }, '품절') : h('span', { class: 'tag ok' }, '판매 중'),
-            abtn('btn' + (i.soldOut ? ' btn-primary' : ''), i.soldOut ? '판매 재개' : '품절 처리', function () {
-              return api('/api/staff/menu/' + encodeURIComponent(i.id) + '/soldout', { soldOut: !i.soldOut }).then(function () { SC.toast(i.name + (i.soldOut ? ' 판매 재개' : ' 품절 처리'), 'ok'); return refresh(); });
-            }));
-        })));
-      });
-      SC.fill(box, sw, groups);
+      var d = S.data;
+      renderOrdering(swBox, d);
+      member.update(d);
+      var s = sig(d.menu);
+      if (listBox._sig !== s) { listBox._sig = s; renderMenuList(listBox, d); }
     }
     return { root: root, render: render };
+  }
+
+  function renderOrdering(box, d) {
+    var s = sig(d.orderingOpen);
+    if (box._sig === s) return;
+    box._sig = s;
+    var open = d.orderingOpen;
+    SC.fill(box, h('div', { class: 'card switch-card ' + (open ? 'open' : 'closed') },
+      h('span', { class: 'big' }, open ? '주문 받는 중' : '주문 마감됨'),
+      h('span', { class: 'muted' }, open ? '손님이 지금 주문할 수 있어요' : '손님 화면의 주문이 막혀 있어요 (게임은 가능)'),
+      abtn('btn ' + (open ? 'btn-danger' : 'btn-primary'), open ? '주문 마감하기' : '주문 다시 받기', function () {
+        return SC.confirm({
+          title: open ? '주문을 마감할까요?' : '주문을 다시 받을까요?', danger: open, ok: open ? '주문 마감' : '주문 받기',
+          message: open ? '손님 화면에서 주문이 즉시 막혀요. 이미 들어온 주문은 그대로예요.' : '손님이 다시 주문할 수 있어요.',
+        }).then(function (ok) { if (ok) return api('/api/staff/ordering', { open: !open }).then(refresh); });
+      })));
+  }
+
+  // ---- COMS member discount setting ----
+  function buildMemberCard() {
+    var lastPct = null, current = 0;
+    var num = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '0', max: '50', step: '1', 'aria-label': '회원 할인율 (%)' });
+    function clamp(n) { return Math.max(0, Math.min(50, n)); }
+    function nudge(dlt) { num.value = String(clamp((parseInt(num.value, 10) || 0) + dlt)); }
+    var minus = h('button', { class: 'btn', type: 'button', 'aria-label': '1% 내리기', onclick: function () { nudge(-1); } }, '−');
+    var plus = h('button', { class: 'btn', type: 'button', 'aria-label': '1% 올리기', onclick: function () { nudge(1); } }, '+');
+    var save = abtn('btn btn-primary', '저장', function () {
+      var raw = num.value.trim(), n = Number(raw);
+      if (raw === '' || !Number.isInteger(n) || n < 0 || n > 50) { SC.toast(MENU_ERR.bad_pct, 'error'); return Promise.resolve(); }
+      if (n === current) { SC.toast('이미 ' + n + '%예요.'); return Promise.resolve(); }
+      return SC.confirm({ title: '회원 할인을 바꿀까요?', ok: '바꾸기', message: 'COMS 회원 할인 ' + current + '% → ' + n + '%' + (n === 0 ? ' (할인 끔)' : '') + '\n새로 들어오는 주문부터 적용돼요. 이미 들어온 주문은 그대로예요.' })
+        .then(function (ok) { if (ok) return api('/api/staff/member-discount', { pct: n }).then(function () { SC.toast('회원 할인을 ' + n + '%로 바꿨어요', 'ok'); return refresh(); }, function (e) { throw new Error(menuMsg(e)); }); });
+    });
+    var state = h('span', { class: 'tag' });
+    var note = h('p', { class: 'muted' });
+    var el = h('div', { class: 'card' },
+      h('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' }, h('b', { style: 'font-size:1.15rem' }, 'COMS 회원 할인'), state),
+      h('div', { class: 'stockctl' }, minus, num, h('span', { style: 'font-weight:800' }, '%'), plus, save), note);
+    function update(d) {
+      var pct = d.memberDiscountPct || 0, enabled = d.memberEnabled !== false;
+      current = pct;
+      if (pct !== lastPct) { num.value = String(pct); lastPct = pct; }
+      [minus, plus, save, num].forEach(function (x) { x.disabled = !enabled; });
+      state.className = 'tag ' + (!enabled ? 'mute' : pct ? 'ok' : 'warn');
+      state.textContent = !enabled ? '연동 없음' : pct ? '현재 ' + pct + '% 적용 중' : '꺼짐 (0%)';
+      note.textContent = enabled ? 'COMS 사이트에 로그인한 손님 주문에 자동 적용돼요. 할인액은 100원 단위로 내림해요. (0~50%)' : '서버에 COMS 연동이 설정되지 않았어요.';
+    }
+    return { el: el, update: update };
+  }
+
+  // ---- menu list ----
+  function renderMenuList(box, d) {
+    var cats = catsOf(d), by = itemsByCat(d);
+    function order(ci, ii, dir) {
+      var lists = cats.map(function (c) { return (by[c.id] || []).map(function (i) { return i.id; }); });
+      var l = lists[ci], j = ii + dir;
+      if (j < 0 || j >= l.length) return Promise.resolve();
+      var t = l[ii]; l[ii] = l[j]; l[j] = t;
+      return api('/api/staff/menu/reorder', { items: [].concat.apply([], lists) }).then(refresh);
+    }
+    function orderCat(ci, dir) {
+      var ids = cats.map(function (c) { return c.id; }), j = ci + dir;
+      if (j < 0 || j >= ids.length) return Promise.resolve();
+      var t = ids[ci]; ids[ci] = ids[j]; ids[j] = t;
+      return api('/api/staff/menu/reorder', { categories: ids }).then(refresh);
+    }
+    function guard(fn) { return function () { return mapErr(fn); }; }
+    if (!cats.length) { SC.fill(box, emptyEl('메뉴가 없어요. "+ 메뉴 추가"로 만들어 보세요.')); return; }
+    SC.fill(box, cats.map(function (c, ci) {
+      var items = by[c.id] || [];
+      return h('div', { class: 'menu-group' },
+        h('div', { class: 'cat-head' },
+          h('h3', { class: 'menu-cat', style: 'margin:0' }, c.name), h('span', { class: 'tag mute' }, items.length + '개'),
+          h('div', { class: 'btns' },
+            abtn('btn btn-sm', '▲', guard(function () { return orderCat(ci, -1); })), abtn('btn btn-sm', '▼', guard(function () { return orderCat(ci, 1); })),
+            abtn('btn btn-sm', '이름 변경', guard(function () {
+              return askText('분류 이름 변경', '분류 이름 (1~12자)', c.name, 12).then(function (v) { if (v && v !== c.name) return api('/api/staff/menu/categories/' + c.id, { name: v }).then(refresh); });
+            })),
+            abtn('btn btn-sm btn-danger', '삭제', guard(function () {
+              if (items.length) { SC.toast(MENU_ERR.category_not_empty, 'error'); return Promise.resolve(); }
+              return SC.confirm({ title: '"' + c.name + '" 분류를 삭제할까요?', danger: true, ok: '삭제', message: '비어 있는 분류만 삭제돼요.' })
+                .then(function (ok) { if (ok) return api('/api/staff/menu/categories/' + c.id + '/delete').then(refresh); });
+            })))),
+        h('div', { class: 'menu-grid' }, items.length ? items.map(function (i, ii) {
+          var b = [];
+          if (i.soldOut) b.push(h('span', { class: 'tag bad solid' }, '품절'));
+          if (i.hidden) b.push(h('span', { class: 'tag mute' }, '숨김'));
+          if (!i.soldOut && !i.hidden) b.push(h('span', { class: 'tag ok' }, '판매 중'));
+          return h('div', { class: 'menu-item' + (i.soldOut ? ' out' : '') + (i.hidden ? ' hid' : '') },
+            h('div', { class: 'grow' }, h('span', { class: 'nm' }, i.name), h('span', { class: 'muted' }, won(i.price) + (i.desc ? ' · ' + i.desc : ''))),
+            h('div', { class: 'line', style: 'display:flex;gap:6px' }, b),
+            h('div', { class: 'btns' },
+              abtn('btn btn-sm' + (i.soldOut ? ' btn-primary' : ''), i.soldOut ? '판매 재개' : '품절', guard(function () {
+                return api('/api/staff/menu/' + encodeURIComponent(i.id) + '/soldout', { soldOut: !i.soldOut }).then(function () { SC.toast(i.name + (i.soldOut ? ' 판매 재개' : ' 품절 처리'), 'ok'); return refresh(); });
+              })),
+              abtn('btn btn-sm' + (i.hidden ? ' btn-primary' : ''), i.hidden ? '숨김 해제' : '숨김', guard(function () {
+                return api('/api/staff/menu/items/' + encodeURIComponent(i.id), { hidden: !i.hidden }).then(function () { SC.toast(i.name + (i.hidden ? ' 다시 보여요' : ' 손님에게 숨겼어요'), 'ok'); return refresh(); });
+              })),
+              h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { openItemDialog(i); } }, '수정'),
+              abtn('btn btn-sm', '▲', guard(function () { return order(ci, ii, -1); })), abtn('btn btn-sm', '▼', guard(function () { return order(ci, ii, 1); }))));
+        }) : emptyEl('이 분류에는 메뉴가 없어요')));
+    }));
+  }
+  function addCategory() {
+    return askText('분류 추가', '분류 이름 (1~12자)', '', 12).then(function (v) {
+      if (v) return mapErr(function () { return api('/api/staff/menu/categories', { name: v }).then(function () { SC.toast('"' + v + '" 분류를 만들었어요', 'ok'); return refresh(); }); });
+    });
+  }
+
+  // ---- item create/edit dialog ----
+  function openItemDialog(item) {
+    var d = S.data, cats = catsOf(d), NEW = '__new';
+    var editing = !!item;
+    var name = h('input', { class: 'field', type: 'text', maxlength: '30', autocomplete: 'off', value: editing ? item.name : '', 'aria-label': '이름' });
+    var price = h('input', { class: 'field', type: 'number', inputmode: 'numeric', step: '100', min: '0', max: '1000000', value: editing ? String(item.price) : '', placeholder: '예: 4500', 'aria-label': '가격 (원)' });
+    var preview = h('output', { class: 'muted', 'aria-live': 'polite' });
+    var sel = h('select', { class: 'field', 'aria-label': '분류' }, cats.map(function (c) { return h('option', { value: c.name }, c.name); }), h('option', { value: NEW }, '+ 새 분류 만들기'));
+    var newCat = h('input', { class: 'field', type: 'text', maxlength: '12', placeholder: '새 분류 이름 (1~12자)', 'aria-label': '새 분류 이름', hidden: true });
+    sel.value = editing ? item.cat : (cats[0] ? cats[0].name : NEW);
+    var desc = h('input', { class: 'field', type: 'text', maxlength: '60', value: editing ? (item.desc || '') : '', 'aria-label': '설명 (선택)' });
+    var hid = h('input', { type: 'checkbox', style: 'width:24px;height:24px' });
+    hid.checked = editing && !!item.hidden;
+    var err = h('p', { class: 'err', role: 'alert', style: 'color:var(--danger);font-weight:800;min-height:1.4em' });
+    function priceOk() { var raw = price.value.trim(), n = Number(raw); return raw !== '' && Number.isInteger(n) && n >= 0 && n <= 1000000 && n % 100 === 0; }
+    function syncPrice() { preview.textContent = priceOk() ? won(Number(price.value)) : (price.value.trim() === '' ? '' : '100원 단위로 입력해 주세요'); preview.style.color = priceOk() || !price.value ? '' : 'var(--danger)'; }
+    function syncCat() { newCat.hidden = sel.value !== NEW; if (!newCat.hidden) newCat.focus(); }
+    price.addEventListener('input', syncPrice); sel.addEventListener('change', syncCat);
+    syncPrice(); newCat.hidden = sel.value !== NEW;
+    var dlg = h('dialog', { class: 'dlg wide', 'aria-label': editing ? '메뉴 수정' : '메뉴 추가' });
+    function close() { if (dlg.open) dlg.close(); dlg.remove(); }
+    var saveBtn = h('button', { class: 'btn btn-primary', type: 'submit' }, '저장');
+
+    function validate() {
+      var n = name.value.trim(), c = sel.value === NEW ? newCat.value.trim() : sel.value;
+      if (n.length < 1 || n.length > 30) return MENU_ERR.bad_name;
+      if (!priceOk()) return MENU_ERR.bad_price;
+      if (c.length < 1 || c.length > 12) return MENU_ERR.bad_category;
+      if (desc.value.trim().length > 60) return MENU_ERR.bad_desc;
+      return '';
+    }
+    function submit() {
+      err.textContent = validate();
+      if (err.textContent) return;
+      var body = { name: name.value.trim(), price: Number(price.value), category: sel.value === NEW ? newCat.value.trim() : sel.value, desc: desc.value.trim() };
+      saveBtn.disabled = true; saveBtn.classList.add('busy');
+      var run;
+      if (!editing) {
+        if (hid.checked) body.hidden = true; // one request: never visible to guests
+        run = api('/api/staff/menu/items', body);
+      } else {
+        var diff = {};
+        if (body.name !== item.name) diff.name = body.name;
+        if (body.price !== item.price) diff.price = body.price;
+        if (body.category !== item.cat) diff.category = body.category;
+        if (body.desc !== (item.desc || '')) diff.desc = body.desc;
+        if (hid.checked !== !!item.hidden) diff.hidden = hid.checked;
+        if (!Object.keys(diff).length) { saveBtn.disabled = false; saveBtn.classList.remove('busy'); close(); return; }
+        var gate = diff.price !== undefined
+          ? SC.confirm({ title: '가격을 바꿀까요?', ok: '가격 바꾸기', message: (diff.name || item.name) + ' ' + won(item.price) + ' → ' + won(diff.price) + '으로 바꿀까요?\n이미 들어온 주문은 그대로예요.' })
+          : Promise.resolve(true);
+        run = gate.then(function (ok) { if (!ok) return null; return api('/api/staff/menu/items/' + encodeURIComponent(item.id), diff); });
+      }
+      run.then(function (r) {
+        saveBtn.disabled = false; saveBtn.classList.remove('busy');
+        if (r === null) return;
+        close(); SC.toast(editing ? '메뉴를 수정했어요' : '메뉴를 추가했어요', 'ok'); refresh();
+      }, function (e) {
+        saveBtn.disabled = false; saveBtn.classList.remove('busy');
+        err.textContent = menuMsg(e);
+        if (e.code === 'no_item') { close(); refresh(); }
+      });
+    }
+    var delBtn = editing ? h('button', { class: 'btn btn-danger', type: 'button', onclick: function () { deleteItem(item, close); } }, '삭제') : null;
+    dlg.appendChild(h('form', { class: 'dlg-body', novalidate: true, onsubmit: function (e) { e.preventDefault(); submit(); } },
+      h('h2', { class: 'dlg-title' }, editing ? '메뉴 수정' : '메뉴 추가'),
+      h('label', { class: 'lab' }, '이름 (1~30자)', name),
+      h('label', { class: 'lab' }, '가격 (100원 단위, 최대 1,000,000원)', price, preview),
+      h('label', { class: 'lab' }, '분류', sel, newCat),
+      h('label', { class: 'lab' }, '설명 (선택, 60자 이하)', desc),
+      h('label', { style: 'display:flex;gap:10px;align-items:center;font-weight:800' }, hid, '손님에게 숨기기'),
+      err,
+      h('div', { class: 'dlg-actions' }, delBtn, h('button', { class: 'btn', type: 'button', onclick: close }, '취소'), saveBtn)));
+    dlg.addEventListener('cancel', function (e) { e.preventDefault(); close(); });
+    document.body.appendChild(dlg); dlg.showModal(); name.focus();
+  }
+  function deleteItem(item, closeEditor) {
+    return SC.confirm({ title: '"' + item.name + '" 메뉴를 삭제할까요?', danger: true, ok: '삭제', message: '되돌릴 수 없어요. 잠시 안 팔 거라면 "숨김"을 쓰세요.' }).then(function (ok) {
+      if (!ok) return;
+      return api('/api/staff/menu/items/' + encodeURIComponent(item.id) + '/delete').then(function () { closeEditor(); SC.toast('삭제했어요', 'ok'); return refresh(); }, function (e) {
+        if (e.code !== 'in_use') { SC.toast(menuMsg(e), 'error'); if (e.code === 'no_item') { closeEditor(); refresh(); } return; }
+        return SC.confirm({ title: '삭제할 수 없어요', ok: '숨김으로 바꾸기', cancel: '그냥 두기', message: '이미 주문된 메뉴는 삭제할 수 없어요. 숨김으로 바꿀까요?\n손님 메뉴에서 사라지고, 지난 주문 기록은 그대로예요.' }).then(function (ok2) {
+          if (!ok2) return;
+          return api('/api/staff/menu/items/' + encodeURIComponent(item.id), { hidden: true }).then(function () { closeEditor(); SC.toast(item.name + ' 숨김 처리', 'ok'); return refresh(); });
+        });
+      });
+    });
   }
 
   // =====================================================================
@@ -694,7 +920,7 @@
     body.replaceChildren(
       h('div', { class: 'tiles' },
         tile('총매출', won(t.revenue), 'hl'), tile('입금 확인', won(t.paidRevenue), 'ok'), tile('미입금', won(t.unpaidRevenue), t.unpaidRevenue ? 'bad' : ''),
-        tile('주문 수', t.orders + '건'), tile('쿠폰 할인 합계', won(t.discount))),
+        tile('주문 수', t.orders + '건'), tile('회원 할인', won(t.memberDiscount || 0) + ' · ' + (t.memberOrders || 0) + '건'), tile('할인 합계 (회원+쿠폰)', won(t.discount))),
       h('div', { class: 'two' },
         h('div', { class: 'card' }, h('h3', { class: 'sec-title', style: 'margin:0' }, '시간대별 매출'),
           r.byHour.length ? h('div', { class: 'bars' }, r.byHour.map(function (x) {

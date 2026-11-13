@@ -28,6 +28,8 @@ const MAX_WAIT_PER_MIN = 30;
 const MAX_NICKS_PER_SEAT = 30;
 const MAX_CALLS_PER_SEAT = 50; // including resolved
 const MEMO_MS = 1500;
+const MENU_MAX_ITEMS = 100;
+const MENU_MAX_CATEGORIES = 12;
 const WAIT_KEEP_MS = 3 * HOUR;
 const CALL_TYPES = ['물', '수저', '치워주세요', '기타'];
 const ORDER_STATUSES = ['pending', 'cooking', 'served', 'cancelled'];
@@ -50,12 +52,17 @@ CREATE TABLE IF NOT EXISTS orders(
   id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, key TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending', paid INTEGER NOT NULL DEFAULT 0,
   subtotal INTEGER NOT NULL, discount INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL,
+  member_discount INTEGER NOT NULL DEFAULT 0, member_id INTEGER,
   coupon_code TEXT, note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   cooking_at INTEGER, UNIQUE(table_id, seat, key));
 CREATE INDEX IF NOT EXISTS orders_ts ON orders(table_id, seat);
 CREATE TABLE IF NOT EXISTS order_items(order_id INTEGER NOT NULL, item_id TEXT NOT NULL, name TEXT NOT NULL, unit_price INTEGER NOT NULL, qty INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS order_items_o ON order_items(order_id);
-CREATE TABLE IF NOT EXISTS sold_out(item_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS menu_categories(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS menu_items(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, price INTEGER NOT NULL, category_id INTEGER NOT NULL, descr TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0, sold_out INTEGER NOT NULL DEFAULT 0, sort INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS order_items_item ON order_items(item_id);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reward_stock(id TEXT PRIMARY KEY, stock INTEGER NOT NULL, issued INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS coupons(
@@ -78,12 +85,17 @@ CREATE INDEX IF NOT EXISTS nicks_ts ON nicks(table_id, seat);
 CREATE INDEX IF NOT EXISTS plays_fin ON plays(finished_at);
 `;
 
-function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbBytes = 256 * 1024 * 1024, backupSkipBytes = 128 * 1024 * 1024 }) {
-  const L = { seatPlayGapMs: 1000, seatPlayMax: 300, seatOpenMax: 20, ...limits };
+function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbBytes = 256 * 1024 * 1024, backupSkipBytes = 128 * 1024 * 1024, memberEnabled = false }) {
+  const L = { seatPlayGapMs: 1000, seatPlayMax: 300, seatOpenMax: 20, memberOrderMax: 20, ...limits };
   const waitTimes = []; // ponytail: in-memory insert times for the global wait-list rate cap (resets on restart)
   fs.mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'booth.db'));
   db.exec(SCHEMA);
+  // migrations for databases created by older code (CREATE TABLE IF NOT EXISTS does not touch existing tables)
+  const colsOf = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
+  if (!colsOf('orders').includes('member_discount')) db.exec('ALTER TABLE orders ADD COLUMN member_discount INTEGER NOT NULL DEFAULT 0');
+  if (!colsOf('orders').includes('member_id')) db.exec('ALTER TABLE orders ADD COLUMN member_id INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS orders_member ON orders(member_id)');
   // hard ceiling on the file size: writes beyond it fail with SQLITE_FULL (server maps that to 503 storage_full)
   db.exec(`PRAGMA max_page_count=${Math.max(1, Math.floor(maxDbBytes / db.prepare('PRAGMA page_size').get().page_size))}`);
   const dbFile = path.join(dataDir, 'booth.db');
@@ -103,7 +115,52 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const now = () => Date.now();
   const ph = (n) => Array.from({ length: n }, () => '?').join(',');
 
-  const menuById = new Map(menu.items.map((i) => [i.id, i]));
+  // The menu lives in the DB. menu.json only seeds an empty menu (first boot, or an older DB without menu tables) and is never re-read.
+  // "seeded" is remembered in settings: once set, the menu is never re-seeded, even if staff later delete every item and category.
+  // (A DB whose menu tables are already filled but has no flag yet just gets the flag.)
+  const menuEmpty = !get('SELECT 1 FROM menu_categories LIMIT 1') && !get('SELECT 1 FROM menu_items LIMIT 1');
+  const seedProblem = () => {
+    if (!menu || !Array.isArray(menu.items) || !Array.isArray(menu.categories || [])) return 'menu.json must have "items" (array) and "categories" (array)';
+    if (menu.items.length > MENU_MAX_ITEMS) return `more than ${MENU_MAX_ITEMS} items`;
+    if ((menu.categories || []).length > MENU_MAX_CATEGORIES) return `more than ${MENU_MAX_CATEGORIES} categories`;
+    const key = (x) => String(x).normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+    const cats = new Set();
+    for (const c of menu.categories || []) {
+      if (typeof c !== 'string' || !c.trim() || [...c.trim()].length > 12) return `bad category ${JSON.stringify(c)}`;
+      if (cats.has(key(c))) return `duplicate category ${JSON.stringify(c)}`;
+      cats.add(key(c));
+    }
+    const ids = new Set(); const names = new Set();
+    for (const i of menu.items) {
+      if (!i || typeof i.id !== 'string' || !/^[A-Za-z0-9_-]{1,40}$/.test(i.id) || ids.has(i.id)) return `bad or duplicate item id ${JSON.stringify(i && i.id)}`;
+      ids.add(i.id);
+      if (typeof i.name !== 'string' || !i.name.trim() || [...i.name.trim()].length > 30 || names.has(key(i.name))) return `bad or duplicate item name ${JSON.stringify(i.name)}`;
+      names.add(key(i.name));
+      if (!Number.isInteger(i.price) || i.price < 0 || i.price > 1000000 || i.price % 100 !== 0) return `bad price for ${JSON.stringify(i.name)} (integer, multiple of 100, 0..1000000)`;
+      if (typeof i.cat !== 'string' || !cats.has(key(i.cat))) return `item ${JSON.stringify(i.name)} uses a category that is not in "categories"`;
+      if (i.desc != null && (typeof i.desc !== 'string' || [...i.desc].length > 60)) return `bad desc for ${JSON.stringify(i.name)}`;
+    }
+    return null;
+  };
+  const problem = !get("SELECT 1 FROM settings WHERE k='menu_seeded'") && menuEmpty ? seedProblem() : null;
+  if (problem) console.error(`menu.json is invalid: ${problem}. Starting with an EMPTY menu (add items as staff, or fix menu.json and restart: it will be seeded then).`);
+  if (!get("SELECT 1 FROM settings WHERE k='menu_seeded'") && menuEmpty && !problem) {
+    const legacySoldOut = get("SELECT 1 x FROM sqlite_master WHERE type='table' AND name='sold_out'")
+      ? new Set(all('SELECT item_id FROM sold_out').map((r) => r.item_id)) : new Set();
+    tx(() => {
+      const catId = new Map();
+      const ensureCat = (name) => {
+        if (!catId.has(name)) catId.set(name, Number(run('INSERT INTO menu_categories(name, sort) VALUES(?,?)', name, catId.size).lastInsertRowid));
+        return catId.get(name);
+      };
+      for (const c of menu.categories || []) ensureCat(c);
+      menu.items.forEach((i, idx) => {
+        run('INSERT INTO menu_items(id,name,price,category_id,descr,sold_out,sort) VALUES(?,?,?,?,?,?,?)',
+          i.id, i.name, i.price, ensureCat(i.cat), i.desc || '', legacySoldOut.has(i.id) ? 1 : 0, idx);
+      });
+    });
+  }
+  if (!get("SELECT 1 FROM settings WHERE k='menu_seeded'") && !problem) run("INSERT INTO settings(k,v) VALUES('menu_seeded','1')");
   const games = rewards.games;
   for (let i = 1; i <= tableCount; i++) {
     if (!get('SELECT 1 FROM tables WHERE id=?', i)) run('INSERT INTO tables(id, token) VALUES(?,?)', i, crypto.randomBytes(12).toString('base64url'));
@@ -146,16 +203,128 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
 
   // ---------- menu / ordering ----------
-  function menuView() {
-    const so = new Set(all('SELECT item_id FROM sold_out').map((r) => r.item_id));
-    return {
-      categories: menu.categories,
-      items: menu.items.map((i) => ({ id: i.id, name: i.name, price: i.price, cat: i.cat, desc: i.desc || '', soldOut: so.has(i.id) })),
+  const itemRow = (id) => get('SELECT i.*, c.name cat FROM menu_items i JOIN menu_categories c ON c.id=i.category_id WHERE i.id=?', id);
+  // guests get visible items only; admin=true (staff) also gets hidden ones plus ids/sort/usage
+  function menuView(admin = false) {
+    const cats = all('SELECT id, name, sort FROM menu_categories ORDER BY sort, id');
+    const rows = all(`SELECT i.*, c.name cat${admin ? ', (SELECT COUNT(*) FROM order_items oi WHERE oi.item_id=i.id) used' : ''} FROM menu_items i JOIN menu_categories c ON c.id=i.category_id ORDER BY c.sort, c.id, i.sort, i.rowid`);
+    const vis = admin ? rows : rows.filter((r) => !r.hidden);
+    const out = {
+      categories: (admin ? cats : cats.filter((c) => vis.some((r) => r.category_id === c.id))).map((c) => c.name),
+      items: vis.map((r) => ({
+        id: r.id, name: r.name, price: r.price, cat: r.cat, desc: r.descr, soldOut: !!r.sold_out,
+        ...(admin ? { hidden: !!r.hidden, sortOrder: r.sort, categoryId: r.category_id, inUse: r.used > 0 } : {}),
+      })),
     };
+    if (admin) out.categoryList = cats.map((c) => ({ id: c.id, name: c.name, sortOrder: c.sort, itemCount: rows.filter((r) => r.category_id === c.id).length }));
+    return out;
   }
   function setSoldOut(itemId, soldOut) {
-    if (!menuById.has(itemId)) fail(404, 'no_item', '없는 메뉴입니다.');
-    if (soldOut) run('INSERT OR IGNORE INTO sold_out(item_id) VALUES(?)', itemId); else run('DELETE FROM sold_out WHERE item_id=?', itemId);
+    if (run('UPDATE menu_items SET sold_out=? WHERE id=?', soldOut ? 1 : 0, itemId).changes !== 1) fail(404, 'no_item', '없는 메뉴입니다.');
+  }
+  // names: control/invisible/filler characters stripped, at least one visible character required (same rule as nicknames)
+  function cleanLabel(v, min, max, code, what) {
+    if (typeof v !== 'string') fail(400, code, `${what}을(를) 입력해 주세요.`);
+    const t = v.replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
+    const n = [...t].length;
+    if (n < min || n > max || (min > 0 && !/[\p{L}\p{N}\p{S}\p{P}]/u.test(t.normalize('NFKC').replace(INVISIBLE, '')))) {
+      fail(400, code, `${what}은(는) ${min === 0 ? '' : '보이는 글자 '}${min === 0 ? '' : min + '~'}${max}자로 입력해 주세요.`);
+    }
+    return t;
+  }
+  // uniqueness is decided on a normalised key: NFKC, collapsed whitespace, lower case ("Beer" = "beer" = fullwidth "Ｂｅｅｒ")
+  const nameKey = (s) => s.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+  const checkPrice = (p) => { if (!Number.isInteger(p) || p < 0 || p > 1000000 || p % 100 !== 0) fail(400, 'bad_price', '가격은 0~1,000,000원 사이 100원 단위여야 합니다.'); return p; };
+  function categoryByName(name) {
+    const key = nameKey(name);
+    const hit = all('SELECT id, name FROM menu_categories').find((c) => nameKey(c.name) === key);
+    if (hit) return hit.id;
+    if (get('SELECT COUNT(*) n FROM menu_categories').n >= MENU_MAX_CATEGORIES) fail(409, 'too_many_categories', `카테고리는 ${MENU_MAX_CATEGORIES}개까지 만들 수 있습니다.`);
+    return Number(run('INSERT INTO menu_categories(name, sort) VALUES(?, (SELECT COALESCE(MAX(sort), -1) + 1 FROM menu_categories))', name).lastInsertRowid);
+  }
+  const nameTaken = (name, exceptId = '') => { const k = nameKey(name); return all('SELECT id, name FROM menu_items').some((i) => i.id !== exceptId && nameKey(i.name) === k); };
+  const categoryNameTaken = (name, exceptId = 0) => { const k = nameKey(name); return all('SELECT id, name FROM menu_categories').some((c) => c.id !== exceptId && nameKey(c.name) === k); };
+  const adminItem = (id) => menuView(true).items.find((i) => i.id === id);
+
+  function createItem(body) {
+    const name = cleanLabel(body.name, 1, 30, 'bad_name', '메뉴 이름');
+    const price = checkPrice(body.price);
+    const descr = body.desc == null ? '' : cleanLabel(body.desc, 0, 60, 'bad_desc', '설명');
+    const cat = cleanLabel(body.category, 1, 12, 'bad_category', '카테고리 이름');
+    if (body.hidden != null && typeof body.hidden !== 'boolean') fail(400, 'bad_hidden', 'hidden은 true/false여야 합니다.');
+    if (nameTaken(name)) fail(409, 'name_taken', '같은 이름의 메뉴가 이미 있습니다.');
+    if (get('SELECT COUNT(*) n FROM menu_items').n >= MENU_MAX_ITEMS) fail(409, 'too_many_items', `메뉴는 ${MENU_MAX_ITEMS}개까지 만들 수 있습니다.`);
+    const id = tx(() => {
+      const nid = 'm' + crypto.randomBytes(5).toString('hex');
+      run('INSERT INTO menu_items(id,name,price,category_id,descr,hidden,sort) VALUES(?,?,?,?,?,?,(SELECT COALESCE(MAX(sort), -1) + 1 FROM menu_items))', nid, name, price, categoryByName(cat), descr, body.hidden ? 1 : 0);
+      return nid;
+    });
+    return adminItem(id);
+  }
+  function updateItem(id, body) {
+    const cur = get('SELECT * FROM menu_items WHERE id=?', id) || fail(404, 'no_item', '없는 메뉴입니다.');
+    const has = (k) => Object.hasOwn(body, k);
+    if (!['name', 'price', 'category', 'desc', 'hidden', 'sortOrder'].some(has)) fail(400, 'nothing_to_update', '바꿀 항목이 없습니다.');
+    const name = has('name') ? cleanLabel(body.name, 1, 30, 'bad_name', '메뉴 이름') : cur.name;
+    const price = has('price') ? checkPrice(body.price) : cur.price;
+    const descr = has('desc') ? cleanLabel(body.desc, 0, 60, 'bad_desc', '설명') : cur.descr;
+    const cat = has('category') ? cleanLabel(body.category, 1, 12, 'bad_category', '카테고리 이름') : null;
+    if (has('hidden') && typeof body.hidden !== 'boolean') fail(400, 'bad_hidden', 'hidden은 true/false여야 합니다.');
+    if (has('sortOrder') && (!Number.isInteger(body.sortOrder) || body.sortOrder < 0 || body.sortOrder > 100000)) fail(400, 'bad_sort', 'sortOrder가 올바르지 않습니다.');
+    if (nameTaken(name, id)) fail(409, 'name_taken', '같은 이름의 메뉴가 이미 있습니다.');
+    tx(() => {
+      run('UPDATE menu_items SET name=?, price=?, descr=?, category_id=?, hidden=?, sort=? WHERE id=?', name, price, descr, cat ? categoryByName(cat) : cur.category_id,
+        has('hidden') ? (body.hidden ? 1 : 0) : cur.hidden, has('sortOrder') ? body.sortOrder : cur.sort, id);
+    });
+    return adminItem(id);
+  }
+  function deleteItem(id) {
+    if (!get('SELECT 1 FROM menu_items WHERE id=?', id)) fail(404, 'no_item', '없는 메뉴입니다.');
+    if (get('SELECT 1 FROM order_items WHERE item_id=? LIMIT 1', id)) fail(409, 'in_use', '주문 내역이 있는 메뉴는 삭제할 수 없습니다. 숨김 처리해 주세요.');
+    run('DELETE FROM menu_items WHERE id=?', id);
+  }
+  function createCategory(body) {
+    const name = cleanLabel(body.name, 1, 12, 'bad_category', '카테고리 이름');
+    if (categoryNameTaken(name)) fail(409, 'name_taken', '같은 이름의 카테고리가 이미 있습니다.');
+    const id = categoryByName(name);
+    return { id, name };
+  }
+  function renameCategory(id, body) {
+    const cur = get('SELECT * FROM menu_categories WHERE id=?', id) || fail(404, 'no_category', '없는 카테고리입니다.');
+    const name = cleanLabel(body.name, 1, 12, 'bad_category', '카테고리 이름');
+    if (categoryNameTaken(name, id)) fail(409, 'name_taken', '같은 이름의 카테고리가 이미 있습니다.');
+    run('UPDATE menu_categories SET name=? WHERE id=?', name, id);
+    return { id, name };
+  }
+  function deleteCategory(id) {
+    if (!get('SELECT 1 FROM menu_categories WHERE id=?', id)) fail(404, 'no_category', '없는 카테고리입니다.');
+    if (get('SELECT 1 FROM menu_items WHERE category_id=? LIMIT 1', id)) fail(409, 'category_not_empty', '메뉴가 남아 있는 카테고리는 삭제할 수 없습니다.');
+    run('DELETE FROM menu_categories WHERE id=?', id);
+  }
+  // body: { items?: [itemId...], categories?: [categoryId...] } — each listed id's sort becomes its index in the list
+  function reorderMenu(body) {
+    const check = (list, existsSql, isId) => {
+      if (!Array.isArray(list) || list.length > 200 || list.some((x) => !isId(x)) || new Set(list).size !== list.length) fail(400, 'bad_reorder', '순서 목록이 올바르지 않습니다.');
+      if (list.some((x) => !get(existsSql, x))) fail(404, 'no_item', '없는 항목이 포함되어 있습니다.');
+    };
+    if (body.items == null && body.categories == null) fail(400, 'bad_reorder', '순서 목록이 올바르지 않습니다.');
+    if (body.items != null) check(body.items, 'SELECT 1 FROM menu_items WHERE id=?', (x) => typeof x === 'string');
+    if (body.categories != null) check(body.categories, 'SELECT 1 FROM menu_categories WHERE id=?', Number.isInteger);
+    tx(() => {
+      (body.items || []).forEach((id, i) => run('UPDATE menu_items SET sort=? WHERE id=?', i, id));
+      (body.categories || []).forEach((id, i) => run('UPDATE menu_categories SET sort=? WHERE id=?', i, id));
+    });
+  }
+  // secret for signing the booth_d device cookie (never exposed); generated once
+  function deviceSecret() {
+    let v = setting('device_secret', null);
+    if (!v) { v = crypto.randomBytes(32).toString('hex'); run("INSERT INTO settings(k,v) VALUES('device_secret',?)", v); }
+    return Buffer.from(v, 'hex');
+  }
+  const memberPct = () => Number(setting('member_discount_pct', '10'));
+  function setMemberPct(p) {
+    if (!Number.isInteger(p) || p < 0 || p > 50) fail(400, 'bad_pct', '할인율은 0~50 사이 정수여야 합니다.');
+    run('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v', 'member_discount_pct', String(p));
   }
   function setOrdering(open) { run('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v', 'ordering_open', open ? '1' : '0'); }
 
@@ -164,12 +333,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const loadOrders = (rows) => rows.map((o) => ({
     id: o.id, table: o.table_id, seat: o.seat, status: o.status, paid: !!o.paid,
     items: all(ITEMS_SQL, o.id).map((it) => ({ id: it.item_id, name: it.name, qty: it.qty, unitPrice: it.unit_price })),
-    subtotal: o.subtotal, discount: o.discount, total: o.total, couponCode: o.coupon_code, note: o.note,
+    subtotal: o.subtotal, discount: o.discount + o.member_discount, memberDiscount: o.member_discount, couponDiscount: o.discount,
+    member: o.member_id != null, total: o.total, couponCode: o.coupon_code, note: o.note,
     createdAt: o.created_at, updatedAt: o.updated_at, cookingAt: o.cooking_at,
   }));
   const orderById = (id) => loadOrders([get('SELECT * FROM orders WHERE id=?', id)])[0];
 
-  function createOrder(tableId, body) {
+  function createOrder(tableId, body, { memberId = null } = {}) {
     const t = tableRow(tableId);
     const key = body.key;
     if (typeof key !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(key)) fail(400, 'bad_key', '주문 키가 올바르지 않습니다. (8~64자 영숫자)');
@@ -181,17 +351,19 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (lines.length > 30) fail(400, 'too_many_lines', '한 번에 30종류까지 주문할 수 있습니다.');
     const seen = new Set();
     const unknown = [];
+    const rows = new Map();
     for (const l of lines) {
       if (!l || typeof l !== 'object' || typeof l.id !== 'string') fail(400, 'bad_items', '주문 항목이 올바르지 않습니다.');
       if (!Number.isInteger(l.qty) || l.qty < 1 || l.qty > 20) fail(400, 'bad_qty', '수량은 1~20 사이 정수여야 합니다.', { id: l.id });
       if (seen.has(l.id)) fail(400, 'dup_item', '같은 메뉴가 중복되었습니다.', { id: l.id });
       seen.add(l.id);
-      if (!menuById.has(l.id)) unknown.push(l.id);
+      const m = itemRow(l.id);
+      if (!m || m.hidden) unknown.push(l.id); else rows.set(l.id, m);
     }
     if (unknown.length) fail(400, 'unknown_item', '없는 메뉴가 있습니다.', { ids: unknown });
-    const so = new Set(all('SELECT item_id FROM sold_out').map((r) => r.item_id));
-    const gone = lines.filter((l) => so.has(l.id)).map((l) => l.id);
-    if (gone.length) fail(409, 'sold_out', '품절된 메뉴가 있습니다.', { ids: gone, names: gone.map((id) => menuById.get(id).name) });
+    const gone = lines.filter((l) => rows.get(l.id).sold_out).map((l) => l.id);
+    if (gone.length) fail(409, 'sold_out', '품절된 메뉴가 있습니다.', { ids: gone, names: gone.map((id) => rows.get(id).name) });
+    if (body.expectedTotal != null && !Number.isInteger(body.expectedTotal)) fail(400, 'bad_expected_total', 'expectedTotal은 정수여야 합니다.');
     let note = '';
     if (body.note != null) {
       if (typeof body.note !== 'string') fail(400, 'bad_note', '요청 사항이 올바르지 않습니다.');
@@ -204,22 +376,42 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (get("SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=? AND status='pending'", tableId, t.seat).n >= MAX_PENDING_PER_TABLE) {
       fail(429, 'too_many_pending', '접수 대기 중인 주문이 너무 많습니다. 직원에게 문의해 주세요.');
     }
-    const subtotal = lines.reduce((s, l) => s + menuById.get(l.id).price * l.qty, 0);
+    const subtotal = lines.reduce((s, l) => s + rows.get(l.id).price * l.qty, 0);
+    // member discount first (rounded DOWN to 100 won), then the coupon on what is left; the total never goes below 0
+    let memberDiscount = 0;
+    let memberDiscountSkipped = null;
+    const pct = memberPct();
+    if (memberId != null && pct > 0) {
+      const want = Math.floor(subtotal * pct / 10000) * 100;
+      if (want > 0) {
+        const used = get("SELECT COUNT(*) n FROM orders WHERE member_id=? AND member_discount>0 AND status!='cancelled'", memberId).n;
+        if (used >= L.memberOrderMax) memberDiscountSkipped = 'limit'; else memberDiscount = want;
+      }
+    }
     let discount = 0;
     let coupon = null;
+    let couponIgnored = false;
     if (body.couponCode != null && body.couponCode !== '') {
       coupon = get('SELECT * FROM coupons WHERE code=?', String(body.couponCode).trim().toUpperCase());
       if (!coupon || coupon.table_id !== tableId || coupon.seat !== t.seat) fail(400, 'bad_coupon', '쿠폰을 찾을 수 없습니다.');
       if (coupon.status !== 'issued') fail(409, 'coupon_used', '이미 사용된 쿠폰입니다.');
       if (coupon.type !== 'discount') fail(400, 'coupon_not_discount', '할인 쿠폰만 주문에 적용할 수 있습니다. 이 쿠폰은 직원에게 보여 주세요.');
-      discount = Math.min(coupon.amount, subtotal);
+      discount = Math.min(coupon.amount, subtotal - memberDiscount);
+      if (discount <= 0) { coupon = null; discount = 0; couponIgnored = true; } // nothing to discount: do not burn the coupon
+    }
+    const total = subtotal - memberDiscount - discount;
+    if (body.expectedTotal != null && body.expectedTotal !== total) {
+      fail(409, 'price_changed', '가격이 바뀌었습니다. 금액을 다시 확인해 주세요.', {
+        expectedTotal: body.expectedTotal, total, subtotal, memberDiscount, couponDiscount: discount,
+        items: lines.map((l) => ({ id: l.id, name: rows.get(l.id).name, qty: l.qty, unitPrice: rows.get(l.id).price })),
+      });
     }
     const id = tx(() => {
       const ts = now();
-      const oid = run('INSERT INTO orders(table_id,seat,key,subtotal,discount,total,coupon_code,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-        tableId, t.seat, key, subtotal, discount, subtotal - discount, coupon ? coupon.code : null, note, ts, ts).lastInsertRowid;
+      const oid = run('INSERT INTO orders(table_id,seat,key,subtotal,discount,member_discount,member_id,total,coupon_code,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+        tableId, t.seat, key, subtotal, discount, memberDiscount, memberId, total, coupon ? coupon.code : null, note, ts, ts).lastInsertRowid;
       for (const l of lines) {
-        const m = menuById.get(l.id);
+        const m = rows.get(l.id); // name and unit price are frozen into the order here
         run('INSERT INTO order_items(order_id,item_id,name,unit_price,qty) VALUES(?,?,?,?,?)', oid, m.id, m.name, m.price, l.qty);
       }
       if (coupon && run("UPDATE coupons SET status='used', order_id=?, used_at=? WHERE code=? AND status='issued'", oid, ts, coupon.code).changes !== 1) {
@@ -227,7 +419,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       }
       return Number(oid);
     });
-    return { order: orderById(id), duplicate: false };
+    return { order: orderById(id), duplicate: false, ...(memberDiscountSkipped ? { memberDiscountSkipped } : {}), ...(couponIgnored ? { couponIgnored: true } : {}) };
   }
 
   function setStatus(id, status) {
@@ -454,6 +646,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return {
       table: { number: t.id, seat: t.seat },
       orderingOpen: orderingOpen(),
+      memberDiscountPct: memberPct(),
       menu: menuView(),
       // cancelled orders: only the newest 5 are shown
       orders: loadOrders(all("SELECT * FROM orders WHERE table_id=? AND seat=? AND (status!='cancelled' OR id IN (SELECT id FROM orders WHERE table_id=? AND seat=? AND status='cancelled' ORDER BY id DESC LIMIT 5)) ORDER BY id DESC", tableId, t.seat, tableId, t.seat)),
@@ -495,7 +688,9 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       hourly: rewards.hourly || { label: '안주 1개 서비스' },
       hour: hourInfo(cur),
       prevHour: hourInfo(cur - HOUR),
-      menu: menuView(),
+      memberDiscountPct: memberPct(),
+      memberEnabled,
+      menu: menuView(true),
     };
   }
 
@@ -509,7 +704,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     }
     return {
       items: [...agg.values()].sort((a, b) => b.qty - a.qty),
-      orders: orders.map((o) => ({ id: o.id, table: o.table, note: o.note, items: o.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty })), since: o.cookingAt })),
+      orders: orders.map((o) => ({ id: o.id, table: o.table, member: o.member, note: o.note, items: o.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty })), since: o.cookingAt })),
     };
   }
 
@@ -566,13 +761,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
 
   // ---------- sales ----------
   function sales() {
-    const totals = get("SELECT COUNT(*) orders, COALESCE(SUM(total),0) revenue, COALESCE(SUM(discount),0) discount, COALESCE(SUM(CASE WHEN paid=1 THEN total END),0) paidRevenue FROM orders WHERE status!='cancelled'");
+    const totals = get("SELECT COUNT(*) orders, COALESCE(SUM(total),0) revenue, COALESCE(SUM(discount+member_discount),0) discount, COALESCE(SUM(member_discount),0) memberDiscount, COALESCE(SUM(member_discount>0),0) memberOrders, COALESCE(SUM(CASE WHEN paid=1 THEN total END),0) paidRevenue FROM orders WHERE status!='cancelled'");
     totals.unpaidRevenue = totals.revenue - totals.paidRevenue;
     return {
       totals,
-      byHour: all("SELECT (created_at/3600000)*3600000 h, COUNT(*) n, SUM(total) revenue, SUM(discount) discount FROM orders WHERE status!='cancelled' GROUP BY h ORDER BY h")
+      byHour: all("SELECT (created_at/3600000)*3600000 h, COUNT(*) n, SUM(total) revenue, SUM(discount+member_discount) discount FROM orders WHERE status!='cancelled' GROUP BY h ORDER BY h")
         .map((r) => ({ hour: r.h, label: kst(r.h), orders: r.n, revenue: r.revenue, discount: r.discount })),
-      byItem: all("SELECT oi.item_id id, oi.name, SUM(oi.qty) qty, SUM(oi.qty*oi.unit_price) gross FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.status!='cancelled' GROUP BY oi.item_id ORDER BY qty DESC, oi.item_id")
+      byItem: all("SELECT oi.item_id id, oi.name, SUM(oi.qty) qty, SUM(oi.qty*oi.unit_price) gross, MAX(oi.rowid) lastrow FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.status!='cancelled' GROUP BY oi.item_id ORDER BY qty DESC, oi.item_id")
         .map((r) => ({ id: r.id, name: r.name, qty: r.qty, gross: r.gross })),
       coupons: all("SELECT CASE WHEN source='hour' THEN 'hour' ELSE reward_id END rid, label, type, COUNT(*) issued, SUM(status='used') used FROM coupons GROUP BY rid, label, type ORDER BY rid")
         .map((r) => ({ rewardId: r.rid, label: r.label, type: r.type, issued: r.issued, used: r.used })),
@@ -583,8 +778,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const esc = (v) => { const x = String(v ?? ''); return /[",\r\n]/.test(x) ? '"' + x.replace(/"/g, '""') + '"' : x; };
     const line = (...c) => c.map(esc).join(',');
     const out = [
-      line('[요약]'), line('주문수', '매출', '할인', '입금확인', '미입금'),
-      line(s.totals.orders, s.totals.revenue, s.totals.discount, s.totals.paidRevenue, s.totals.unpaidRevenue), '',
+      line('[요약]'), line('주문수', '매출', '할인', '입금확인', '미입금', '회원할인액', '회원할인 건수'),
+      line(s.totals.orders, s.totals.revenue, s.totals.discount, s.totals.paidRevenue, s.totals.unpaidRevenue, s.totals.memberDiscount, s.totals.memberOrders), '',
       line('[시간대별 매출]'), line('시간', '주문수', '매출', '할인'),
       ...s.byHour.map((r) => line(r.label, r.orders, r.revenue, r.discount)), '',
       line('[메뉴별 판매]'), line('메뉴', '수량', '금액(할인 전)'),
@@ -598,7 +793,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function reset() {
     invalidate();
     tx(() => {
-      for (const t of ['order_items', 'orders', 'coupons', 'plays', 'nicks', 'calls', 'waitlist', 'sold_out']) run(`DELETE FROM ${t}`);
+      for (const t of ['order_items', 'orders', 'coupons', 'plays', 'nicks', 'calls', 'waitlist']) run(`DELETE FROM ${t}`);
+      run('UPDATE menu_items SET sold_out=0'); // the menu itself and the settings (member pct) survive a reset
       run("DELETE FROM sqlite_sequence WHERE name IN ('orders','plays','calls','waitlist')");
       run('UPDATE tables SET seat=1');
       run("DELETE FROM settings WHERE k IN ('ordering_open','wait_open')");
@@ -659,6 +855,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
 
   return {
     createOrder, setStatus, setPaid, guestCancel, menuView, setSoldOut, setOrdering, orderingOpen,
+    deviceSecret, createItem, updateItem, deleteItem, createCategory, renameCategory, deleteCategory, reorderMenu, memberPct, setMemberPct,
     startPlay, finishPlay, redeem, awardHour, setStock, setNick, addCall, resolveCall,
     addWait, waitStatus, waitCancel, waitAction, setWaitOpen, clearWait, waitInfo,
     newLoginKey, validLoginKey, loginKeyOk, loginKeyFail,

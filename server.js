@@ -7,9 +7,20 @@ const crypto = require('node:crypto');
 const { createStore, HttpError } = require('./db');
 
 const env = process.env;
+// numeric env vars: unset/empty = default; anything else must be a plain non-negative integer >= min or the server refuses to start
+function envInt(name, def, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return def;
+  const n = /^\d{1,15}$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  if (!Number.isInteger(n) || n < min || n > max) {
+    console.error(`${name} must be an integer between ${min} and ${max} (got "${raw}"). Refusing to start.`);
+    process.exit(1);
+  }
+  return n;
+}
 let BASE = (env.BASE_PATH || '').trim().replace(/\/+$/, '');
 if (BASE && !BASE.startsWith('/')) BASE = '/' + BASE;
-const PORT = env.PORT === undefined || env.PORT === '' ? 8787 : Number(env.PORT);
+const PORT = envInt('PORT', 8787, 0, 65535);
 const HOST = env.HOST || '127.0.0.1';
 const CONFIG_DIR = env.CONFIG_DIR || __dirname;
 const PUBLIC = path.resolve(env.PUBLIC_DIR || path.join(__dirname, 'public'));
@@ -18,19 +29,20 @@ const PUBLIC_ORIGIN = (env.PUBLIC_ORIGIN || '').replace(/\/+$/, '');
 const COOKIE_PATH = BASE || '/';
 const COOKIE_FLAGS = `Path=${COOKIE_PATH}; HttpOnly; SameSite=Lax${env.COOKIE_SECURE === '1' ? '; Secure' : ''}`;
 const PAY = { bank: env.PAY_BANK || '', account: env.PAY_ACCOUNT || '', holder: env.PAY_HOLDER || '' };
-const BACKUP_MS = Number(env.BACKUP_INTERVAL_MS) || 10 * 60 * 1000;
+const BACKUP_MS = envInt('BACKUP_INTERVAL_MS', 10 * 60 * 1000);
 const BODY_LIMIT = 16 * 1024;
-const SESSION_MS = (Number(env.SESSION_HOURS) || 72) * 3600 * 1000;
+const SESSION_MS = envInt('SESSION_HOURS', 72, 1, 24 * 365) * 3600 * 1000;
 const KEY_MAX_AGE_S = 30 * 86400;
 // stream caps are sized for a booth of a few dozen guests, not for the internet
-const SSE_PUBLIC_MAX = Number(env.SSE_PUBLIC_MAX) || 300; // guest + board + wait streams
+const SSE_PUBLIC_MAX = envInt('SSE_PUBLIC_MAX', 300); // guest + board + wait streams
 const SSE_STAFF_MAX = 100; // staff + kitchen streams have their own pool
 const SSE_PER_DEVICE = 5;
 const SSE_PER_TABLE = 12;
 const SSE_BOARD_MAX = 20;
 const SSE_WAIT_MAX = 60;
 const SSE_BACKLOG_MAX = 64 * 1024; // public streams whose unsent backlog exceeds this are dropped
-const LOCKOUT_MS = Number(env.LOCKOUT_MS) || 60000;
+const LOCKOUT_MS = envInt('LOCKOUT_MS', 60000);
+const COMS_ME_URL = (env.COMS_ME_URL || '').trim(); // unset = member discount feature off (no outbound requests at all)
 
 let STAFF_PIN = env.STAFF_PIN;
 if (!STAFF_PIN) {
@@ -44,29 +56,26 @@ if (!STAFF_PIN) {
 }
 
 const readJson = (f) => JSON.parse(fs.readFileSync(path.join(CONFIG_DIR, f), 'utf8'));
-const menu = readJson('menu.json');
+let menu = null;
+try { menu = readJson('menu.json'); } catch (e) { console.error(`menu.json could not be read (${e.message}); an empty menu will not be seeded from it`); }
 const rewards = readJson('rewards.json');
 const tablesCfg = readJson('tables.json');
 (function validateConfig() {
-  const ids = new Set();
-  for (const i of menu.items) {
-    if (!i.id || ids.has(i.id) || !Number.isInteger(i.price) || i.price < 0) throw new Error('menu.json: bad item ' + JSON.stringify(i));
-    ids.add(i.id);
-  }
   for (const r of rewards.rewards) {
     if (!rewards.games[r.game] || !['discount', 'item'].includes(r.type)) throw new Error('rewards.json: bad reward ' + r.id);
   }
   if (!Number.isInteger(tablesCfg.count) || tablesCfg.count < 1 || tablesCfg.count > 500) throw new Error('tables.json: bad count');
 }());
 
-const limits = {};
-if (env.SEAT_PLAY_GAP_MS !== undefined) limits.seatPlayGapMs = Number(env.SEAT_PLAY_GAP_MS);
-if (env.SEAT_PLAY_MAX) limits.seatPlayMax = Number(env.SEAT_PLAY_MAX);
-if (env.SEAT_OPEN_MAX) limits.seatOpenMax = Number(env.SEAT_OPEN_MAX);
-const storeOpts = {};
-if (env.DB_MAX_BYTES) storeOpts.maxDbBytes = Number(env.DB_MAX_BYTES);
-if (env.BACKUP_SKIP_BYTES) storeOpts.backupSkipBytes = Number(env.BACKUP_SKIP_BYTES);
-const store = createStore({ dataDir: DATA_DIR, menu, rewards, tableCount: tablesCfg.count, limits, ...storeOpts });
+const limits = {
+  seatPlayGapMs: envInt('SEAT_PLAY_GAP_MS', 1000, 0),
+  seatPlayMax: envInt('SEAT_PLAY_MAX', 300),
+  seatOpenMax: envInt('SEAT_OPEN_MAX', 20),
+  memberOrderMax: envInt('MEMBER_ORDER_MAX', 20),
+};
+const storeOpts = { maxDbBytes: envInt('DB_MAX_BYTES', 256 * 1024 * 1024), backupSkipBytes: envInt('BACKUP_SKIP_BYTES', 128 * 1024 * 1024) };
+const store = createStore({ dataDir: DATA_DIR, menu, rewards, tableCount: tablesCfg.count, limits, memberEnabled: !!COMS_ME_URL, ...storeOpts });
+const DEVICE_KEY = store.deviceSecret();
 const tokenToTable = new Map(store.tokens().map((t) => [t.token, t.id]));
 
 // ---------- small helpers ----------
@@ -81,8 +90,15 @@ const parseCookies = (req) => {
   }
   return out;
 };
-const DEVICE_RE = /^[a-f0-9]{32}$/;
-const cookieDevice = (req) => (parseCookies(req).booth_d || []).find((v) => DEVICE_RE.test(v));
+// booth_d = <32 hex id>.<first 32 hex of HMAC-SHA256(secret, id)>: only ids this server issued are ever counted as devices
+const deviceMac = (id) => crypto.createHmac('sha256', DEVICE_KEY).update(id).digest('hex').slice(0, 32);
+function cookieDevice(req) {
+  for (const v of parseCookies(req).booth_d || []) {
+    const m = /^([a-f0-9]{32})\.([a-f0-9]{32})$/.exec(v);
+    if (m && crypto.timingSafeEqual(Buffer.from(m[2]), Buffer.from(deviceMac(m[1])))) return m[1];
+  }
+  return undefined;
+}
 const addCookie = (res, c) => {
   const prev = res.getHeader('Set-Cookie');
   res.setHeader('Set-Cookie', prev ? [].concat(prev, c) : [c]);
@@ -91,7 +107,7 @@ function ensureDevice(c) {
   const have = cookieDevice(c.req);
   if (have) return have;
   const id = crypto.randomBytes(16).toString('hex');
-  addCookie(c.res, `booth_d=${id}; ${COOKIE_FLAGS}; Max-Age=${3 * 86400}`);
+  addCookie(c.res, `booth_d=${id}.${deviceMac(id)}; ${COOKIE_FLAGS}; Max-Age=${3 * 86400}`);
   return id;
 }
 const staffSession = (req) => (parseCookies(req).booth_s || []).find((id) => store.validSession(id)) || null;
@@ -226,6 +242,84 @@ const heartbeat = setInterval(() => {
 }, 20000);
 heartbeat.unref();
 
+// ---------- COMS member verification ----------
+// The booth shares the club site's origin, so the browser sends its HttpOnly `token` cookie. We forward ONLY that cookie to COMS_ME_URL
+// (GET, 2 s, no redirects, 16 KB cap). Member = 200 + integer id > 0 + known role. Everything else (and every failure) = not a member.
+// The token is never logged or stored; results are cached by sha256(token) for 60 s.
+const TOKEN_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const ROLES = new Set(['ASSOCIATE', 'USER', 'OFFICER', 'VICE_PRESIDENT', 'ADMIN']);
+const MEMBER_CACHE_MS = 60000;
+const MEMBER_CACHE_MAX = envInt('MEMBER_CACHE_MAX', 500); // per map: members and non-members are cached separately so a token spray cannot evict members
+const MEMBER_MAX_INFLIGHT = 20;
+const MEMBER_MAX_PER_SEC = 60; // global outbound cap; a single device can use at most MEMBER_PER_DEVICE_MIN per minute, so it cannot exhaust this
+const MEMBER_PER_DEVICE_MIN = 6; // uncached lookups per booth_d per minute
+const MEMBER_DEVICES_MAX = 5000;
+const memberPos = new Map(); // sha256(token) -> { at, id }   (definitive: 200 member)
+const memberNeg = new Map(); // sha256(token) -> { at }       (definitive: 401 / 403 only)
+const memberPending = new Map(); // same key -> Promise (identical concurrent lookups share one request)
+const memberDevices = new Map(); // booth_d -> [timestamps of uncached lookups]
+const memberCalls = [];
+let memberInflight = 0;
+const putCache = (map, key, val) => {
+  map.delete(key);
+  map.set(key, val);
+  while (map.size > MEMBER_CACHE_MAX) map.delete(map.keys().next().value);
+};
+
+// -> { id, cache }. cache=true only for definitive answers (200 member, 401, 403); everything else is "not a member for this request only".
+async function fetchComsMember(token) {
+  const res = await fetch(COMS_ME_URL, { method: 'GET', headers: { cookie: `token=${token}` }, redirect: 'manual', signal: AbortSignal.timeout(2000) });
+  if (res.status === 401 || res.status === 403) { await res.body?.cancel().catch(() => {}); return { id: null, cache: true }; }
+  if (res.status !== 200 || Number(res.headers.get('content-length') || 0) > 16384) { await res.body?.cancel().catch(() => {}); return { id: null, cache: false }; }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > 16384) { await reader.cancel().catch(() => {}); return { id: null, cache: false }; }
+    chunks.push(value);
+  }
+  let j;
+  try { j = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return { id: null, cache: false }; }
+  if (j && Number.isInteger(j.id) && j.id > 0 && ROLES.has(j.role)) return { id: j.id, cache: true };
+  return { id: null, cache: false };
+}
+// resolves to the club member id, or null. Never throws.
+// Requires an existing valid booth_d (a cookie minted by this very request does not count): no device, no lookup.
+async function verifyMember(req) {
+  if (!COMS_ME_URL) return null;
+  const token = (parseCookies(req).token || []).find((v) => v.length <= 4096 && TOKEN_RE.test(v));
+  if (!token) return null;
+  const dev = cookieDevice(req);
+  if (!dev) return null;
+  const key = crypto.createHash('sha256').update(token).digest('hex');
+  const t = Date.now();
+  const pos = memberPos.get(key);
+  if (pos && t - pos.at < MEMBER_CACHE_MS) return pos.id;
+  const neg = memberNeg.get(key);
+  if (neg && t - neg.at < MEMBER_CACHE_MS) return null;
+  if (memberPending.has(key)) return memberPending.get(key);
+  // per-device cap first, so one browser spraying tokens only burns its own budget
+  const mine = (memberDevices.get(dev) || []).filter((x) => x > t - 60000);
+  if (mine.length >= MEMBER_PER_DEVICE_MIN) return null;
+  while (memberCalls.length && memberCalls[0] < t - 1000) memberCalls.shift();
+  if (memberInflight >= MEMBER_MAX_INFLIGHT || memberCalls.length >= MEMBER_MAX_PER_SEC) return null; // not cached
+  mine.push(t);
+  memberDevices.delete(dev);
+  memberDevices.set(dev, mine);
+  while (memberDevices.size > MEMBER_DEVICES_MAX) memberDevices.delete(memberDevices.keys().next().value);
+  memberInflight++;
+  memberCalls.push(t);
+  const p = fetchComsMember(token).catch(() => ({ id: null, cache: false })).then((r) => {
+    if (r.cache) { if (r.id != null) putCache(memberPos, key, { at: Date.now(), id: r.id }); else putCache(memberNeg, key, { at: Date.now() }); }
+    return r.id;
+  }).finally(() => { memberInflight--; memberPending.delete(key); });
+  memberPending.set(key, p);
+  return p;
+}
+
 // ---------- routing ----------
 const routes = [];
 const route = (method, re, fn, opts = {}) => routes.push({ method, re: new RegExp(`^${re}$`), fn, staff: !!opts.staff });
@@ -265,9 +359,15 @@ route('GET', '/api/board/events', (c) => sse(c, 'board', () => store.boardState(
 const guestSnap = (c) => ({ ...store.guestState(c.tableId, c.device), pay: PAY });
 route('GET', G, (c) => guestSnap(guestCtx(c)));
 route('GET', G + '/events', (c) => { guestCtx(c); sse(c, 'g:' + c.tableId, () => guestSnap(c)); });
-route('POST', G + '/orders', (c) => {
+route('GET', G + '/member', async (c) => {
   guestCtx(c);
-  const r = store.createOrder(c.tableId, c.body);
+  const id = await verifyMember(c.req); // only the boolean leaves the server: no id, name or role
+  return { enabled: !!COMS_ME_URL, member: id != null, pct: store.memberPct() };
+});
+route('POST', G + '/orders', async (c) => {
+  guestCtx(c);
+  const memberId = await verifyMember(c.req); // a client-sent "member" field is never read
+  const r = store.createOrder(c.tableId, c.body, { memberId });
   if (!r.duplicate) {
     c.status = 201;
     touchTable(c.tableId);
@@ -369,8 +469,17 @@ route('POST', '/api/staff/menu/([A-Za-z0-9_-]{1,40})/soldout', (c) => {
   need(typeof c.body.soldOut === 'boolean', 'bad_soldout', 'soldOut은 true/false여야 합니다.');
   store.setSoldOut(c.m[1], c.body.soldOut);
   touchAll();
-  return { ok: true, menu: store.menuView() };
+  return { ok: true, menu: store.menuView(true) };
 }, S);
+const menuDone = (extra = {}) => { touchAll(); return { ok: true, ...extra, menu: store.menuView(true) }; };
+route('POST', '/api/staff/menu/items', (c) => menuDone({ item: store.createItem(c.body) }), { staff: true });
+route('POST', '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})', (c) => menuDone({ item: store.updateItem(c.m[1], c.body) }), { staff: true });
+route('POST', '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})/delete', (c) => { store.deleteItem(c.m[1]); return menuDone(); }, { staff: true });
+route('POST', '/api/staff/menu/reorder', (c) => { store.reorderMenu(c.body); return menuDone(); }, { staff: true });
+route('POST', '/api/staff/menu/categories', (c) => menuDone({ category: store.createCategory(c.body) }), { staff: true });
+route('POST', '/api/staff/menu/categories/(\\d{1,9})', (c) => menuDone({ category: store.renameCategory(int(c.m[1]), c.body) }), { staff: true });
+route('POST', '/api/staff/menu/categories/(\\d{1,9})/delete', (c) => { store.deleteCategory(int(c.m[1])); return menuDone(); }, { staff: true });
+route('POST', '/api/staff/member-discount', (c) => { store.setMemberPct(c.body.pct); touchAll(); return { ok: true, pct: c.body.pct }; }, { staff: true });
 route('POST', '/api/staff/ordering', (c) => { need(typeof c.body.open === 'boolean', 'bad_open', 'open은 true/false여야 합니다.'); store.setOrdering(c.body.open); touchAll(); return { ok: true, orderingOpen: c.body.open }; }, S);
 route('POST', '/api/staff/coupons/redeem', (c) => { const coupon = store.redeem(c.body.code); touchTable(coupon.table); return { coupon }; }, S);
 route('POST', '/api/staff/tables/move', (c) => {

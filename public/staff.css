@@ -261,3 +261,11 @@ main { padding: 12px 12px calc(96px + env(safe-area-inset-bottom)); max-width: 1
 .tbl th { color: var(--muted); font-size: .85rem; }
 .tbl td.r, .tbl th.r { text-align: right; font-variant-numeric: tabular-nums; }
 .danger-zone { border-color: var(--danger); margin-top: 22px; }
+
+.menu-group { margin-top: 18px; }
+.cat-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.cat-head .btns, .menu-item .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.cat-head .btns { margin-left: auto; }
+.menu-item .btns { width: 100%; }
+.menu-item.hid { opacity: .6; border-style: dashed; }
+select.field { appearance: auto; }

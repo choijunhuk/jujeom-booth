@@ -47,6 +47,7 @@
       h('div', { class: 'job-head' },
         h('div', { class: 'tn' }, String(o.table), h('small', null, '번 테이블 · #' + o.id)),
         h('div', { class: 'el' }, el, h('span', { class: 'w tag', hidden: true }))),
+      o.member ? h('div', null, h('span', { class: 'tag info' }, '★ COMS 회원')) : null,
       h('ul', { class: 'items' }, o.items.map(function (i) { return h('li', null, h('span', { class: 'q' }, '×' + i.qty), h('span', null, i.name)); })),
       o.note ? h('p', { class: 'note' }, h('b', null, '요청'), o.note) : null,
       b);
