@@ -584,7 +584,7 @@
     var ov = t.couponLimitOverride, box = h('div', { class: 'card' }), val = ov != null ? ov : 1;   // override 0 = no coupons for this seating
     var lim = limitsInForce(t), cl = (X.S.data && X.S.data.couponLimits) || {};
     box.appendChild(h('h3', { class: 'sec-title', style: 'margin:0' }, '쿠폰 한도'));
-    box.appendChild(lim ? h('p', null, h('b', null, lim.length ? lim.join(' · ') : '보상이 없어요')) : h('p', { class: 'muted' }, '한도 정보를 불러오지 못했어요'));
+    box.appendChild(lim ? h('p', null, h('b', null, lim.length ? lim.join(' · ') : '보상이 없어요'), typeof t.headcountCounted === 'number' ? h('span', { class: 'muted' }, ' · 인정 인원 ' + t.headcountCounted + '명') : null) : h('p', { class: 'muted' }, '한도 정보를 불러오지 못했어요'));
     if (t.couponsIssued != null) box.appendChild(h('p', { class: 'muted num' }, '이번 손님이 받은 쿠폰 ' + t.couponsIssued + '장' + (cl.maxPerSeat ? ' / 총 ' + cl.maxPerSeat + '장까지' : '') + ' · 사용한 할인 쿠폰 ' + (t.discountUses || 0) + '장' + (cl.maxDiscountUsesPerSeat ? ' / ' + cl.maxDiscountUsesPerSeat + '장까지' : '')));
     var st = stepper(function () { return val; }, function (v) { val = v; }, 0, 20, '쿠폰 한도');
     box.appendChild(h('div', { class: 'stockctl' }, st, X.abtn('btn btn-sm', '이 자리만 적용', function () { return setOverride(val); }), ov != null ? X.abtn('btn btn-sm', '원래대로', function () { return setOverride(null); }) : null));

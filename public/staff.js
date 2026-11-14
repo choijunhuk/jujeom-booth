@@ -705,7 +705,7 @@
       h('legend', { style: 'font-weight:800' }, '테이블당 받을 수 있는 장수'),
       h('label', { style: 'display:flex;gap:10px;align-items:center;font-weight:800' }, rPeople, editing ? '인원수만큼' : '인원수만큼 (기본)'),
       h('label', { class: 'lab' }, '최대 장수 (1~20장)', capIn),
-      h('p', { class: 'muted' }, '직원이 확인한 인원(또는 1인당 입장료가 있는 경우)만 인정해요. 손님이 혼자 적은 인원은 1장으로 계산해요. 인원을 넣지 않은 테이블도 1장이에요.'),
+      h('p', { class: 'muted' }, '직원이 확인한 인원은 그대로, 손님이 적은 인원은 입장료를 낸 인원수만큼만 인정해요. 그 밖에는 1장이에요.'),
       h('label', { style: 'display:flex;gap:10px;align-items:center;font-weight:800' }, rFixed, '고정'),
       h('label', { class: 'lab' }, '장수 (1~20장)', cntIn),
       h('p', { class: 'muted' }, '인원과 상관없이 한 테이블이 이 보상을 받을 수 있는 장수예요.'),

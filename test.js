@@ -2534,7 +2534,7 @@ test('rewards: edits reach guests live; coupons keep the label/type/amount they 
     try {
       await gs.until((b) => b.includes('event: state'));
       const snap = (await E.get(`/api/t/${tk[4]}`)).json;
-      assert.deepEqual(snap.rewards.find((r) => r.id === id), { id, game: 'pour', label: '테스트 할인', type: 'discount', amount: 500, item: null, threshold: 100, soldOut: false, got: false, seatIssued: 0, seatLimit: 1, limitSource: 'people', deviceIssued: 0, deviceLimit: 1, canEarn: true, seatCap: 4, headcountTrusted: false, moreWithHeadcount: false, moreWithStaffConfirm: true });
+      assert.deepEqual(snap.rewards.find((r) => r.id === id), { id, game: 'pour', label: '테스트 할인', type: 'discount', amount: 500, item: null, threshold: 100, soldOut: false, got: false, seatIssued: 0, seatLimit: 1, limitSource: 'people', deviceIssued: 0, deviceLimit: 1, canEarn: true, seatCap: 4, headcountTrusted: false, headcountCounted: 1, moreWithHeadcount: false, moreWithStaffConfirm: true });
       assert.ok((await E.get('/api/board')).json.rewards.some((r) => r.id === id && r.remaining === 3 && r.stock === 3));
       assert.equal((await s.post(`/api/staff/rewards/${id}`, { label: '실시간 이름' })).status, 200);
       await gs.until((b) => b.includes('실시간 이름'));
@@ -7842,13 +7842,13 @@ test('L1 per-seat "people" limit counts only a TRUSTED headcount: guest-entered 
     assert.deepEqual(await lim(1), [4, 'people', true], 'capped at 4');
     assert.equal((await partyOf(s, 1, 3)).status, 200);
     assert.deepEqual(await lim(1), [3, 'people', true]);
-    // per-person cover ON: a guest entering 4 counts (each person pays)
+    // per-person cover ON: entering a headcount alone no longer counts, only PAID cover shares do (see L6)
     await coverOn(s);
     sn = (await kSnap(await guestWithDevice(srv), tk[7])).rewards.find((r) => r.id === P.id);
-    assert.deepEqual([sn.moreWithHeadcount, sn.moreWithStaffConfirm, sn.headcountTrusted], [true, false, false], 'the guest can still enter a headcount that counts');
+    assert.deepEqual([sn.moreWithHeadcount, sn.moreWithStaffConfirm, sn.headcountTrusted], [false, true, false]);
     const g8 = await guestWithDevice(srv); const seat8 = (await kSnap(g8, tk[7])).table.seat;
     assert.equal((await g8.post(`/api/t/${tk[7]}/party`, { people: 4, seat: seat8 })).status, 200);
-    assert.deepEqual(await lim(8), [4, 'people', true]);
+    assert.deepEqual(await lim(8), [1, 'people', false], 'a cover nobody paid does not count');
     // a waitlist seat is trusted too
     const w = (await (await guestWithDevice(srv)).post('/api/wait', { nick: '손님', size: 3 })).json.id;
     assert.equal((await s.post(`/api/staff/wait/${w}/seat`, { table: 9 })).json.partySet, true);
@@ -8054,7 +8054,10 @@ test('M4 staff tables[] / testTable carry server-computed headcountTrusted and c
     const g = await guestWithDevice(srv); const seat = (await kSnap(g, tk[0])).table.seat;
     assert.equal((await g.post(`/api/t/${tk[0]}/party`, { people: 3, seat })).status, 200);
     let t = await tableIn(s, 1);
-    assert.deepEqual([t.headcountTrusted, t.couponLimits.find((c) => c.rewardId === P.id)], [true, { rewardId: P.id, limit: 3, limitSource: 'people' }]);
+    assert.deepEqual([t.headcountTrusted, t.headcountCounted, t.couponLimits.find((c) => c.rewardId === P.id)], [false, 1, { rewardId: P.id, limit: 1, limitSource: 'people' }], 'a live but unpaid cover does not make a guest headcount count');
+    const cv = await coverIn(s, 1); await s.post(`/api/staff/orders/${cv.id}/paid`, { paid: true, method: 'cash', shares: 2 });
+    t = await tableIn(s, 1);
+    assert.deepEqual([t.headcountCounted, t.couponLimits.find((c) => c.rewardId === P.id).limit], [2, 2]);
     assert.equal((await s.post('/api/staff/tables/1/cover/waive', { reason: '임원' })).status, 200);
     t = await tableIn(s, 1);
     assert.deepEqual([t.partySetBy, t.cover.waived, t.headcountTrusted, t.couponLimits.find((c) => c.rewardId === P.id)], ['guest', true, false, { rewardId: P.id, limit: 1, limitSource: 'people' }]);
@@ -8064,5 +8067,48 @@ test('M4 staff tables[] / testTable carry server-computed headcountTrusted and c
     assert.deepEqual((await tableIn(s, 1)).couponLimits.find((c) => c.rewardId === P.id), { rewardId: P.id, limit: 2, limitSource: 'override' });
     const tt = (await s.get('/api/staff/state')).json.testTable;
     assert.deepEqual([tt.headcountTrusted, tt.couponLimits.find((c) => c.rewardId === P.id)], [false, { rewardId: P.id, limit: 1, limitSource: 'people' }]);
+  }, { env: KENV });
+});
+
+test('L6 trust follows money: a guest-entered headcount counts as min(people, PAID cover shares), at least 1; staff / waitlist counts fully; waived, per-table or unpaid covers count 1', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const P = await kReward(s, { label: '인원', perSeat: undefined, stock: 100 });
+    await coverOn(s); // per person, 3,000
+    const view = async (n) => { const x = (await kSnap(await guestWithDevice(srv), tk[n - 1])).rewards.find((r) => r.id === P.id); return [x.seatLimit, x.headcountCounted, x.headcountTrusted, x.moreWithHeadcount, x.moreWithStaffConfirm]; };
+    const guestSets = async (n, people) => { const g = await guestWithDevice(srv); const seat = (await kSnap(g, tk[n - 1])).table.seat; assert.equal((await g.post(`/api/t/${tk[n - 1]}/party`, { people, seat })).status, 200); };
+    const pay = async (n, shares) => { const c = await coverIn(s, n); return s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares }); };
+    await guestSets(1, 30);
+    assert.deepEqual(await view(1), [1, 1, false, true, false], 'nothing paid: 1; paying cover shares would raise it');
+    assert.equal((await pay(1, 2)).status, 200);
+    assert.deepEqual(await view(1), [2, 2, false, true, false], '2 shares paid');
+    assert.equal((await pay(1, 5)).status, 200);
+    assert.deepEqual(await view(1), [4, 7, false, false, false], 'counted headcount 7, limit capped at cap 4, more shares would not help');
+    // voiding a share lowers the limit for FUTURE issues; coupons already issued stay
+    const list = await kGuests(srv, tk[0], 6); const res = await kFinish(tk[0], list);
+    assert.equal(kEarned(res, P.id), 4);
+    const c1 = await coverIn(s, 1);
+    for (const p of c1.payments.slice().reverse().slice(0, 1)) assert.equal((await s.post(`/api/staff/payments/${p.id}/void`, { reason: '입력 실수' })).status, 200);
+    assert.equal((await s.get('/api/staff/state')).json.coupons.filter((c) => c.rewardId === P.id && c.table === 1).length, 4, 'issued coupons are never revoked');
+    // void down to 1 paid share on another table
+    await guestSets(2, 30); const p2 = (await pay(2, 2)).json.order.payments[0].id;
+    assert.deepEqual((await view(2)).slice(0, 2), [2, 2]);
+    await s.post(`/api/staff/payments/${p2}/void`, { reason: '입력 실수' });
+    assert.deepEqual((await view(2)).slice(0, 2), [1, 1], 'the void lowered the limit');
+    // staff confirms: people, capped
+    await guestSets(3, 30); assert.equal((await partyOf(s, 3, 30)).status, 200);
+    assert.deepEqual(await view(3), [4, 30, true, false, false]);
+    // waived cover: 1
+    await guestSets(4, 5); await pay(4, 5);
+    assert.equal((await view(4))[0], 4);
+    assert.equal((await s.post('/api/staff/tables/4/cover/waive', { reason: '임원' })).status, 200);
+    assert.deepEqual((await view(4)).slice(0, 2), [1, 1]);
+    // per-table cover: 1 whatever is paid
+    await s.post('/api/staff/cover/settings', { mode: 'per_table', amount: 2000 });
+    await guestSets(5, 30);
+    const c5 = await coverIn(s, 5); if (c5) await s.post(`/api/staff/orders/${c5.id}/paid`, { paid: true, method: 'cash' });
+    assert.deepEqual((await view(5)).slice(0, 2), [1, 1]);
+    // the drain script with a per-person cover and nothing paid: 1 per reward per seating
+    await s.post('/api/staff/cover/settings', { mode: 'per_person', amount: 3000 });
+    for (let n = 6; n <= 9; n++) { await guestSets(n, 30); const l = await kGuests(srv, tk[n - 1], 5); assert.equal(kEarned(await kFinish(tk[n - 1], l), P.id), 1, `table ${n}`); }
   }, { env: KENV });
 });

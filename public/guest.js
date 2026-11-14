@@ -519,7 +519,7 @@
           else if (r.blockedBy === 'stock_out') why += ' · 소진';
           // only when the server says a headcount would change the limit (never for device / table-total / stock blocks or cap 1)
           // server-decided hints only: a guest can raise the limit by typing a headcount only with a per-person cover charge; otherwise staff must confirm
-          if (r.moreWithHeadcount === true && S.party && S.party.people == null && S.party.canSet) why += '<br><button class="linkbtn" data-a="party-open">인원을 입력하면 이 테이블 한도가 정해져요' + (r.seatCap > 0 ? ' (최대 ' + r.seatCap + '장)' : '') + '</button>';
+          if (r.moreWithHeadcount === true) why += '<br>입장료를 낸 인원만큼 한도가 늘어요' + (r.seatCap > 0 ? ' (최대 ' + r.seatCap + '장)' : '');
           else if (r.moreWithStaffConfirm === true) why += '<br>직원이 인원을 확인하면 한도가 늘어요' + (r.seatCap > 0 ? ' (최대 ' + r.seatCap + '장)' : '');
         }
         h += '<div class="rw"><span><b>' + esc(r.label) + '</b> <small>' + r.threshold + '점 이상</small>' + (why ? '<br><small>' + why + '</small>' : '') + '</span>' + st + '</div>';

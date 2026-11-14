@@ -1697,15 +1697,25 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       return { table: t.id, seat: t.seat, couponLimitOverride: perSeat };
     });
   }
-  // the headcount counts for coupons only when it is trusted: set by staff / carried from the waitlist, or backed by a live per-person cover order (every person pays). A guest-entered or unknown headcount counts as 1.
-  const perPersonCover = (tid, seat) => { const o = coverOrderOf(tid, seat); return !!o && o.status !== 'cancelled' && o.cover_mode === 'per_person'; };
-  const headcountTrusted = (tid, seat) => { const r = seatRow(tid, seat); return !!r && r.people != null && (r.set_by === 'staff' || r.set_by === 'waitlist' || perPersonCover(tid, seat)); };
+  // Trust follows money. The headcount counts for coupons fully only when STAFF set / confirmed it or it came from the waitlist (headcountTrusted). A guest-entered headcount counts as
+  // min(people, shares really PAID on a live per-person cover order), never below 1; per-table / waived / no cover / nothing paid = 1. Evaluated at issue time from current values.
+  const livePersonCover = (tid, seat) => { const o = coverOrderOf(tid, seat); return o && o.status !== 'cancelled' && o.cover_mode === 'per_person' ? o : null; };
+  const perPersonCover = (tid, seat) => !!livePersonCover(tid, seat);
+  const headcountTrusted = (tid, seat) => { const r = seatRow(tid, seat); return !!r && r.people != null && (r.set_by === 'staff' || r.set_by === 'waitlist'); };
+  const headcountCounted = (tid, seat) => {
+    const r = seatRow(tid, seat);
+    if (!r || r.people == null) return 1;
+    if (headcountTrusted(tid, seat)) return r.people;
+    const o = livePersonCover(tid, seat);
+    return o ? Math.max(1, Math.min(r.people, paidShares(o.id))) : 1;
+  };
+  const unpaidCoverShares = (tid, seat) => { const o = livePersonCover(tid, seat); const r = seatRow(tid, seat); return o && r && r.people != null ? Math.max(0, r.people - paidShares(o.id)) : 0; };
   // the per-seat limit of ONE reward for a seating, evaluated from current values: staff override > people (min(headcount, cap), unknown = 1) > fixed count
   function seatLimitOf(r, tid, seat) {
     const o = seatOverride(tid, seat);
     if (o != null) return { limit: o, source: 'override' };
     if (r.per_seat_mode === 'fixed') return { limit: r.per_seat_count, source: 'fixed' };
-    return { limit: Math.min(headcountTrusted(tid, seat) ? seatPeople(tid, seat) : 1, r.per_seat_cap), source: 'people' };
+    return { limit: Math.min(headcountCounted(tid, seat), r.per_seat_cap), source: 'people' };
   }
   const seatIssuedOf = (rid, tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tid, seat, rid).n;
   const seatTotalOf = (tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND source!='staff'", tid, seat).n; // reward coupons of any kind; manual staff coupons are not counted
@@ -1725,11 +1735,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return null;
   }
   // what the staff sheet shows per seating: the SAME functions the issuing code uses (headcountTrusted, seatLimitOf)
-  const seatCouponView = (tid, seat) => ({ headcountTrusted: headcountTrusted(tid, seat), couponLimits: all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => { const l = seatLimitOf(r, tid, seat); return { rewardId: r.id, limit: l.limit, limitSource: l.source }; }) });
+  const seatCouponView = (tid, seat) => ({ headcountTrusted: headcountTrusted(tid, seat), headcountCounted: headcountCounted(tid, seat), couponLimits: all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => { const l = seatLimitOf(r, tid, seat); return { rewardId: r.id, limit: l.limit, limitSource: l.source }; }) });
   function rewardsView(tableId, seat, device) {
     if (tableId == null) return listRewards(); // staff: every reward incl. inactive, with live counts
-    const canSet = partyOut(tableRow(tableId)).canSet; const trusted = headcountTrusted(tableId, seat);
-    const cvs = coverSettings(); const guestCanMakeItTrusted = cvs.enabled && cvs.mode === 'per_person' && cvs.amount > 0 && canSet; const hasPpCover = perPersonCover(tableId, seat);
+    const trusted = headcountTrusted(tableId, seat); const counted = headcountCounted(tableId, seat); const unpaid = unpaidCoverShares(tableId, seat);
     return all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => {
       const sl = seatLimitOf(r, tableId, seat); const why = blockedBy(r, tableId, seat, device);
       return {
@@ -1738,9 +1747,9 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         seatIssued: seatIssuedOf(r.id, tableId, seat), seatLimit: sl.limit, limitSource: sl.source,
         deviceIssued: deviceIssuedOf(r.id, device), deviceLimit: tableId === 0 ? 0 : r.per_device, canEarn: !why, ...(why ? { blockedBy: why } : {}),
         seatCap: sl.source === 'people' ? r.per_seat_cap : null,
-        headcountTrusted: trusted,
-        moreWithHeadcount: sl.source === 'people' && r.per_seat_cap > 1 && !trusted && guestCanMakeItTrusted && !blockedBy(r, tableId, seat, device, true), // the guest can still enter a headcount that counts (a per-person cover makes every person pay)
-        moreWithStaffConfirm: sl.source === 'people' && r.per_seat_cap > 1 && !trusted && !hasPpCover && !guestCanMakeItTrusted && !blockedBy(r, tableId, seat, device, true), // only staff confirming the headcount would raise the limit
+        headcountTrusted: trusted, headcountCounted: counted,
+        moreWithHeadcount: sl.source === 'people' && r.per_seat_cap > counted && !trusted && unpaid > 0 && !blockedBy(r, tableId, seat, device, true), // paying more cover shares raises the limit (a live per-person cover with unpaid shares)
+        moreWithStaffConfirm: sl.source === 'people' && r.per_seat_cap > 1 && !trusted && unpaid === 0 && !blockedBy(r, tableId, seat, device, true), // only staff confirming the headcount would raise the limit
       };
     });
   }
