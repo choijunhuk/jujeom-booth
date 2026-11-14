@@ -9,6 +9,7 @@
   var cart = { items: {}, note: '', coupon: '' };
   var pend = null;              // {key, body}: frozen order request, persisted until a definitive answer
   var M = null, lastMemberCheck = 0, priceChg = null;   // M = {enabled, member, pct}
+  var quietClear = false, shareAvail = null, partyN = 2, partyAsked = 0, pendingAfterParty = false, shareSel = { mode: 'one', n: 1 }, sharePayer = '', shareView = null;
   var lastSse = 0, clearedSeat = null, gameSeq = 0;
   var sending = false, netFailed = false;
   var es = null, pollT = null, conn = true;
@@ -64,7 +65,7 @@
     if (gamePlaying) { alertQ.push([kind, msg, tag]); return; }   // never chime over a running game
     toast(msg, 3800); chime(kind); vib(kind === 'served' ? [80, 50, 80, 50, 160] : [60]);
     if (document.hidden && notifOn()) {
-      BoothNotify.show('주점 부스 · ' + S.table.number + '번 테이블', { body: msg, tag: tag, url: location.href });
+      BoothNotify.show('주점 부스 · ' + (S.table.isTest ? '테스트' : S.table.number + '번 테이블'), { body: msg, tag: tag, url: location.href });
     }
   }
   function flushAlerts() {
@@ -73,7 +74,7 @@
     if (q.length === 1) { alertUser(q[0][0], q[0][1], q[0][2]); return; }
     var kinds = q.map(function (x) { return x[0]; });
     toast(q.map(function (x) { return x[1]; }).join(' · '), 5000); chime(kinds.indexOf('served') >= 0 ? 'served' : kinds[0]); vib([80, 50, 80]);
-    if (document.hidden && notifOn()) q.forEach(function (x) { BoothNotify.show('주점 부스 · ' + S.table.number + '번 테이블', { body: x[1], tag: x[2], url: location.href }); });
+    if (document.hidden && notifOn()) q.forEach(function (x) { BoothNotify.show('주점 부스 · ' + (S.table.isTest ? '테스트' : S.table.number + '번 테이블'), { body: x[1], tag: x[2], url: location.href }); });
   }
   function toggleNotif() {
     if (!notifSupported()) return;
@@ -145,7 +146,7 @@
     p.orders.forEach(function (o) { pm[o.id] = o; });
     p.coupons.forEach(function (c) { have[c.code] = 1; });
     d.orders.forEach(function (o) {
-      var q = pm[o.id]; if (!q) return;
+      var q = pm[o.id]; if (!q || o.kind === 'cover') return;
       if (q.status !== o.status) {
         if (o.status === 'cooking') alertUser('info', o.id + '번 주문 조리를 시작했어요', 'order-' + o.id + '-cooking');
         else if (o.status === 'served') alertUser('served', '주문하신 메뉴가 나갔어요 (' + o.id + '번 주문)', 'order-' + o.id + '-served');
@@ -155,11 +156,24 @@
       if (!q.paid && o.paid && o.status !== 'cancelled') alertUser('info', '입금이 확인됐어요 (' + o.id + '번 주문)', 'order-' + o.id + '-paid');
     });
     var dm = {}; d.orders.forEach(function (o) { dm[o.id] = 1; });
-    p.orders.forEach(function (o) { if (!dm[o.id] && o.status !== 'cancelled') alertUser('info', o.id + '번 주문이 이 테이블에서 빠졌어요 (직원이 옮겼을 수 있어요)', 'order-' + o.id + '-gone'); });
-    d.orders.forEach(function (o) { if (!pm[o.id]) alertUser('info', '주문 목록이 바뀌었어요 (' + o.id + '번 주문)', 'order-' + o.id + '-new'); });
+    p.orders.forEach(function (o) { if (!dm[o.id] && o.status !== 'cancelled' && o.kind !== 'cover') alertUser('info', o.id + '번 주문이 이 테이블에서 빠졌어요 (직원이 옮겼을 수 있어요)', 'order-' + o.id + '-gone'); });
+    d.orders.forEach(function (o) { if (!pm[o.id] && o.kind !== 'cover') alertUser('info', '주문 목록이 바뀌었어요 (' + o.id + '번 주문)', 'order-' + o.id + '-new'); });
     d.coupons.forEach(function (c) {
       if (!have[c.code] && c.status === 'issued') alertUser('coupon', c.source === 'hour' ? '1등 상품 쿠폰이 도착했어요' : c.source === 'staff' ? '직원이 쿠폰을 보냈어요' : '쿠폰이 도착했어요', 'coupon-' + c.code);
     });
+    if (p.party && d.party && p.party.people != null && d.party.people != null && p.party.people !== d.party.people) alertUser('info', '직원이 인원을 ' + d.party.people + '명으로 바꿨어요', 'party-' + d.party.people);
+    if (p.cover && d.cover && p.cover.myIntents) {
+      var nowI = {}; (d.cover.myIntents || []).forEach(function (x) { nowI[x.id] = x; });
+      p.cover.myIntents.forEach(function (it) {
+        var cur = nowI[it.id], paidUp = p.cover.shares && d.cover.shares && d.cover.shares.paid >= p.cover.shares.paid + it.shares;
+        if (!cur) { if (!paidUp && !cancelledIntents[it.id]) alertUser('warn', Date.now() >= it.expiresAt ? '요청 시간이 지나 닫혔어요 (' + it.shares + '명분)' : '다른 분이 먼저 내서 요청이 닫혔어요', 'intent-' + it.id); }
+        else if (cur.shares < it.shares) alertUser('warn', '다른 분이 먼저 내서 요청이 ' + cur.shares + '명분으로 줄었어요', 'intent-' + it.id + '-shrunk');
+      });
+    }
+    if (p.cover && d.cover) {
+      if (p.cover.shares && d.cover.shares && d.cover.shares.paid > p.cover.shares.paid) alertUser('info', '입장료 ' + (d.cover.shares.paid - p.cover.shares.paid) + '명분 입금이 확인됐어요', 'cover-paid-' + d.cover.shares.paid);
+      else if (!d.cover.shares && d.cover.paid > p.cover.paid) alertUser('info', '입장료 입금이 확인됐어요', 'cover-paid-' + d.cover.paid);
+    }
     if (p.orderingOpen && !d.orderingOpen) alertUser('warn', '주문이 마감됐어요', 'ordering');
     if (!p.orderingOpen && d.orderingOpen) alertUser('info', '주문을 다시 받아요!', 'ordering');
   }
@@ -168,7 +182,7 @@
     cart = { items: {}, note: '', coupon: '' }; pend = null; savePend(); sending = false; netFailed = false; cancelArm = {}; callCd = {};
     closeSheet(true); closeGame();
     tab = 'menu';
-    toast('새 손님을 환영해요!');
+    if (quietClear) quietClear = false; else toast('새 손님을 환영해요!');
     if (!fromSeat && S) { /* state event follows */ }
   }
   function sanitizeCart(prev) {
@@ -235,8 +249,10 @@
   /* ---------- render ---------- */
   function render() {
     if (!S) return;
-    $('#tno').textContent = 'COMHERE.exe — ' + S.table.number + '번 테이블';
-    document.title = 'COMHERE · ' + S.table.number + '번 테이블';
+    var isT = !!(S.table && S.table.isTest);
+    $('#tno').textContent = isT ? 'COMHERE.exe — 테스트' : 'COMHERE.exe — ' + S.table.number + '번 테이블';
+    document.title = isT ? 'COMHERE · 테스트 모드' : 'COMHERE · ' + S.table.number + '번 테이블';
+    $('#tm').hidden = !isT; $('#tstrip').hidden = !isT;
     var nt = $('#notice'), nn = S.notice && S.notice.text ? S.notice : null, nsig = nn ? nn.level + '|' + nn.text : '';
     nt.hidden = !nn;
     if (nn && nt.dataset.sig !== nsig) {
@@ -263,6 +279,11 @@
     if (!cb.hidden) cb.innerHTML = '<span>장바구니 ' + t.n + '개</span><span>' + won(t.total) + ' &gt;&gt;</span>';
     if (sheetKind === '장바구니') renderCart();
     if (sheetKind === '송금 안내') refreshPay();
+    if (sheetKind === '입장료 송금') renderShareTransfer();
+    if (sheetKind === '입장료 내기') { if (S.cover && S.cover.shares && S.cover.shares.left > 0) { var sp = $('#shp'); if (sp) sharePayer = sp.value; } }
+    if (sheetKind === '인원' && S.party && !S.party.canSet) { closeSheet(true); pendingAfterParty = false; }
+    var stt = $('#stat'); if (stt) { var pp = S.party && S.party.people, can = S.party && S.party.canSet; stt.hidden = !pp && !can; var py = $('#pty'); py.hidden = !pp; if (pp) py.textContent = pp + '명'; if (pp) { $('#st1').textContent = pp + '명'; $('#st2').textContent = (S.party.setBy === 'staff' || S.party.setBy === 'waitlist' ? '직원이 입력한 인원이에요. ' : '') + '인원이 바뀌면 직원에게 말씀해 주세요'; } else if (can) { $('#st1').textContent = '인원 ?'; $('#st2').innerHTML = '<button class="lnk" data-a="pt-open">인원 알려 주기</button>'; } }
+    maybeAskParty();
   }
 
   var ICO = BASE + '/static/brand/icons.svg';
@@ -300,11 +321,153 @@
     if (!mem && !cp) return '';
     return '<div class="sum"><span>주문 금액</span><span>' + won(o.subtotal) + '</span></div>' + (mem ? '<div class="sum"><span>COMS 회원 할인</span><span>-' + won(mem) + '</span></div>' : '') + (cp > 0 ? '<div class="sum"><span>쿠폰 할인</span><span>-' + won(cp) + '</span></div>' : '');
   }
+  /* ---------- headcount, cover charge, share payments ---------- */
+  function coverOrder() { return S.orders.filter(function (o) { return o.kind === 'cover'; })[0] || null; }
+  function foodOrders() { return S.orders.filter(function (o) { return o.kind !== 'cover'; }); }
+  function pdKey() { return 'jb:pd:' + TOKEN + ':' + (S ? S.table.seat : 0); }
+  function stepHtml(act, n, unit) {
+    return '<div class="bigstep"><button class="y2k-btn" data-a="' + act + '-dec" aria-label="하나 줄이기">&minus;</button><output aria-live="polite"><span class="y2k-pixel--3x n">' + n + '</span><span class="u">' + unit + '</span></output><button class="y2k-btn" data-a="' + act + '-inc" aria-label="하나 늘리기">+</button></div>';
+  }
+  function maybeAskParty() {
+    if (!S || !S.party || !S.party.canSet || sheetKind || gamePlaying || game) return;
+    if (lsGet(pdKey()) === '1' || partyAsked === S.table.seat) return;
+    partyAsked = S.table.seat; openParty();
+  }
+  function openParty() {
+    var cv = S.cover && S.cover.enabled;
+    openSheet('인원', '<div id="partybody"></div>', function () { if (!S.party || S.party.canSet) lsSet(pdKey(), '1'); pendingAfterParty = false; });
+    renderParty(cv);
+  }
+  function renderParty(cv) {
+    var b = $('#partybody'); if (!b) return; if (cv === undefined) cv = S.cover && S.cover.enabled;
+    b.innerHTML = '<h2>몇 명이세요?</h2><p class="note" style="margin:-4px 0 10px">' + (cv ? '입장료와 자리 안내에 써요.' : '자리 안내에 써요.') + (pendingAfterParty ? ' 인원을 알려 주시면 주문이 이어져요.' : '') + '</p>' + stepHtml('pt', partyN, '명') + '<p class="err" id="pterr" role="alert"></p><div class="two">' + (pendingAfterParty ? '' : '<button class="y2k-btn big" data-a="pt-later">나중에</button>') + '<button class="y2k-btn big" data-a="pt-ok">확인</button></div><p class="note" style="margin-top:8px">인원이 바뀌면 직원에게 말씀해 주세요.</p>';
+  }
+  function setParty() {
+    api('/party', { people: partyN, seat: S.party && S.party.seat != null ? S.party.seat : S.table.seat }).then(function (r) {
+      if (!r.ok) {
+        var e = r.data.error, m = r.data.message || '인원을 저장하지 못했어요';
+        if (e === 'seat_changed' || e === 'bad_seat') {   // the page belongs to a previous seating: reload and ask again for the new one
+          closeSheet(true); partyAsked = 0; quietClear = true; toast(e === 'seat_changed' ? '새 손님으로 자리가 바뀌었어요' : '자리 정보를 새로 불러왔어요', 4000);
+          api('').then(function (x) { if (x.ok) { applyState(x.data); quietClear = false; if (S.party && S.party.canSet) { partyAsked = S.table.seat; openParty(); } } else quietClear = false; }); return;
+        }
+        if (e === 'party_set' || e === 'party_not_asked') { api('').then(function (x) { if (x.ok) applyState(x.data); }); m = e === 'party_set' ? '이미 인원이 정해졌어요. 바뀌면 직원에게 말씀해 주세요.' : m; closeSheet(true); toast(m); pendingAfterParty = false; return; }
+        var er = $('#pterr'); if (er) er.textContent = m; return;
+      }
+      S.party = r.data.party || S.party; lsSet(pdKey(), null); var again = pendingAfterParty; pendingAfterParty = false; closeSheet(true);
+      toast(partyN + '명으로 알려 드렸어요');
+      api('').then(function (x) { if (x.ok) applyState(x.data); if (again) { openCart(); submit(); } });
+    }, function () { var er = $('#pterr'); if (er) er.textContent = '네트워크 오류예요. 다시 눌러 주세요.'; });
+  }
+  function coverCard() {
+    var c = S.cover, co = coverOrder();
+    if (!(c && co && co.status !== 'cancelled')) return '';   // driven by the cover order, not the setting: a cover still owed stays visible after staff turn the setting off
+    var label = esc(c.label || '입장료');
+    if (c.waived || co.waived) return '<p class="note cvw">' + label + ' 면제</p>';
+    var refund = co.refundDue > 0 ? '<div class="meta"><span class="tag bad">환불 예정</span> ' + won(co.refundDue) + ' · 직원에게 문의해 주세요</div>' : '';
+    var h = '<section class="y2k-window cv" aria-label="' + label + '"><div class="y2k-title"><svg class="y2k-i y2k-i--2x" aria-hidden="true"><use href="' + ICO + '#i-ticket"/></svg><span class="y2k-title-t">' + label + '.dat</span></div><div class="y2k-body">';
+    if (c.mode === 'per_table' || !c.shares) {
+      h += '<div class="cv-eq">' + label + ' ' + won(c.total) + ' (테이블 1건)</div><div class="sum"><span>받은 금액</span><span>' + won(c.paid) + '</span></div><div class="sum"><b>남은 금액</b><b>' + won(c.left) + '</b></div>' + refund +
+        (c.left > 0 ? '<button class="y2k-btn big" style="margin-top:10px" data-a="pay" data-v="' + co.id + '">송금 안내</button>' : '<p class="note ok-line" style="margin-top:8px">' + label + ' 납부 완료</p>');
+      return h + '</div></section>';
+    }
+    var sh = c.shares, segs = '';
+    for (var k = 0; k < sh.total; k++) segs += '<i' + (k < sh.paid ? ' class="on"' : '') + '></i>';
+    h += '<div class="cv-eq">' + label + ' ' + sh.total + '명 × ' + won(c.unitPrice) + ' = ' + won(c.total) + '</div>' +
+      '<div class="y2k-progress" role="img" aria-label="' + sh.paid + '명 납부, ' + sh.left + '명 남음">' + segs + '</div>' +
+      '<div class="cv-st"><b>' + sh.paid + '명 납부 · ' + sh.left + '명 남음</b></div>' + (sh.over > 0 ? '<div class="meta cv-over"><span class="tag bad">초과</span> ' + sh.over + '명분 초과 납부 · 환불 예정</div>' : '') +
+      '<div class="sum"><b>남은 금액</b><b>' + won(c.left) + '</b></div>';
+    if (c.payments && c.payments.length) h += '<div class="cv-sec">낸 사람</div><ul class="cv-list">' + c.payments.map(function (p) { return '<li><span>' + esc(p.payer || '이름 없음') + '</span><span>' + (p.shares ? p.shares + '명분' : '금액 입금') + ' · ' + hhmm(p.at) + '</span></li>'; }).join('') + '</ul>';
+    var my = c.myIntents || [];
+    if (my.length) h += '<div class="cv-sec">보내는 중</div><ul class="cv-list">' + my.map(function (it) { return '<li class="int"><span>' + esc(it.payer) + ' · ' + it.shares + '명분 · ' + won(it.amount) + '<small>' + hhmm(it.expiresAt) + '까지</small></span><span class="ib"><button class="y2k-btn sm" data-a="sh-view" data-v="' + it.id + '">송금 안내</button><button class="y2k-btn sm" data-a="sh-cancel" data-v="' + it.id + '">취소</button></span></li>'; }).join('') + '</ul>';
+    h += refund + (sh.left > 0 ? '<button class="y2k-btn big" style="margin-top:10px" data-a="sh-open">' + label + ' 내기 (각자 내기)</button>' : c.left > 0 ? '<p class="note" style="margin-top:8px">남은 ' + label + ' ' + won(c.left) + '은 직원에게 말씀해 주세요.</p>' : '<p class="note ok-line" style="margin-top:8px">' + label + ' 납부 완료</p>');
+    return h + '</div></section>';
+  }
+  function availLeft() { var l = S.cover.shares.left; return shareAvail != null ? Math.max(0, Math.min(shareAvail, l)) : l; }
+  function shareN() { var l = availLeft(); if (l < 1) return 1; return shareSel.mode === 'one' ? 1 : shareSel.mode === 'all' ? l : Math.max(1, Math.min(l, shareSel.n)); }
+  function openShare() {
+    if (!S.cover || !S.cover.shares || S.cover.shares.left <= 0) return;
+    shareSel = { mode: 'one', n: 1 }; shareAvail = null; sharePayer = lsGet('jb:dep') || '';
+    openSheet('입장료 내기', '<div id="sharebody"></div>', function () { shareView = null; });
+    renderShare('');
+  }
+  function renderShare(err) {
+    var b = $('#sharebody'); if (!b) return; var c = S.cover, left = availLeft(), n = shareN(), u = c.unitPrice;
+    if (shareSel.mode === 'n') shareSel.n = n;
+    b.innerHTML = '<h2>' + esc(c.label || '입장료') + ' 내기</h2><p class="note" style="margin:-4px 0 8px">1명분 ' + won(u) + ' · ' + (shareAvail != null ? '지금 낼 수 있는 몫 ' : '남은 몫 ') + left + '명분</p>' +
+      '<div class="opts" role="group" aria-label="낼 몫">' +
+      '<button class="y2k-btn opt" data-a="sh-one" aria-pressed="' + (shareSel.mode === 'one') + '">내 몫만 (1명분 ' + won(u) + ')</button>' +
+      '<button class="y2k-btn opt" data-a="sh-n" aria-pressed="' + (shareSel.mode === 'n') + '">몇 명분 낼래요</button>' + (shareSel.mode === 'n' ? stepHtml('sh', n, '명분') : '') +
+      '<button class="y2k-btn opt" data-a="sh-all" aria-pressed="' + (shareSel.mode === 'all') + '">남은 전부 (' + left + '명분 ' + won(left * u) + ')</button></div>' +
+      '<label class="fld">보내는 분 이름 (필수)<input id="shp" maxlength="10" autocomplete="name" enterkeyhint="done" placeholder="예: 홍길동"></label><p class="note" style="margin:4px 0 0">입금자명과 같아야 직원이 알아봐요</p>' +
+      '<div class="sum tot"><span>보낼 금액 (' + n + '명분)</span><span>' + won(n * u) + '</span></div><p class="err" id="sherr" role="alert">' + esc(err || '') + '</p>' +
+      '<button class="y2k-btn big" data-a="sh-go"' + (left < 1 ? ' disabled' : '') + '>이 금액으로 보내기</button>';
+    var inp = $('#shp', b); if (inp) inp.value = sharePayer;
+  }
+  function shareGo() {
+    var inp = $('#shp'), payer = (inp ? inp.value : sharePayer).trim(); sharePayer = payer;
+    if (!payer) { renderShare('보내는 분 이름을 입력해 주세요'); var i2 = $('#shp'); if (i2) i2.focus(); return; }
+    var n = shareN(), base = S.cover.shares.paid; lsSet('jb:dep', payer);
+    api('/cover/intents', { payer: payer, shares: n }).then(function (r) {
+      if (r.ok) { shareView = { id: r.data.id, amount: r.data.amount, shares: r.data.shares, payer: r.data.payer || payer, expiresAt: r.data.expiresAt, base: base }; api('').then(function (x) { if (x.ok) applyState(x.data); }); showShareTransfer(); return; }
+      var d = r.data, e = d.error;
+      if (e === 'too_many_shares') { api('').then(function (x) { if (x.ok) { applyState(x.data); if (S.cover.shares && S.cover.shares.left > 0) { shareSel = { mode: 'one', n: 1 }; shareAvail = d.left != null ? d.left : null; renderShare(d.left === 0 ? '남은 몫을 다른 분이 이미 내는 중이에요. 그분이 보내면 입장료가 끝나요. 시간이 지나도 안 끝나면 다시 눌러 주세요.' : '다른 분이 일부 몫을 이미 내는 중이에요. 지금 낼 수 있는 몫은 ' + (d.left != null ? d.left : S.cover.shares.left) + '명분이에요. 아래에서 다시 골라 주세요.'); } else { closeSheet(true); toast('남은 입장료가 없어요'); } } }); return; }
+      renderShare(e === 'too_many_intents' ? '잠시 후 다시 시도해 주세요. (너무 자주 눌렀거나 진행 중인 요청이 많아요)' : e === 'no_device' ? '쿠키를 허용해 주세요. 그래야 요청을 보낼 수 있어요.' : (d.message || '요청하지 못했어요'));
+    }, function () { renderShare('네트워크 오류예요. 다시 눌러 주세요.'); });
+  }
+  function showShareTransfer() {
+    var v = shareView; if (!v) return;
+    if ($('#sharebody')) { sheetKind = '입장료 송금'; } else openSheet('입장료 송금', '<div id="sharebody"></div>', function () { shareView = null; });
+    sheetKind = '입장료 송금'; renderShareTransfer();
+  }
+  function renderShareTransfer() {
+    var b = $('#sharebody'), v = shareView, p = S.pay || {}; if (!b || !v) return;
+    var my = (S.cover.myIntents || []).some(function (x) { return x.id === v.id; });
+    if (!my) {
+      var ok = S.cover.shares && S.cover.shares.paid >= v.base + v.shares;
+      b.innerHTML = ok ? '<h2>입금이 확인됐어요</h2><div class="amt">' + won(v.amount) + '</div><p class="note" style="text-align:center">입장료 ' + v.shares + '명분 입금이 확인됐어요.</p><button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>'
+        : '<h2>요청이 끝났어요</h2><p class="note">' + (cancelledIntents[v.id] ? '요청을 취소했어요.' : Date.now() >= v.expiresAt ? '시간이 지나 요청이 닫혔어요. 다시 요청해 주세요.' : '다른 분이 먼저 내서 요청이 닫혔어요. 이미 보냈다면 직원에게 말씀해 주세요.') + '</p><button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>';
+      return;
+    }
+    var h = '<h2>' + esc(S.cover.label || '입장료') + ' ' + v.shares + '명분 보내기</h2><p class="note" style="margin:-4px 0 6px">' + hhmm(v.expiresAt) + '까지 보내 주세요 (30분)</p><div class="amt">' + won(v.amount) + '</div>';
+    if (p.account) {
+      h += '<div class="acct"><div class="bank">' + esc(p.bank) + ' · 예금주 ' + esc(p.holder) + '</div><div class="no">' + esc(p.account) + '</div></div>';
+      if (p.tossEnabled && MOBILE) h += '<a class="y2k-btn y2k-btn--primary big pl" data-a="toss" href="' + esc(tossHref(p, v.amount)) + '">토스로 보내기</a>';
+      if (p.kakaoPayUrl && kakaoOk(p.kakaoPayUrl)) h += '<a class="y2k-btn big pl kk" data-a="kakao" href="' + esc(p.kakaoPayUrl) + '" target="_blank" rel="noopener noreferrer">카카오페이로 보내기</a><p class="note" style="margin:4px 0 0">금액 ' + won(v.amount) + '을 직접 입력해 주세요</p>';
+      h += '<div class="two"><button class="y2k-btn" data-a="copy" data-amt="' + v.amount + '" data-k="acct">계좌번호 복사</button><button class="y2k-btn" data-a="copy" data-amt="' + v.amount + '" data-k="amt">금액 복사</button></div><p class="note nextstep" id="paynext" hidden></p>';
+    } else h += '<div class="acct">계좌 정보는 직원에게 문의해 주세요.</div>';
+    var fd = foodOrders().filter(function (o) { return o.status !== 'cancelled' && !o.paid; }).reduce(function (t, o) { return t + dueOf(o); }, 0);
+    h += (fd > 0 ? '<div class="split"><b>음식 ' + won(fd) + '은 따로 보내 주세요 (이 금액에 들어 있지 않아요)</b></div>' : '') + '<div class="memrow"><span>입금자명은 <b style="color:#000">' + esc(v.payer) + '</b>(으)로 보내 주세요</span></div><p class="note">직원이 입금을 확인하면 이 화면이 바뀌어요.</p><div class="two" style="margin-top:12px"><button class="y2k-btn" data-a="sclose">닫기</button><button class="y2k-btn y2k-btn--danger danger" data-a="sh-cancel" data-v="' + v.id + '">요청 취소</button></div>';
+    b.innerHTML = h;
+  }
+  var cancelledIntents = {};
+  function cancelIntent(id) {
+    cancelledIntents[id] = 1;
+    api('/cover/intents/' + encodeURIComponent(id) + '/cancel', {}).then(function (r) {
+      toast(r.ok ? '요청을 취소했어요' : (r.data.message || '취소할 수 없어요'));
+      api('').then(function (x) { if (x.ok) applyState(x.data); });
+    }, function () { toast('네트워크 오류예요. 다시 눌러 주세요.'); });
+  }
+
+  function splitHelper(cvDue, foodDue) {
+    if (!(cvDue > 0 && foodDue > 0)) return '';
+    return '<div class="split"><b>입장료 ' + won(cvDue) + '과 음식 ' + won(foodDue) + '은 따로 보내 주세요</b><div class="two"><button class="y2k-btn" data-a="cv-pay">입장료 ' + won(cvDue) + ' 보내기</button><button class="y2k-btn" data-a="food-pay">음식 ' + won(foodDue) + ' 보내기</button></div></div>';
+  }
+  function openCoverPay() {
+    var co = coverOrder(); if (!co) return;
+    if (S.cover && S.cover.mode === 'per_person' && S.cover.shares) openShare(); else openPay(co, false);
+  }
+  function openFoodPay() {
+    var un = foodOrders().filter(function (o) { return o.status !== 'cancelled' && !o.paid && dueOf(o) > 0; });
+    if (!un.length) return;
+    if (un.length === 1) { openPay(un[0], false); return; }
+    openSheet('음식 송금', '<h2>음식 주문 송금</h2><p class="note" style="margin:-4px 0 8px">주문마다 따로 보내요. 보낼 주문을 골라 주세요.</p><ul class="cv-list">' + un.map(function (o) { return '<li class="int"><span>#' + o.id + ' · ' + won(dueOf(o)) + '</span><span class="ib"><button class="y2k-btn sm" data-a="pay" data-v="' + o.id + '">송금 안내</button></span></li>'; }).join('') + '</ul><button class="y2k-btn big" style="margin-top:10px" data-a="sclose">닫기</button>');
+  }
   function htmlOrders() {
-    var live = S.orders.filter(function (o) { return o.status !== 'cancelled'; });
+    var food = foodOrders(), cvOn = S.cover && coverOrder() && coverOrder().status !== 'cancelled' && !S.cover.waived && !coverOrder().waived, cv = cvOn ? S.cover : null;
+    var live = food.filter(function (o) { return o.status !== 'cancelled'; });
     var total = 0, unpaid = 0;
     live.forEach(function (o) { total += o.total; if (!o.paid) unpaid += dueOf(o); });
-    var h = '';
+    var h = coverCard();
     if (notifSupported()) {
       h += BoothNotify.permission() === 'denied' ? '<div class="nrow"><span>알림 받기<small>브라우저에서 알림이 차단돼 있어요</small></span></div>'
         : '<div class="nrow"><span>알림 받기<small>화면이 꺼져 있어도 알려 드려요</small></span><button class="sw" role="switch" aria-checked="' + notifOn() + '" aria-label="알림 받기" data-a="notif"><i></i></button></div>';
@@ -313,10 +476,10 @@
       var open = S.calls.some(function (c) { return c.type === t; }), cd = (callCd[t] || 0) > Date.now();
       return '<button class="y2k-btn" data-a="call" data-v="' + esc(t) + '"' + (open || cd ? ' disabled' : '') + '>' + esc(t) + (open ? ' (요청됨)' : '') + '</button>';
     }).join('') + '</div>';
-    h += '<section class="y2k-term gterm" aria-label="주문 게시판"><div class="hi">COMHERE 주문 게시판 &lt;' + S.table.number + '번 테이블&gt;</div><div class="tsum"><span>합계</span><span class="big">' + won(total) + '</span></div><div class="meta">미입금 ' + won(unpaid) + '</div><hr>';
-    if (!S.orders.length) return h + '<p>주문 내역이 없습니다.</p><p class="y2k-cursor">(C)ontinue</p><button class="y2k-btn big" style="margin-top:10px" data-a="tab" data-v="menu">메뉴 보러 가기</button></section>';
+    h += '<section class="y2k-term gterm" aria-label="주문 게시판"><div class="hi">COMHERE 주문 게시판 &lt;' + (S.table.isTest ? '테스트' : S.table.number + '번 테이블') + '&gt;</div>' + (cv ? '<div class="tsum"><span>입장료</span><span class="sm">' + won(cv.total) + '</span></div><div class="meta">입장료 남은 금액 ' + won(cv.left) + '</div>' : '') + '<div class="tsum"><span>' + (cv ? '음식' : '합계') + '</span><span class="big">' + won(total) + '</span></div><div class="meta">미입금 ' + won(unpaid) + '</div>' + (cv ? '<hr><div class="tsum"><span>전체 남은 금액</span><span class="big">' + won(cv.left + unpaid) + '</span></div>' : '') + (coverOrder() && coverOrder().refundDue > 0 ? '<div class="meta"><span class="tag bad">환불 예정</span> 입장료 ' + won(coverOrder().refundDue) + ' · 직원에게 문의해 주세요</div>' : '') + splitHelper(cv ? cv.left : 0, unpaid) + '<hr>';
+    if (!food.length) return h + '<p>주문 내역이 없습니다.</p><p class="y2k-cursor">(C)ontinue</p><button class="y2k-btn big" style="margin-top:10px" data-a="tab" data-v="menu">메뉴 보러 가기</button></section>';
     h += '<div class="th"><span>번호</span><span>메뉴</span><span>상태</span></div><hr>';
-    return h + S.orders.map(function (o) {
+    return h + food.map(function (o) {
       var cx = o.status === 'cancelled', idx = STEPS.indexOf(o.status);
       var first = o.items[0] ? o.items[0].name + (o.items.length > 1 ? ' 외 ' + (o.items.length - 1) : '') : '';
       var stTxt = cx ? '취소됨' : STEP_L[idx];
@@ -449,8 +612,9 @@
       }
       var d = r.data, e = d.error, msg = d.message || '주문하지 못했어요';
       if (r.status >= 500) { netFailed = true; render(); cerr(msg + ' 다시 시도를 눌러 주세요 (중복 주문은 되지 않아요).'); if (sheetKind !== '장바구니') toast(msg); return; }
-      dropPend();   // definitive 4xx answer: the next attempt is a new request
+      if (e !== 'party_required') dropPend();   // definitive 4xx answer: the next attempt is a new request (party_required keeps the same frozen body + key)
       if (e === 'price_changed') { priceChanged(d); return; }
+      if (e === 'party_required') { pendingAfterParty = true; closeSheet(true); msg = '먼저 인원을 알려 주세요'; openParty(); return; }
       if (e === 'insufficient_stock') {
         var its = d.items && d.items.length ? d.items : [{ id: d.id, name: '', left: d.left }];
         its.forEach(function (i) { if (i.left > 0) cart.items[i.id] = Math.min(cart.items[i.id] || i.left, i.left); else delete cart.items[i.id]; }); saveCart();
@@ -514,15 +678,16 @@
     var h = '<h2>' + (fresh ? '주문이 접수됐어요!' : '송금 안내') + '</h2><p class="note" style="margin:-6px 0 10px">#' + o.id + ' 주문 ' + (fresh ? '· 직원이 확인하면 조리를 시작해요' : '') + '</p>';
     var due = dueOf(o);
     if (due <= 0) return h + (o.refundDue > 0 ? '<div class="acct">보낼 금액이 없어요. 환불 예정 ' + won(o.refundDue) + ' · 직원에게 문의해 주세요.</div>' : '<div class="acct">쿠폰으로 전액 할인돼서 보낼 금액이 없어요.</div>') + '<button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>';
+    var cvDueNow = o.kind !== 'cover' && S.cover && coverOrder() && coverOrder().status !== 'cancelled' && !S.cover.waived && S.cover.left > 0 ? S.cover.left : 0;
     var part = o.paidAmount > 0 && due > 0;
-    h += breakdown(o) + (part ? '<div class="sum"><span>받은 금액</span><span>' + won(o.paidAmount) + '</span></div>' : '') + '<div class="note" style="text-align:center;margin:8px 0 0">' + (part ? '남은 금액' : breakdown(o) ? '결제 금액' : '보낼 금액') + '</div><div class="amt">' + won(due) + '</div>';
+    h += (cvDueNow ? '<div class="split"><b>입장료 ' + won(cvDueNow) + '은 이 금액에 들어 있지 않아요. 따로 보내 주세요.</b><button class="y2k-btn" data-a="cv-pay">입장료 보내기</button></div>' : '') + breakdown(o) + (part ? '<div class="sum"><span>받은 금액</span><span>' + won(o.paidAmount) + '</span></div>' : '') + '<div class="note" style="text-align:center;margin:8px 0 0">' + (part ? '남은 금액' : breakdown(o) ? '결제 금액' : '보낼 금액') + '</div><div class="amt">' + won(due) + '</div>';
     if (p.account) {
       h += '<div class="acct"><div class="bank">' + esc(p.bank) + ' · 예금주 ' + esc(p.holder) + '</div><div class="no">' + esc(p.account) + '</div></div>';
       if (p.tossEnabled && MOBILE) h += '<a class="y2k-btn y2k-btn--primary big pl" data-a="toss" data-v="' + o.id + '" href="' + esc(tossHref(p, due)) + '">토스로 보내기</a>';
       if (p.kakaoPayUrl && kakaoOk(p.kakaoPayUrl)) h += '<a class="y2k-btn big pl kk" data-a="kakao" href="' + esc(p.kakaoPayUrl) + '" target="_blank" rel="noopener noreferrer">카카오페이로 보내기</a><p class="note" style="margin:4px 0 0">금액 ' + won(due) + '을 직접 입력해 주세요</p>';
       h += '<div class="two"><button class="y2k-btn" data-a="copy" data-v="' + o.id + '" data-k="acct">계좌번호 복사</button><button class="y2k-btn" data-a="copy" data-v="' + o.id + '" data-k="amt">금액 복사</button></div><p class="note nextstep" id="paynext" hidden></p>';
     } else h += '<div class="acct">계좌 정보는 직원에게 문의해 주세요.</div>';
-    h += depRow(o) + '<p class="note">송금 후 직원이 입금을 확인하면 주문현황에 "입금 확인"으로 바뀌어요.</p>';
+    h += (o.kind === 'cover' ? '' : depRow(o)) + '<p class="note">송금 후 직원이 입금을 확인하면 주문현황에 "입금 확인"으로 바뀌어요.</p>';
     if (fresh && notifSupported() && BoothNotify.permission() === 'default' && lsGet('jb:notif') !== '1') h += '<div class="memrow" id="notifOffer"><span>음식이 나오면 알려 드릴까요?</span><button class="y2k-btn sm" data-a="notif">알림 받기</button></div>';
     return h + '<button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>';
   }
@@ -690,11 +855,12 @@
       case 'submit': submit(); break;
       case 'sclose': closeSheet(); break;
       case 'copy': {
-        var co = S.orders.filter(function (x) { return x.id === Number(v); })[0], isAcct = b.dataset.k === 'acct';
-        if (!co) break;
-        copyText(isAcct ? digits((S.pay || {}).account) : String(dueOf(co))).then(function (ok) {
+        var co = S.orders.filter(function (x) { return x.id === Number(v); })[0], isAcct = b.dataset.k === 'acct', fixed = b.dataset.amt != null ? Number(b.dataset.amt) : null;
+        if (!co && fixed == null) break;
+        var dueV = fixed != null ? fixed : dueOf(co);
+        copyText(isAcct ? digits((S.pay || {}).account) : String(dueV)).then(function (ok) {
           toast(ok ? (isAcct ? '계좌번호를 복사했어요' : '금액을 복사했어요') : '복사하지 못했어요. 길게 눌러 직접 복사해 주세요');
-          var nx = $('#paynext'); if (ok && isAcct && nx) { nx.textContent = '은행 앱에서 붙여넣고 ' + won(dueOf(co)) + '을 보내 주세요'; nx.hidden = false; }
+          var nx = $('#paynext'); if (ok && isAcct && nx) { nx.textContent = '은행 앱에서 붙여넣고 ' + won(dueV) + '을 보내 주세요'; nx.hidden = false; }
         }); break;
       }
       case 'toss': setTimeout(function () { if (!document.hidden) tossFallback(); }, 1500); break;   // link navigates by itself; still visible = app not installed
@@ -718,8 +884,24 @@
       case 'reload': location.reload(); break;
       case 'photo': openPhoto(v); break;
       case 'padd': setQty(v, (cart.items[v] || 0) + 1); closeSheet(); toast('장바구니에 담았어요'); break;
-      case 'start': openSheet('시작', '<div class="y2k-lockup glogo"><i class="y2k-ico" aria-hidden="true"></i><span class="y2k-chrome-text">COMHERE</span></div><div class="y2k-term" style="margin-top:8px"><div class="hi">COMHERE.exe</div><div>' + S.table.number + '번 테이블</div><div>주문 접수: ' + (S.orderingOpen ? '열림' : '닫힘') + '</div><div class="dim">1999 밤샘 코딩 아지트</div></div><p class="note" style="margin-top:10px">메뉴에서 담고, 주문현황에서 송금하고, 게임으로 쿠폰을 받아 보세요. 쿠폰 코드는 직원에게 보여 주면 돼요.</p><button class="y2k-btn big" style="margin-top:10px" data-a="sclose">확인</button>'); break;
+      case 'start': openSheet('시작', '<div class="y2k-lockup glogo"><i class="y2k-ico" aria-hidden="true"></i><span class="y2k-chrome-text">COMHERE</span></div><div class="y2k-term" style="margin-top:8px"><div class="hi">COMHERE.exe</div><div>' + (S.table.isTest ? '테스트' : S.table.number + '번 테이블') + '</div><div>주문 접수: ' + (S.orderingOpen ? '열림' : '닫힘') + '</div><div class="dim">1999 밤샘 코딩 아지트</div></div><p class="note" style="margin-top:10px">메뉴에서 담고, 주문현황에서 송금하고, 게임으로 쿠폰을 받아 보세요. 쿠폰 코드는 직원에게 보여 주면 돼요.</p><button class="y2k-btn big" style="margin-top:10px" data-a="sclose">확인</button>'); break;
       case 'notice': if (S.notice && S.notice.text) openSheet('공지', '<p style="font-size:18px;line-height:1.5;white-space:pre-wrap">' + esc(S.notice.text) + '</p><button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>'); break;
+      case 'pt-open': openParty(); break;
+      case 'pt-dec': partyN = Math.max(1, partyN - 1); renderParty(); break;
+      case 'pt-inc': partyN = Math.min(30, partyN + 1); renderParty(); break;
+      case 'pt-later': closeSheet(); break;
+      case 'pt-ok': setParty(); break;
+      case 'sh-open': openShare(); break;
+      case 'sh-one': shareSel = { mode: 'one', n: 1 }; sharePayer = ($('#shp') || {}).value || sharePayer; renderShare(''); break;
+      case 'sh-n': shareSel = { mode: 'n', n: Math.max(2, shareSel.n) }; sharePayer = ($('#shp') || {}).value || sharePayer; renderShare(''); break;
+      case 'sh-all': shareSel = { mode: 'all', n: 1 }; sharePayer = ($('#shp') || {}).value || sharePayer; renderShare(''); break;
+      case 'sh-dec': shareSel.n = Math.max(1, shareN() - 1); sharePayer = ($('#shp') || {}).value || sharePayer; renderShare(''); break;
+      case 'sh-inc': shareSel.n = Math.min(availLeft(), shareN() + 1); sharePayer = ($('#shp') || {}).value || sharePayer; renderShare(''); break;
+      case 'sh-go': shareGo(); break;
+      case 'sh-view': var iv = (S.cover.myIntents || []).filter(function (x) { return String(x.id) === String(v); })[0]; if (iv) { shareView = { id: iv.id, amount: iv.amount, shares: iv.shares, payer: iv.payer, expiresAt: iv.expiresAt, base: S.cover.shares.paid }; closeSheet(true); showShareTransfer(); } break;
+      case 'sh-cancel': cancelIntent(v); if (sheetKind === '입장료 송금') closeSheet(true); break;
+      case 'cv-pay': openCoverPay(); break;
+      case 'food-pay': openFoodPay(); break;
       case 'mute': muted = !muted; lsSet('jb:mute', muted ? '1' : '0'); render(); if (!muted) chime('info'); break;
       case 'notif': toggleNotif(); break;
       case 'mrecheck': checkMember(true); break;

@@ -79,8 +79,8 @@ const PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const storeOpts = { waitCallTimeoutMin: envInt('WAIT_CALL_TIMEOUT_MIN', 5, 1, 30), photoMaxBytes: envInt('PHOTO_STORAGE_MAX', 40 * 1024 * 1024), maxDbBytes: envInt('DB_MAX_BYTES', 256 * 1024 * 1024), backupSkipBytes: envInt('BACKUP_SKIP_BYTES', 128 * 1024 * 1024) };
 const store = createStore({ dataDir: DATA_DIR, menu, rewards, tableCount: tablesCfg.count, payEnv: { bank: PAY.bank, account: PAY.account, holder: PAY.holder }, limits, memberEnabled: !!COMS_ME_URL, ...storeOpts });
 const DEVICE_KEY = store.deviceSecret();
-let tokenToTable = new Map(store.tokens().map((t) => [t.token, t.id]));
-const refreshTokens = () => { tokenToTable = new Map(store.tokens().map((t) => [t.token, t.id])); };
+let tokenToTable = new Map(store.guestTokens().map((t) => [t.token, t.id])); // includes the staff-only test table (0)
+const refreshTokens = () => { tokenToTable = new Map(store.guestTokens().map((t) => [t.token, t.id])); };
 
 // ---------- small helpers ----------
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest();
@@ -293,6 +293,8 @@ async function fetchComsMember(token) {
 }
 // resolves to { id, role } (club member id and role; neither is ever sent to a client) or null. Never throws.
 // Requires an existing valid booth_d (a cookie minted by this very request does not count): no device, no lookup.
+// the test table (0) may pose as a member without asking the club backend; the table comes from the token the SERVER resolved, no header / cookie / param can switch it on
+const memberFor = async (c) => (c.tableId === 0 && store.testSettings().memberPreview ? { id: store.TEST_FAKE_MEMBER_ID, role: 'USER' } : verifyMember(c.req));
 async function verifyMember(req) {
   if (!COMS_ME_URL) return null;
   const token = (parseCookies(req).token || []).find((v) => v.length <= 4096 && TOKEN_RE.test(v));
@@ -333,7 +335,7 @@ const int = (s) => Number(s);
 const need = (cond, code, msg) => { if (!cond) throw new HttpError(400, code, msg); };
 function guestCtx(c) {
   const id = tokenToTable.get(c.m[1]);
-  if (!id) throw new HttpError(404, 'no_table', '알 수 없는 테이블입니다. QR 코드를 다시 찍어 주세요.');
+  if (id === undefined) throw new HttpError(404, 'no_table', '알 수 없는 테이블입니다. QR 코드를 다시 찍어 주세요.');
   c.tableId = id;
   c.device = ensureDevice(c);
   return c;
@@ -376,18 +378,18 @@ route('GET', G + '/events', (c) => { guestCtx(c); sse(c, 'g:' + c.tableId, () =>
 route('GET', G + '/member', async (c) => {
   guestCtx(c);
   const ms = store.memberSettings();
-  const m = ms.enabled ? await verifyMember(c.req) : null; // staff switch off = no lookup at all
+  const m = ms.enabled ? await memberFor(c) : null; // staff switch off = no lookup at all
   const eligible = !!m && (ms.includeAssociate || m.role !== 'ASSOCIATE'); // only booleans / rule values leave the server
-  return { enabled: !!COMS_ME_URL && ms.enabled, member: eligible, mode: ms.mode, pct: ms.pct, amount: ms.amount, minOrder: ms.minOrder, maxDiscount: ms.maxDiscount, stackWithCoupon: ms.stackWithCoupon };
+  return { enabled: (!!COMS_ME_URL || (c.tableId === 0 && store.testSettings().memberPreview)) && ms.enabled, member: eligible, mode: ms.mode, pct: ms.pct, amount: ms.amount, minOrder: ms.minOrder, maxDiscount: ms.maxDiscount, stackWithCoupon: ms.stackWithCoupon };
 });
 route('POST', G + '/orders', async (c) => {
   guestCtx(c);
-  const m = store.memberSettings().enabled ? await verifyMember(c.req) : null; // a client-sent "member" field is never read
+  const m = store.memberSettings().enabled ? await memberFor(c) : null; // a client-sent "member" field is never read
   const r = store.createOrder(c.tableId, c.body, { memberId: m ? m.id : null, memberRole: m ? m.role : null });
   if (!r.duplicate) {
     c.status = 201;
     touchTable(c.tableId);
-    hint('staff', 'new_order', { id: r.order.id, table: c.tableId });
+    if (c.tableId !== 0) hint('staff', 'new_order', { id: r.order.id, table: c.tableId }); // test orders never raise a real alert
   }
   return r;
 });
@@ -413,8 +415,26 @@ route('POST', G + '/plays/start', (c) => store.startPlay(guestCtx(c).tableId, c.
 route('POST', G + '/plays/finish', (c) => { const r = store.finishPlay(guestCtx(c).tableId, c.device, c.body.playId, c.body.score); touchTable(c.tableId); return r; });
 route('POST', G + '/calls', (c) => {
   const r = store.addCall(guestCtx(c).tableId, c.body.type);
-  if (!r.duplicate) { touchTable(c.tableId); hint('staff', 'new_call', { id: r.call.id, table: c.tableId, type: r.call.type }); }
+  if (!r.duplicate) { touchTable(c.tableId); if (c.tableId !== 0) hint('staff', 'new_call', { id: r.call.id, table: c.tableId, type: r.call.type }); }
   return r;
+});
+
+// headcount + cover charge shares (guest)
+route('POST', G + '/party', (c) => { guestCtx(c); const r = store.setPartyGuest(c.tableId, c.body.people, c.body.seat); touchTable(c.tableId); return r; });
+route('POST', G + '/cover/intents', (c) => {
+  guestCtx(c);
+  if (!cookieDevice(c.req)) throw new HttpError(400, 'no_device', '페이지를 새로고침한 뒤 다시 시도해 주세요.'); // intents are bound to a real device cookie
+  const r = store.createIntent(c.tableId, c.device, c.body);
+  c.status = 201;
+  touchTable(c.tableId);
+  return r;
+});
+route('POST', G + '/cover/intents/(\\d{1,9})/cancel', (c) => {
+  guestCtx(c);
+  if (!cookieDevice(c.req)) throw new HttpError(400, 'no_device', '페이지를 새로고침한 뒤 다시 시도해 주세요.');
+  store.cancelIntent(c.tableId, c.device, int(c.m[2]));
+  touchTable(c.tableId);
+  return { ok: true };
 });
 
 // waitlist (public)
@@ -490,7 +510,7 @@ const actionKo = (p, b) => {
   for (const [re, f] of rules) if (re.test(p)) return f();
   return `직원 작업 · ${p}`;
 };
-const DB_AUDITED = /^\/api\/staff\/(orders\/\d+\/(status|paid|items|service|move)|tables\/(\d+\/(clear|unclear|orders|coupons)|move)|refunds\/\d+\/done|coupons\/(redeem|[A-Za-z0-9]+\/void)|deposits\/(\d+\/(assign|dismiss|attach)|autoconfirm)|deposit-hook\/test|pay|member-discount|notice|reset|day\/close|ordering|tables\/count|tables\/\d+\/rotate|deposit-hook\/rotate|waitlist\/timeout|menu\/items(\/[A-Za-z0-9_-]+)?)$/; // routes whose store method writes its own (richer) audit row
+const DB_AUDITED = /^\/api\/staff\/(orders\/\d+\/(status|paid|items|service|move)|tables\/(\d+\/(clear|unclear|orders|coupons)|move)|refunds\/\d+\/done|coupons\/(redeem|[A-Za-z0-9]+\/void)|deposits\/(\d+\/(assign|dismiss|attach)|autoconfirm)|deposit-hook\/test|pay|member-discount|notice|reset|day\/close|ordering|test\/(reset|settings|rotate)|cover\/settings|cover\/intents\/\d+\/cancel|payments\/\d+\/void|tables\/\d+\/party|tables\/\d+\/cover\/(waive|restore)|tables\/count|tables\/\d+\/rotate|deposit-hook\/rotate|waitlist\/timeout|menu\/items(\/[A-Za-z0-9_-]+)?)$/; // routes whose store method writes its own (richer) audit row
 route('GET', '/api/staff/state', () => staffSnap(), S);
 route('GET', '/api/staff/events', (c) => sse(c, 'staff', () => staffSnap(), true), S);
 route('GET', '/api/staff/tables', () => ({
@@ -506,7 +526,7 @@ route('POST', '/api/staff/orders/(\\d{1,9})/status', (c) => {
   return { order };
 }, S);
 route('POST', '/api/staff/orders/(\\d{1,9})/paid', (c) => {
-  const go = () => store.setPaid(int(c.m[1]), c.body.paid, { method: c.body.method, amount: c.body.amount, expectedUpdatedAt: c.body.expectedUpdatedAt });
+  const go = () => store.setPaid(int(c.m[1]), c.body.paid, { method: c.body.method, amount: c.body.amount, shares: c.body.shares, payer: c.body.payer, expectedUpdatedAt: c.body.expectedUpdatedAt });
   if (c.body.dryRun === true) return { dryRun: true, order: store.dry(go) }; // preview: runs the real code in a rolled-back transaction
   const order = go(); touchTable(order.table); return { order };
 }, S);
@@ -522,7 +542,7 @@ const hookUrl = () => {
   return { secret, path: `${BASE}/api/deposit-hook/${secret}`, url: `${PUBLIC_ORIGIN}${BASE}/api/deposit-hook/${secret}`, header: 'X-Booth-Hook', headerUrl: `${PUBLIC_ORIGIN}${BASE}/api/deposit-hook` };
 };
 let hookLimitedAt = 0; // staff learn for 5 minutes that the hook hit its rate cap
-const staffSnap = () => ({ ...store.staffState(), hookRateLimited: Date.now() - hookLimitedAt < 5 * 60000 });
+const staffSnap = () => { const s = store.staffState(); return { ...s, testTable: { ...s.testTable, url: `${PUBLIC_ORIGIN}${BASE}/t/${s.testTable.token}` }, hookRateLimited: Date.now() - hookLimitedAt < 5 * 60000 }; };
 route('POST', '/api/staff/pay', (c) => { const pay = store.setPay(c.body); touchAll(); return { ok: true, pay }; }, S);
 route('GET', '/api/staff/deposits', (c) => {
   const q = (k) => { const v = c.url.searchParams.get(k); return v == null ? null : /^\d{1,12}$/.test(v) ? Number(v) : NaN; };
@@ -530,7 +550,7 @@ route('GET', '/api/staff/deposits', (c) => {
   if (Number.isNaN(before) || Number.isNaN(limit)) throw new HttpError(400, 'bad_query', 'before와 limit은 정수여야 합니다.');
   return { ...store.listDeposits({ before, limit: limit ?? undefined }), ...store.depositCounts() };
 }, S);
-route('POST', '/api/staff/deposits/(\\d{1,9})/assign', (c) => { const r = store.assignDeposit(int(c.m[1]), c.body.orderId, c.body.force, c.body.note); touchTable(r.order.table); return { ok: true, ...r }; }, S);
+route('POST', '/api/staff/deposits/(\\d{1,9})/assign', (c) => { const r = store.assignDeposit(int(c.m[1]), c.body.orderId, c.body.force, c.body.note, c.body.intentId, c.body.amount); touchTable(r.order.table); return { ok: true, ...r }; }, S);
 route('POST', '/api/staff/deposits/(\\d{1,9})/dismiss', (c) => { const notice = store.dismissDeposit(int(c.m[1])); touch('staff'); return { ok: true, notice }; }, S);
 route('POST', '/api/staff/deposits/autoconfirm', (c) => { const r = store.setAutoConfirm(c.body); touch('staff'); return { ok: true, ...r }; }, S);
 route('POST', '/api/staff/deposits/(\\d{1,9})/attach', (c) => { const r = store.attachDeposit(int(c.m[1]), c.body.orderId, c.body.force, c.body.note); touchTable(r.order.table); return { ok: true, ...r }; }, S);
@@ -539,7 +559,7 @@ route('POST', '/api/staff/deposit-hook/test', (c) => {
   if (typeof c.body.text !== 'string' || c.body.text.length > 2048) throw new HttpError(400, 'bad_body', '{ "text": "..." } (최대 2KB) 형식이어야 합니다.');
   return store.previewDeposit(c.body.text);
 }, S);
-route('GET', '/api/staff/deposit-hook', () => hookUrl(), S);
+route('GET', '/api/staff/deposit-hook', () => ({ ...hookUrl(), ...store.depositPipeline() }), S);
 route('POST', '/api/staff/deposit-hook/rotate', () => { store.rotateDepositSecret(); return { ok: true, ...hookUrl() }; }, S);
 // the phone automation posts bank SMS text here: no session, no same-origin check; the secret in the path is the credential
 const hookTimes = [];
@@ -668,7 +688,7 @@ route('POST', '/api/staff/tables/(\\d{1,4})/orders', (c) => {
     c.status = 201;
     touchTable(n);
     hint('g:' + n, 'order_status', { id: r.order.id, status: r.order.status });
-    if (r.order.status === 'cooking') hint('kitchen', 'new_cooking', { id: r.order.id, table: n });
+    if (r.order.status === 'cooking' && n !== 0) hint('kitchen', 'new_cooking', { id: r.order.id, table: n });
   }
   return r;
 }, S);
@@ -691,6 +711,28 @@ route('POST', '/api/staff/orders/(\\d{1,9})/move', (c) => {
 }, S);
 route('POST', '/api/staff/refunds/(\\d{1,9})/done', (c) => { const refund = store.refundDone(int(c.m[1]), c.body); touchTable(refund.table); return { ok: true, refund }; }, S);
 route('POST', '/api/staff/notice', (c) => { const notice = store.setNotice(c.body); touchAll(); return { ok: true, notice }; }, S);
+// the staff-only guest test table
+route('POST', '/api/staff/test/reset', (c) => { const r = store.resetTest(); touchTable(0); hint('g:0', 'cleared', { seat: r.seat }); return r; }, S);
+route('POST', '/api/staff/test/settings', (c) => { const testTable = store.setTestSettings(c.body); touchAll(); return { ok: true, testTable: { ...testTable, url: `${PUBLIC_ORIGIN}${BASE}/t/${testTable.token}` } }; }, S);
+route('POST', '/api/staff/test/rotate', () => {
+  const token = store.rotateTestToken();
+  refreshTokens();
+  closeGuestStreams((t) => t !== 0); // streams opened with the old test QR end
+  touchTable(0);
+  return { ok: true, token, url: `${PUBLIC_ORIGIN}${BASE}/t/${token}` };
+}, S);
+// headcount, cover charge, payments
+route('POST', '/api/staff/tables/(\\d{1,4})/party', (c) => {
+  const n = int(c.m[1]);
+  const go = () => store.setPartyStaff(n, c.body.people, c.body.expectedUpdatedAt);
+  if (c.body.dryRun === true) return { dryRun: true, ...store.dry(go) }; // the cover order as it would become; nothing is written
+  const r = go(); touchTable(n); return { ok: true, ...r };
+}, S);
+route('POST', '/api/staff/tables/(\\d{1,4})/cover/waive', (c) => { const n = int(c.m[1]); const order = store.coverWaive(n, c.body); touchTable(n); return { ok: true, order }; }, S);
+route('POST', '/api/staff/tables/(\\d{1,4})/cover/restore', (c) => { const n = int(c.m[1]); const order = store.coverRestore(n, c.body); touchTable(n); return { ok: true, order }; }, S);
+route('POST', '/api/staff/cover/settings', (c) => { const cover = store.setCoverSettings(c.body); touchAll(); return { ok: true, cover }; }, S);
+route('POST', '/api/staff/payments/(\\d{1,9})/void', (c) => { const order = store.voidPayment(int(c.m[1]), c.body); touchTable(order.table); return { ok: true, order }; }, S);
+route('POST', '/api/staff/cover/intents/(\\d{1,9})/cancel', (c) => { const r = store.staffCancelIntent(int(c.m[1])); touchTable(r.table); return { ok: true }; }, S);
 route('GET', '/api/staff/audit', (c) => {
   const before = c.url.searchParams.get('before'); const limit = c.url.searchParams.get('limit');
   const int0 = (v) => (v == null ? null : /^\d{1,12}$/.test(v) ? Number(v) : NaN);
@@ -712,7 +754,12 @@ route('GET', '/api/staff/day/reports/(\\d{1,9})', (c) => store.dayReport(int(c.m
 route('GET', '/api/staff/day/reports/(\\d{1,9})\\.csv', (c) => sendText(c.res, 200, 'text/csv; charset=utf-8', store.dayReportCsv(int(c.m[1])), { 'Content-Disposition': `attachment; filename="booth-day-${int(c.m[1])}.csv"`, 'Cache-Control': 'no-store' }), S);
 route('POST', '/api/staff/waitlist/timeout', (c) => { const minutes = store.setWaitTimeout(c.body.minutes); touch('staff', 'w:*'); return { ok: true, minutes }; }, S);
 route('POST', '/api/staff/calls/(\\d{1,9})/resolve', (c) => { store.resolveCall(int(c.m[1])); touch('staff', 'g:*'); return { ok: true }; }, S);
-route('POST', '/api/staff/wait/(\\d{1,9})/(call|seat|cancel|recall)', (c) => { store.waitAction(int(c.m[1]), c.m[2]); touch('staff', 'w:*'); return { ok: true }; }, S);
+route('POST', '/api/staff/wait/(\\d{1,9})/(call|seat|cancel|recall)', (c) => {
+  const r = store.waitAction(int(c.m[1]), c.m[2], { table: c.body.table }); // seat + table: the party size becomes that table's headcount when it has none
+  touch('staff', 'w:*');
+  if (r.table) touchTable(r.table);
+  return { ok: true, ...r };
+}, S);
 route('POST', '/api/staff/award-hour', (c) => { const r = store.awardHour(c.body.hourStart); touchTable(r.table); return r; }, S);
 route('POST', '/api/staff/rewards/([A-Za-z0-9_-]{1,40})/stock', (c) => { store.setStock(c.m[1], c.body.stock); touch('staff', 'g:*'); return { ok: true }; }, S);
 route('GET', '/api/staff/sales', () => store.sales(), S);
@@ -767,7 +814,8 @@ async function handle(req, res) {
       if (!c.body || typeof c.body !== 'object' || Array.isArray(c.body)) throw new HttpError(400, 'bad_json', 'JSON 객체여야 합니다.');
     }
   }
-  const out = await r.fn(c);
+  let out;
+  try { out = await r.fn(c); } finally { for (const e of store.drainEvents()) hint('staff', e.type, e.data); } // payment / payment_void hints, only for transactions that really committed
   if (method === 'POST' && r.staff && !DB_AUDITED.test(p)) { const norm = p.replace(/\/\d+(?=\/|$)/g, '/#'); store.audit('staff_action', norm, Object.keys(c.body || {}).join(','), actionKo(norm, c.body || {})); } // route + field NAMES only: never values (no PINs, tokens or secrets)
   if (!res.headersSent) sendJson(res, c.status, out ?? { ok: true });
 }
@@ -797,7 +845,7 @@ function runBackup(periodic = false) {
 async function backupNow() { if (backupP) await backupP; return runBackup(); }
 const backupTimer = setInterval(() => runBackup(true), BACKUP_MS);
 backupTimer.unref();
-const waitSweepTimer = setInterval(() => { try { if (store.sweepWait()) touch('staff', 'w:*'); } catch (e) { console.error('wait sweep failed:', e.message); } }, 30000); // calls nobody answered become no-shows
+const waitSweepTimer = setInterval(() => { try { store.purgeIntents(); if (store.sweepWait()) touch('staff', 'w:*'); } catch (e) { console.error('wait sweep failed:', e.message); } }, 30000); // calls nobody answered become no-shows
 waitSweepTimer.unref();
 
 let closing = false;

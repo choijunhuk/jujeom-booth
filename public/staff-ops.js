@@ -32,6 +32,7 @@
     no_refund: '없는 환불이에요. 화면을 새로 불러올게요.',
     refund_done: '이미 환불 완료로 기록된 건이에요.',
     bad_note: '메모는 1~60자로 입력해 주세요.',
+    amount_guessed: '문자에서 읽은 금액이 확실하지 않아요. 은행 앱에서 실제 입금액을 확인하고 직접 입력해 주세요.',
     note_required: '금액이 다른 입금을 연결할 때는 사유 메모가 필요해요.',
     manual_coupon_limit: '직접 발급은 1시간에 20장까지예요. 잠시 뒤에 다시 해 주세요.',
     coupon_used: '이미 사용된 쿠폰은 무효로 만들 수 없어요.',
@@ -60,6 +61,31 @@
     bad_depositor: '입금자명이 올바르지 않아요.',
     unsettled: '정산이 끝나지 않았어요.',
     refund_changed: '환불 금액이 바뀌었어요. 다시 확인해 주세요.',
+    test_table: '테스트 테이블과 실제 테이블 사이로는 옮길 수 없어요.',
+    bad_member_preview: '"COMS 회원으로 보기" 값이 올바르지 않아요.',
+    bad_show_in_kitchen: '"주방에 테스트 주문 표시" 값이 올바르지 않아요.',
+    cover_order: '입장료 주문은 이 방법으로 바꿀 수 없어요. 테이블 화면의 입장료 칸에서 처리해 주세요.',
+    cover_conflict: '두 테이블 모두 입장료가 있어서 합칠 수 없어요. 한쪽 입장료를 먼저 면제해 주세요.',
+    party_set: '이미 인원이 입력됐어요. 화면을 새로 불러올게요.',
+    party_not_asked: '손님에게 인원 묻기가 꺼져 있어요.',
+    party_required: '인원을 먼저 입력해야 주문할 수 있어요.',
+    bad_people: '인원은 1~30명 사이 정수예요.',
+    bad_shares: '몇 명분인지 올바르지 않아요. 1명분 이상의 정수로, 1인당 입장료에만 쓸 수 있어요.',
+    bad_payer: '이름은 눈에 보이는 글자 1~10자로 입력해 주세요.',
+    no_payment: '없는 결제 기록이에요. 화면을 새로 불러올게요.',
+    payment_void: '이미 취소된 결제 기록이에요.',
+    cannot_void: '이미 돌려준 환불이 있어서 이 결제 기록을 지울 수 없어요.',
+    no_cover: '이 자리에는 입장료 주문이 없어요.',
+    bad_reason: '사유를 1~30자로 입력해 주세요.',
+    bad_table: '테이블 번호가 올바르지 않아요.',
+    no_intent: '이미 처리됐거나 만료된 "낼게요"예요. 화면을 새로 불러올게요.',
+    too_many_shares: '남은 인원보다 많은 "낼게요"는 만들 수 없어요.',
+    too_many_intents: '"낼게요" 요청이 너무 많아요.',
+    bad_enabled: '켜기/끄기 값이 올바르지 않아요.',
+    bad_mode: '방식을 1인당 또는 테이블당으로 골라 주세요.',
+    bad_require_before_order: '인원 입력 필수 값이 올바르지 않아요.',
+    bad_ask_guest: '손님에게 인원 묻기 값이 올바르지 않아요.',
+    no_device: '손님 기기 정보가 없어요.',
     seat_changed: '자리가 바뀌었어요.',
     network: '네트워크 연결을 확인해 주세요.',
     bad_json: '요청 형식이 올바르지 않아요.',
@@ -72,7 +98,17 @@
     seat_in_use: '새 손님이 이미 앉아 있어서 되돌릴 수 없어요.',
   };
   SC.errText = function (e) {
-    if (e && e.code === 'cannot_undo') return UNDO_WHY[e.data && e.data.reason] || '정리를 되돌릴 수 없어요.';
+    if (e && e.code === 'too_many_shares' && e.data && e.data.left != null) return '남은 몫은 ' + e.data.left + '명분이에요. 화면을 새로 불러올게요.';
+    if (e && e.code === 'intent_stale') return '이 요청의 인원이 남은 몫보다 많아요.';
+    if (e && e.code === 'cannot_undo') {
+      var u = e.data && e.data.used;
+      if (e.data && e.data.reason === 'seat_in_use' && u) {
+        var names = { orders: '주문', plays: '게임 기록', coupons: '쿠폰', nicks: '닉네임', calls: '호출', party: '인원', intents: '"낼게요" 요청' }, parts = [];
+        Object.keys(names).forEach(function (k) { if (u[k]) parts.push(names[k] + (typeof u[k] === 'number' && k !== 'party' ? ' ' + u[k] + '건' : '')); });
+        if (parts.length) return '새 손님 자리가 이미 쓰이고 있어서 되돌릴 수 없어요. (' + parts.join(' · ') + ')';
+      }
+      return UNDO_WHY[e.data && e.data.reason] || '정리를 되돌릴 수 없어요.';
+    }
     return (e && ERR[e.code]) || (e && e.message) || '요청에 실패했어요.';
   };
   SO.ERR = ERR;
@@ -82,6 +118,8 @@
   var METHOD_BY = { transfer: '계좌이체로', cash: '현금으로', other: '기타 방법으로' };
   SO.METHOD = METHOD;
   function el(tag, cls, kids) { return h(tag, cls ? { class: cls } : null, kids); }
+  function tname(n) { return n === 0 ? '테스트' : n + '번 테이블'; }
+  SO.tname = tname;
   function fresh(id) { return X.S.data && X.S.data.orders.filter(function (o) { return o.id === id; })[0] || null; }
   function holdOf(o) { return (o.paidAmount || 0) - (o.refundedAmount || 0); }
   function stripUnused(o) { return o; }
@@ -216,10 +254,11 @@
         act('입금 받기', o.balanceDue > 0 ? '남은 ' + won(o.balanceDue) + ' · 나눠서 받기 · 현금' : (o.refundDue > 0 ? '환불 대기 ' + won(o.refundDue) : '전액 받음'), '', function () { payView(s, o, function () { orderHome(s, o); }); }),
         act('주문 수정', '수량 바꾸기 · 메뉴 빼기 · 추가', '', function () { editView(s, o); }),
         act('서비스 추가', '공짜로 드리는 메뉴 (금액 그대로)', '', function () { serviceView(s, o); }),
-        act('다른 테이블로 옮기기', '이 주문 1건만 · 쿠폰은 원래 자리에 남아요', '', function () { moveView(s, o); }),
+        SC.isTestOrder(o) ? null : act('다른 테이블로 옮기기', '이 주문 1건만 · 쿠폰은 원래 자리에 남아요', '', function () { moveView(s, o); }),
         act('주문 취소', o.paidAmount ? '받은 ' + won(holdOf(o)) + '은 환불 대기에 올라가요' : '되돌릴 수 없어요', 'danger', function () { cancelView(s, o); })));
     } else body.push(note('info', '취소된 주문이에요. 돌려줄 돈이 있으면 "입금" 탭의 환불 대기에서 처리해요.'));
-    s.show(view(s, o.table + '번 테이블 · 주문 #' + o.id, STATUS_TEXT[o.status] + ' · ' + SC.agoText(o.createdAt), null, body));
+    if ((o.payments || []).length) body.push(h('div', null, h('h4', { class: 'sub-title' }, '결제 기록 ' + o.payments.length + '건'), paymentsList(s, o, function () { orderHome(s, o); })));
+    s.show(view(s, tname(o.table) + ' · 주문 #' + o.id, STATUS_TEXT[o.status] + ' · ' + SC.agoText(o.createdAt), null, body));
   }
 
   // ---- server dry run: the same endpoint with dryRun:true, debounced 300 ms, stale answers dropped
@@ -301,7 +340,7 @@
       h('div', { class: 'lab' }, '받은 방법', seg),
       h('label', { class: 'lab' }, '받은 금액 (원)', h('div', { class: 'amt-row' }, amountIn, h('button', { class: 'btn', type: 'button', onclick: function () { amount = String(Math.max(0, o.balanceDue || 0)); amountIn.value = amount; update(); } }, '전액'))),
       preview, warn];
-    s.show(view(s, '입금 받기', o.table + '번 테이블 · 주문 #' + o.id, back, body, confirmBtn));
+    s.show(view(s, '입금 받기', tname(o.table) + ' · 주문 #' + o.id, back, body, confirmBtn));
     s.onClose = dry.cancel;
     update();
   }
@@ -360,7 +399,7 @@
     addBox.hidden = true; addBox.appendChild(picker.el);
     renderRows();
     var body = [staleBanner(s, o, function (cur) { editView(s, cur); }), note('info', '이미 담긴 메뉴는 원래 가격 그대로예요. 새로 추가하는 메뉴만 지금 가격이에요. 수량을 0으로 하면 빠져요.'), rows, addBtn, addBox, h('h3', { class: 'sec-title' }, '금액 변화 (서버 계산)'), preview, msg];
-    s.show(view(s, '주문 수정', o.table + '번 테이블 · 주문 #' + o.id, function () { orderHome(s, o); }, body, save));
+    s.show(view(s, '주문 수정', tname(o.table) + ' · 주문 #' + o.id, function () { orderHome(s, o); }, body, save));
     s.onClose = dry.cancel;
     draw();
   }
@@ -387,7 +426,7 @@
     var st = stepper(function () { return qty; }, function (v) { qty = v; if (pick) dry.schedule(); }, 1, 20, '서비스 수량');
     var picker = menuPicker({ onPick: function (i) { pick = i; dry.schedule(); }, free: true, count: function (i) { return pick && pick.id === i.id ? qty : 0; } });
     var body = [staleBanner(s, o, function (cur) { serviceView(s, cur); }), h('div', { class: 'lab' }, '수량', st), picker.el, info];
-    s.show(view(s, '서비스 추가', o.table + '번 테이블 · 주문 #' + o.id, function () { orderHome(s, o); }, body, go));
+    s.show(view(s, '서비스 추가', tname(o.table) + ' · 주문 #' + o.id, function () { orderHome(s, o); }, body, go));
     s.onClose = dry.cancel;
     draw();
   }
@@ -414,7 +453,7 @@
       go.textContent = to ? o.table + '번 → ' + to.number + '번으로 옮기기' : '이 주문 옮기기';
     }
     var body = [staleBanner(s, o, function (cur) { moveView(s, cur); }), pick, info];
-    s.show(view(s, '다른 테이블로 옮기기', o.table + '번 테이블 · 주문 #' + o.id, function () { orderHome(s, o); }, body, go));
+    s.show(view(s, '다른 테이블로 옮기기', tname(o.table) + ' · 주문 #' + o.id, function () { orderHome(s, o); }, body, go));
     update();
   }
 
@@ -433,20 +472,429 @@
         held > 0 ? h('li', null, '받은 ' + won(held) + '은 "입금" 탭의 환불 대기에 올라가요. 직접 돌려준 뒤 "환불 완료"를 눌러 주세요.') : h('li', null, '받은 돈이 없어서 환불은 없어요.'),
         o.couponCode ? h('li', null, '쓴 쿠폰 ' + o.couponCode + '은 다시 쓸 수 있게 돌아가요.') : null,
         h('li', null, '재고를 센 메뉴는 재고가 돌아와요.'), h('li', null, '취소한 주문은 되돌릴 수 없어요.'))];
-    s.show(view(s, '주문을 취소할까요?', o.table + '번 테이블 · 주문 #' + o.id, function () { orderHome(s, o); }, body, go));
+    s.show(view(s, '주문을 취소할까요?', tname(o.table) + ' · 주문 #' + o.id, function () { orderHome(s, o); }, body, go));
   }
 
   // ---------------------------------------------------------------- table sheet (direct order, manual coupon)
-  SO.openTableSheet = function (n) {
-    openSheet('테이블 더보기', function (s) { tableHome(s, n); });
+  // ================================================================ headcount + cover charge (입장료) + share payments
+  function coverCfg() { return (X.S.data && X.S.data.cover) || { enabled: false, mode: 'per_person', amount: 0, label: '입장료' }; }
+  function coverLabel() { return coverCfg().label || '입장료'; }
+  // Korean particle by final consonant: jo('입장료','은','는')
+  function jo(w, withFinal, without) { var c = String(w).charCodeAt(String(w).length - 1); return w + ((c >= 0xAC00 && c <= 0xD7A3) ? ((c - 0xAC00) % 28 === 0 ? without : withFinal) : without); }
+  function tableOf(n) { return ((X.S.data && X.S.data.tables) || []).filter(function (t) { return t.number === n; })[0] || { number: n, status: 'empty' }; }
+  function coverOrderOf(n) { var t = tableOf(n); return t.cover && t.cover.orderId != null ? fresh(t.cover.orderId) : null; }
+  function anyCover() { return ((X.S.data && X.S.data.tables) || []).some(function (t) { return !!t.cover; }); }
+  SO.coverUIOn = function () { return !!(X.S.data && (coverCfg().enabled || anyCover())); };
+  SO.coverChip = function (t) {
+    if (!t.cover) return null;
+    var o = fresh(t.cover.orderId);
+    if (t.cover.waived || (o && o.waived)) return { text: coverLabel() + ' 면제', cls: 'mute' };
+    if (!o) return null;
+    if (o.paid) return { text: coverLabel() + ' 완납', cls: 'ok' };
+    if (o.shares && o.shares.paid > 0) return { text: o.shares.paid + '/' + o.shares.total + '명 납부', cls: 'warn' };
+    if (holdOf(o) > 0) return { text: '일부 납부', cls: 'warn' };
+    return { text: coverLabel() + ' 미납', cls: 'bad' };
   };
+  SO.peopleText = function (t) { return t.people != null ? t.people + '명' : '인원 미입력'; };
+  SO.tileSig = function (t) { var c = SO.coverChip(t); return [c && c.text, SO.coverUIOn()]; };
+  function partyOf(t) { return t.people != null ? t.people + '명' : '인원 미입력'; }
+  function payerOf(p) { return p.payer || '이름 없음'; }
+  function tm(ts) { return SC.clock(ts); }
+
+  SO.openTableSheet = function (n) { openSheet('테이블 더보기', function (s) { tableHome(s, n); }); };
   function tableHome(s, n) {
+    var d = X.S.data, t = tableOf(n), co = coverOrderOf(n);
     function act(title, sub, go) { return h('button', { class: 'btn bigact', type: 'button', onclick: go }, h('b', null, title), h('span', { class: 'muted' }, sub)); }
-    var closed = X.S.data && X.S.data.orderingOpen === false;
-    s.show(view(s, n + '번 테이블 더보기', null, null, [
-      h('div', { class: 'bigacts' },
-        act('직접 주문 넣기', closed ? '주문 마감 중에도 직원은 넣을 수 있어요' : '손님 대신 주문을 입력해요', function () { directView(s, n); }),
-        act('쿠폰 직접 발급', '할인 쿠폰 · 상품 쿠폰을 이 자리에 바로 줘요', function () { couponView(s, n); }))]));
+    var closed = d && d.orderingOpen === false;
+    var body = [h('div', { class: 'card tsum' },
+      h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('span', { class: 'muted' }, '인원'), h('span', { class: 'big' }, partyOf(t) + (t.minutesSeated != null ? ' · ' + t.minutesSeated + '분째' : '')), partyWho(t) ? h('span', { class: 'muted' }, partyWho(t)) : null),
+        h('button', { class: 'btn', type: 'button', onclick: function () { partyView(s, n); } }, '인원 바꾸기')))];
+    if (SO.coverUIOn()) body.push(coverSection(s, n, t, co));
+    var sig0 = X.sig([t, co, d.cover, (d.coverIntents || []).filter(function (i) { return i.table === n; })]);
+    body.push(h('div', { class: 'bigacts' },
+      act('직접 주문 넣기', closed ? '주문 마감 중에도 직원은 넣을 수 있어요' : '손님 대신 주문을 입력해요', function () { directView(s, n); }),
+      act('쿠폰 직접 발급', '할인 쿠폰 · 상품 쿠폰을 이 자리에 바로 줘요', function () { couponView(s, n); }),
+      act('손님 화면 열기', '새 탭으로 이 테이블의 손님 화면을 열어요', function () { openGuestScreen(n); })));
+    s.nextOnState = function (nd) {
+      var t2 = tableOf(n), co2 = coverOrderOf(n);
+      if (X.sig([t2, co2, nd.cover, (nd.coverIntents || []).filter(function (i) { return i.table === n; })]) !== sig0) tableHome(s, n);
+    };
+    s.show(view(s, n + '번 테이블 더보기', null, null, body));
+  }
+
+  // ---- 인원 바꾸기 (headcount) with the cover re-price from the server dry run
+  var SET_BY = { guest: '손님 입력', staff: '직원 입력', waitlist: '대기 명단' };
+  function partyWho(t) { return t.people != null && t.partySetBy ? (SET_BY[t.partySetBy] || '') + (t.partySetAt ? ' · ' + SC.agoText(t.partySetAt) : '') : ''; }
+  function partyView(s, n) {
+    var t = tableOf(n), co = coverOrderOf(n);
+    var stamp = t.partyUpdatedAt || 0; // captured when the view opens
+    var people = t.people != null ? t.people : 2, info = h('div');
+    function body(extra) { return Object.assign({ people: people, expectedUpdatedAt: stamp }, extra || {}); }
+    var dry = makeDry(function () { return X.api('/api/staff/tables/' + n + '/party', body({ dryRun: true })).then(function (r) { return { order: r.coverOrder || null }; }); }, draw);
+    var go = X.abtn('btn btn-primary btn-block', '인원 저장', function () {
+      var seen = dry.last && dry.last.order;
+      return X.api('/api/staff/tables/' + n + '/party', body()).then(function (r) {
+        var msg = n + '번 테이블 인원을 ' + people + '명으로 바꿨어요';
+        if (r.coverOrder && seen) return finishMoney(s, '인원 변경', { order: r.coverOrder }, seen, msg + ' · ' + coverLabel() + ' ' + won(r.coverOrder.total));
+        return finishMoney(s, '인원 변경', null, null, msg + (r.coverOrder ? ' · ' + coverLabel() + ' ' + won(r.coverOrder.total) : ''));
+      }, function (e) { if (e.code === 'stale') X.refresh(); throw e; });
+    });
+    var st = stepper(function () { return people; }, function (v) { people = v; dry.schedule(); }, 1, 30, '인원');
+    function draw() {
+      var res = dry.last;
+      go.disabled = dry.busy || !res || !!res.err || go.classList.contains('busy');
+      if (dry.busy || !res) { SC.fill(info, h('p', { class: 'muted' }, '서버가 계산하는 중…')); return; }
+      if (res.err) { SC.fill(info, errNote(res.err)); return; }
+      var a = res.order;
+      if (!a) { SC.fill(info, note('info', SO.coverUIOn() ? coverLabel() + ' 금액은 이 인원으로 바뀌지 않아요.' : '인원은 방문 인원 통계에 쓰여요.')); return; }
+      var rows = co ? [[coverLabel() + ' 합계', won(co.total), won(a.total), a.total > co.total ? 'owe' : ''], ['받은 돈', won(holdOf(co)), won(holdOf(a))], ['남은 금액', won(co.balanceDue || 0), won(a.balanceDue || 0), a.balanceDue ? 'owe' : 'ok'], (a.refundDue || 0) || (co.refundDue || 0) ? ['돌려줄 돈', won(co.refundDue || 0), won(a.refundDue || 0), 'owe'] : null, a.shares ? ['납부 인원', co.shares ? co.shares.paid + '/' + co.shares.total + '명' : '', a.shares.paid + '/' + a.shares.total + '명'] : null]
+        : [[coverLabel() + ' 주문', '없음', won(a.total) + ' (' + people + '명 × ' + won(a.unitPrice || 0) + ')']];
+      SC.fill(info, beforeAfter(rows), (a.refundDue || 0) > (co ? co.refundDue || 0 : 0) ? note('warn', '이미 받은 돈이 새 ' + coverLabel() + '보다 ' + won(a.refundDue) + ' 많아요. 저장하면 환불 대기에 올라가요.') : null, a.shares && a.shares.over > 0 ? note('warn', a.shares.over + '명분 초과 납부가 돼요. 초과한 돈은 환불 대기에 올라가요.') : null);
+    }
+    s.show(view(s, '인원 바꾸기', n + '번 테이블 · 지금 ' + partyOf(t) + (partyWho(t) ? ' (' + partyWho(t) + ')' : ''), function () { tableHome(s, n); }, [h('div', { class: 'lab' }, '인원', st), info], go));
+    s.onClose = dry.cancel;
+    dry.schedule();
+  }
+
+  // ---- 입장료 section of the table sheet
+  function coverSection(s, n, t, co) {
+    var cfg = coverCfg(), lab = coverLabel(), box = h('div', { class: 'card csec' });
+    box.appendChild(h('h3', { class: 'sec-title', style: 'margin:0' }, lab));
+    if (!co) {
+      box.appendChild(note('info', cfg.enabled ? (cfg.mode === 'per_person' ? '인원을 입력하면 ' + lab + ' 주문이 만들어져요.' : '첫 주문이나 인원이 들어오면 ' + lab + ' 주문이 만들어져요.') : lab + ' 설정이 꺼져 있어요.'));
+      return box;
+    }
+    var chip = SO.coverChip(t) || { text: '', cls: 'mute' };
+    box.appendChild(h('div', { class: 'row-card' }, h('div', { class: 'grow' }, co.waived ? h('s', { class: 'big muted' }, won(co.total)) : h('b', { class: 'big' }, won(co.total)), h('span', { class: 'muted num' }, '받은 ' + won(holdOf(co)) + (co.balanceDue > 0 ? ' · 남은 ' + won(co.balanceDue) : '') + (co.coverMode === 'per_person' ? ' · ' + won(co.unitPrice) + ' × ' + (co.shares ? co.shares.total : '') + '명' : ' · 테이블당'))), h('span', { class: 'tag ' + chip.cls }, chip.text)));
+    if (co.shares && co.shares.over > 0) box.appendChild(h('div', null, h('span', { class: 'tag warn' }, co.shares.over + '명분 초과 납부'), h('span', { class: 'muted' }, ' 초과한 돈은 입금 탭의 환불 대기에 올라가 있어요')));
+    if (co.shares && !co.waived) {
+      var segs = []; for (var i = 0; i < Math.min(co.shares.total, 30); i++) segs.push(h('i', { class: i < co.shares.paid ? 'on' : '' }));
+      box.appendChild(h('div', { class: 'sprog' }, h('span', { class: 'y2k-progress', role: 'img', 'aria-label': co.shares.paid + '명분 납부, ' + co.shares.left + '명분 남음' }, segs), h('b', { class: 'num' }, co.shares.paid + ' / ' + co.shares.total + '명분')));
+    }
+    if (co.waived) {
+      box.appendChild(note('warn', lab + ' 면제됨' + (co.note ? ' · ' + String(co.note).replace(/^면제:\s*/, '') : '')));
+      box.appendChild(X.abtn('btn btn-block', '면제 취소 (다시 받기)', function () {
+        return SC.confirm({ title: lab + ' 면제를 취소할까요?', ok: '면제 취소', message: '현재 인원 ' + partyOf(t) + ' 기준으로 금액이 다시 계산돼요. 받은 돈이 있으면 그만큼 반영돼요.' }).then(function (ok) {
+          if (!ok) return;
+          return X.api('/api/staff/tables/' + n + '/cover/restore', { expectedUpdatedAt: co.updatedAt }).then(function (r) { SC.toast(lab + ' 면제를 취소했어요 · ' + won(r.order ? r.order.total : 0), 'ok'); return X.refresh(); });
+        });
+      }));
+      return box;
+    }
+    var bal = co.balanceDue || 0, left = co.shares ? co.shares.left : 0, unit = co.unitPrice || 0;
+    var quick = h('div', { class: 'quick-grid' });
+    function qb(label, method, shares) {
+      var b = X.abtn('btn', label, function () {
+        var body = { paid: true, method: method };
+        if (shares) body.shares = shares;
+        return SO.omut(co, 'paid', body).then(function (r) { SC.toast(n + '번 · ' + METHOD[method] + ' ' + (shares ? shares + '명분 ' : '') + '받았어요' + (r.order && r.order.balanceDue > 0 ? ' (남은 ' + won(r.order.balanceDue) + ')' : ''), 'ok'); return X.refresh(); }, function (e) { if (e.code === 'too_many_shares') X.refresh(); throw e; });
+      });
+      b.disabled = bal <= 0; quick.appendChild(b);
+    }
+    if (co.shares && left > 0) {
+      qb('1명분 현금 · ' + won(unit), 'cash', 1); qb('1명분 이체 · ' + won(unit), 'transfer', 1);
+      qb('남은 전부 현금 · ' + left + '명분', 'cash', left); qb('남은 전부 이체 · ' + left + '명분', 'transfer', left);
+    } else {
+      qb('전액 현금 · ' + won(bal), 'cash', 0); qb('전액 이체 · ' + won(bal), 'transfer', 0);
+    }
+    if (bal > 0) box.appendChild(quick);
+    box.appendChild(h('button', { class: 'btn btn-block', type: 'button', onclick: function () { coverPayView(s, n, co); } }, '직접 입력 (몇 명분 · 금액 · 이름)'));
+    // payments
+    var pays = co.payments || [];
+    box.appendChild(h('h4', { class: 'sub-title' }, '결제 기록 ' + pays.length + '건'));
+    box.appendChild(paymentsList(s, co, function () { tableHome(s, n); }));
+    // open intents of this table
+    var its = ((X.S.data && X.S.data.coverIntents) || []).filter(function (i) { return i.table === n; });
+    if (its.length) {
+      box.appendChild(h('h4', { class: 'sub-title' }, '손님이 "낼게요"를 누른 건 ' + its.length + '건'));
+      its.forEach(function (it) {
+        box.appendChild(h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('b', null, it.payer + ' · ' + it.shares + '명분 · ' + won(it.amount)), h('span', { class: 'muted' }, SC.agoText(it.createdAt) + ' · 입금이 확인되면 자동으로 연결돼요')),
+          X.abtn('btn btn-sm btn-danger', '취소', function () { return cancelIntent(it); })));
+      });
+    }
+    box.appendChild(h('button', { class: 'btn btn-danger btn-block', type: 'button', onclick: function () { waiveView(s, n, co); } }, lab + ' 면제…'));
+    return box;
+  }
+  function cancelIntent(it) {
+    return X.api('/api/staff/cover/intents/' + it.id + '/cancel').then(function () { SC.toast('"' + it.payer + '" 낼게요 요청을 취소했어요', 'ok'); return X.refresh(); }, function (e) { toastErr(e); X.refresh(); });
+  }
+  SO.cancelIntent = cancelIntent;
+  function paymentsList(s, o, back) {
+    var pays = o.payments || [];
+    if (!pays.length) return h('p', { class: 'muted' }, '아직 받은 기록이 없어요.');
+    return h('div', { class: 'pays' }, pays.map(function (p) {
+      return h('div', { class: 'row-card pay-row' }, h('div', { class: 'grow' }, h('b', null, payerOf(p) + (p.shares ? ' · ' + p.shares + '명분' : '') + ' · ' + won(p.amount)), h('span', { class: 'muted' }, (METHOD[p.method] || p.method || '') + ' · ' + tm(p.at))),
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { voidView(s, o, p, back); } }, '취소'));
+    }));
+  }
+
+  // ---- 결제 기록 취소 (void): the entry was a mistake and no money was received
+  function voidView(s, o, p, back) {
+    var reasonIn = h('input', { class: 'field', type: 'text', maxlength: '30', placeholder: '사유 (1~30자) 예: 잘못 입력', 'aria-label': '취소 사유' }), err = h('div');
+    var go = X.abtn('btn btn-solid-danger btn-block', '이 결제 기록 지우기', function () {
+      var r = reasonIn.value.trim();
+      if (!r) { SC.fill(err, note('bad', '사유를 적어 주세요. (1~30자)')); return Promise.resolve(); }
+      SC.fill(err);
+      var body = { reason: r };
+      if (o.updatedAt != null) body.expectedUpdatedAt = o.updatedAt;
+      return X.api('/api/staff/payments/' + p.id + '/void', body).then(function (res) {
+        SC.toast('결제 기록을 지웠어요 · ' + payerOf(p) + ' ' + won(p.amount), 'ok');
+        return X.refresh().then(function () { if (SO.reloadSales) SO.reloadSales(); s.close(); });
+      }, function (e) { if (e.code === 'stale') X.refresh(); throw e; });
+    });
+    var held = holdOf(o), after = Math.max(0, held - p.amount), due = Math.max(0, o.total - after);
+    s.show(view(s, '결제 기록을 지울까요?', tname(o.table) + ' · 주문 #' + o.id, back, [
+      h('div', { class: 'osum' }, h('b', null, payerOf(p) + (p.shares ? ' · ' + p.shares + '명분' : '')), h('span', { class: 'muted' }, (METHOD[p.method] || '') + ' ' + won(p.amount) + ' · ' + tm(p.at))),
+      beforeAfter([['받은 돈', won(held), won(after)], ['남은 금액', won(o.balanceDue || 0), won(due), due ? 'owe' : '']]),
+      note('warn', '잘못 입력한 결제를 지워요. 실제로 돌려준 돈은 환불로 처리하세요.'),
+      h('label', { class: 'lab' }, '사유', reasonIn), err], go));
+  }
+  SO.voidView = function (o, p) { openSheet('결제 기록 취소', function (s) { voidView(s, o, p, null); }); };
+
+  // ---- 입장료 면제
+  function waiveView(s, n, co) {
+    var reasonIn = h('input', { class: 'field', type: 'text', maxlength: '30', placeholder: '사유 (1~30자) 예: 스태프 지인', 'aria-label': '면제 사유' }), err = h('div');
+    var held = holdOf(co);
+    var go = X.abtn('btn btn-solid-danger btn-block', coverLabel() + ' 면제하기', function () {
+      var r = reasonIn.value.trim();
+      if (!r) { SC.fill(err, note('bad', '사유를 적어 주세요. (1~30자)')); return Promise.resolve(); }
+      SC.fill(err);
+      return X.api('/api/staff/tables/' + n + '/cover/waive', { reason: r, expectedUpdatedAt: co.updatedAt }).then(function () {
+        SC.toast(n + '번 ' + jo(coverLabel(), '을', '를') + ' 면제했어요' + (held > 0 ? ' · 환불 대기 ' + won(held) : ''), 'ok');
+        return X.refresh().then(function () { s.close(); });
+      }, function (e) { if (e.code === 'stale') X.refresh(); throw e; });
+    });
+    s.show(view(s, jo(coverLabel(), '을', '를') + ' 면제할까요?', n + '번 테이블', function () { tableHome(s, n); }, [
+      beforeAfter([[coverLabel() + ' 합계', won(co.total), '0원 (면제)'], held > 0 ? ['돌려줄 돈', won(co.refundDue || 0), won((co.refundDue || 0) + held), 'owe'] : null]),
+      held > 0 ? note('warn', '이미 받은 ' + won(held) + '은 환불 대기에 올라가요.') : null,
+      note('info', '나중에 "면제 취소"로 되돌릴 수 있어요.'), h('label', { class: 'lab' }, '사유', reasonIn), err], go));
+  }
+
+  // ---- 직접 입력: shares or money, method, payer (server dry run)
+  function coverPayView(s, n, co) {
+    var perPerson = !!co.shares && co.shares.left > 0, byShares = perPerson, shares = perPerson ? co.shares.left : 0, method = 'cash', amount = String(Math.max(0, co.balanceDue || 0));
+    var payerIn = h('input', { class: 'field', type: 'text', maxlength: '10', placeholder: '이름 (선택, 10자)', 'aria-label': '낸 사람 이름', oninput: function () { dry.schedule(); } });
+    var amountIn = h('input', { class: 'field amt', type: 'number', inputmode: 'numeric', min: '0', max: '10000000', value: amount, 'aria-label': '받은 금액(원)', oninput: function () { amount = amountIn.value; dry.schedule(); } });
+    var preview = h('div'), segBtns = {}, modeBtns = {};
+    function body0(extra) {
+      var b = { paid: true, method: method };
+      if (byShares) b.shares = shares; else b.amount = Number(amount);
+      if (payerIn.value.trim()) b.payer = payerIn.value.trim();
+      return Object.assign(b, extra || {});
+    }
+    function valid() { return byShares ? shares >= 1 : (amount !== '' && Number.isInteger(Number(amount)) && Number(amount) >= 0); }
+    var dry = makeDry(function () { return SO.omut(co, 'paid', body0({ dryRun: true })); }, draw);
+    var go = X.abtn('btn btn-primary btn-block', '입금 받기', function () {
+      var seen = dry.last && dry.last.order;
+      return SO.omut(co, 'paid', body0()).then(function (r) { return finishMoney(s, '입장료 받기', r, seen, n + '번 ' + coverLabel() + ' ' + (byShares ? shares + '명분 ' : '') + METHOD[method] + ' 받았어요'); }, function (e) { if (e.code === 'too_many_shares') { X.refresh().then(function () { tableHome(s, n); }); } throw e; });
+    });
+    var seg = h('div', { class: 'al-seg', role: 'group', 'aria-label': '받은 방법' }, ['cash', 'transfer', 'other'].map(function (m) { var b = h('button', { class: 'btn', type: 'button', 'aria-pressed': String(m === method), onclick: function () { method = m; dry.schedule(); syncSeg(); } }, METHOD[m]); segBtns[m] = b; return b; }));
+    function syncSeg() { Object.keys(segBtns).forEach(function (m) { segBtns[m].setAttribute('aria-pressed', String(m === method)); }); Object.keys(modeBtns).forEach(function (m) { modeBtns[m].setAttribute('aria-pressed', String((m === 'shares') === byShares)); }); }
+    var st = perPerson ? stepper(function () { return shares; }, function (v) { shares = v; dry.schedule(); }, 1, co.shares.left, '명분') : null;
+    var modeSeg = perPerson ? h('div', { class: 'al-seg' }, [['shares', '몇 명분'], ['money', '금액으로']].map(function (m) { var b = h('button', { class: 'btn', type: 'button', onclick: function () { byShares = m[0] === 'shares'; stWrap.hidden = !byShares; amtWrap.hidden = byShares; syncSeg(); dry.schedule(); } }, m[1]); modeBtns[m[0]] = b; return b; })) : null;
+    var stWrap = h('div', { class: 'lab' }, '몇 명분 (남은 ' + (co.shares ? co.shares.left : 0) + '명분까지)', st || ''), amtWrap = h('label', { class: 'lab' }, '받은 금액 (원)', amountIn);
+    stWrap.hidden = !byShares; amtWrap.hidden = byShares;
+    function draw() {
+      var res = dry.last;
+      go.disabled = !valid() || dry.busy || !(res && res.order) || go.classList.contains('busy');
+      go.textContent = res && res.order && valid() ? (byShares ? shares + '명분 ' : '') + METHOD_BY[method] + ' 받기 · ' + won(holdOf(res.order) - holdOf(co)) : '입금 받기';
+      if (!valid()) { SC.fill(preview, note('bad', '금액을 올바르게 입력해 주세요.')); return; }
+      if (dry.busy || !res) { SC.fill(preview, h('p', { class: 'muted' }, '서버가 계산하는 중…')); return; }
+      if (res.err) { SC.fill(preview, errNote(res.err)); return; }
+      var a = res.order;
+      SC.fill(preview, beforeAfter([['받은 돈', won(holdOf(co)), won(holdOf(a))], co.shares && a.shares ? ['납부 인원', co.shares.paid + '/' + co.shares.total + '명', a.shares.paid + '/' + a.shares.total + '명'] : null, ['남은 금액', won(co.balanceDue || 0), won(a.balanceDue || 0), a.balanceDue ? 'owe' : 'ok'], (a.refundDue || 0) > (co.refundDue || 0) ? ['돌려줄 돈', won(co.refundDue || 0), won(a.refundDue), 'owe'] : null]));
+    }
+    s.show(view(s, coverLabel() + ' 직접 입력', n + '번 테이블 · ' + won(co.balanceDue || 0) + ' 남음', function () { tableHome(s, n); }, [modeSeg, stWrap, amtWrap, h('div', { class: 'lab' }, '받은 방법', seg), h('label', { class: 'lab' }, '낸 사람', payerIn), preview], go));
+    s.onClose = dry.cancel; syncSeg(); dry.schedule();
+  }
+
+  // ---- 입금 tab: guest "낼게요" intents that no bank notice matched yet
+  SO.buildIntents = function () {
+    var list = h('div', { class: 'list' }), title = h('h3', { class: 'sec-title' }, '보내는 중'), wrap = h('div', { class: 'intents', hidden: true }, title, h('p', { class: 'muted' }, '손님이 앱에서 "낼게요"를 눌렀지만 아직 입금 알림이 연결되지 않은 건이에요. 알림이 오면 자동으로 후보에 떠요. 현금으로 받았거나 앱에서 직접 확인했다면 여기서 바로 확인해요.'), list);
+    function confirmIntent(it, method) {
+      var co = coverOrderOf(it.table);
+      if (!co) { SC.toast('이 자리의 ' + coverLabel() + ' 주문을 찾을 수 없어요.', 'error'); X.refresh(); return Promise.resolve(); }
+      return SC.confirm({ title: it.table + '번 ' + it.payer + ' · ' + it.shares + '명분', ok: METHOD[method] + ' 받음으로 기록', message: won(it.amount) + '을 ' + METHOD_BY[method] + ' 받았나요?\n' + coverLabel() + ' 결제 기록이 생기고 이 "낼게요"는 닫혀요.' }).then(function (ok) {
+        if (!ok) return;
+        return SO.omut(co, 'paid', { paid: true, method: method, shares: it.shares, payer: it.payer }).then(function () {
+          return X.api('/api/staff/cover/intents/' + it.id + '/cancel').then(null, function () { /* already closed by the payment */ });
+        }).then(function () { SC.toast(it.table + '번 ' + it.payer + ' ' + it.shares + '명분 ' + METHOD[method] + ' 확인했어요', 'ok'); return X.refresh(); });
+      });
+    }
+    function update(d) {
+      var its = (d.coverIntents || []).filter(function (i) { return i.table >= 1; }).slice().sort(function (a, b) { return a.createdAt - b.createdAt; });
+      wrap.hidden = !its.length;
+      title.textContent = '보내는 중 ' + its.length + '건';
+      SC.reconcile(list, its, function (i) { return i.id; }, X.sig, function (it) {
+        return h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('b', null, it.table + '번 테이블 · ' + coverLabel() + ' ' + it.shares + '명분 · ' + it.payer), h('span', { class: 'muted' }, won(it.amount) + ' · ' + SC.agoText(it.createdAt))),
+          h('div', { class: 'btns' }, X.abtn('btn btn-sm btn-primary', '이체 확인', function () { return confirmIntent(it, 'transfer'); }), X.abtn('btn btn-sm', '현금 받음', function () { return confirmIntent(it, 'cash'); }), X.abtn('btn btn-sm btn-danger', '취소', function () { return cancelIntent(it); })));
+      }, null);
+    }
+    return { el: wrap, update: update };
+  };
+
+  // ---- order board: cover orders live in a compact strip, never in the kitchen columns
+  SO.buildCoverStrip = function () {
+    var box = h('div', { class: 'cover-strip', hidden: true });
+    function update(d) {
+      var os = d.orders.filter(function (o) { return o.kind === 'cover' && !SC.isTestOrder(o) && o.status !== 'cancelled' && !o.paid && !o.waived; }).sort(function (a, b) { return a.table - b.table; });
+      box.hidden = !os.length;
+      SC.fill(box, os.length ? [h('b', null, coverLabel() + ' 미납'), os.map(function (o) {
+        var lab = o.shares ? o.shares.paid + '/' + o.shares.total + '명' : '미납';
+        return h('button', { class: 'chip', type: 'button', onclick: function () { SO.openTableSheet(o.table); } }, o.table + '번 · ' + lab + ' · ' + won(o.balanceDue));
+      })] : null);
+    }
+    return { el: box, update: update };
+  };
+
+  // ---- 주문 tab: the last 5 confirmed payments (from the payment ledger on every order)
+  SO.buildRecentPays = function () {
+    var list = h('div', { class: 'recent-list' }), box = h('div', { class: 'recent-pays', hidden: true }, h('b', { class: 'recent-title' }, '최근 입금'), list);
+    function update(d) {
+      var all = [];
+      (d.orders || []).forEach(function (o) {
+        if (SC.isTestOrder(o) && !SC.testSound()) return;
+        (o.payments || []).forEach(function (p) { all.push({ o: o, p: p }); });
+      });
+      all.sort(function (a, b) { return b.p.at - a.p.at; });
+      var top = all.slice(0, 5);
+      box.hidden = !top.length;
+      SC.reconcile(list, top, function (x) { return x.p.id; }, function (x) { return X.sig([x.p, x.o.table, x.o.paidBy, x.o.kind]); }, function (x) {
+        var o = x.o, p = x.p, auto = PW.autoFor(o, p);
+        var who = o.kind === 'cover' ? coverLabel() + (p.shares ? ' ' + p.shares + '명분' : '') : '';
+        return h('button', { class: 'chip recent-chip', type: 'button', onclick: function () { if (o.kind === 'cover') SO.openTableSheet(o.table); else SO.openOrderSheet(o.id); } },
+          h('span', { class: 'num' }, SC.clock(p.at)), h('b', null, tname(o.table) + (who ? ' · ' + who : '')), h('span', { class: 'num' }, won(p.amount)),
+          h('span', { class: 'muted' }, (METHOD[p.method] || p.method || '') + ' · ' + (auto ? '자동' : '직원')),
+          SC.isTestOrder(o) ? h('span', { class: 'tag tst' }, '테스트') : null);
+      }, null);
+    }
+    return { el: box, update: update };
+  };
+
+  // ---- waitlist seat: optional table picker so the party size carries over
+  SO.seatWait = function (x) {
+    var d = X.S.data, tables = d.tables.filter(function (t) { return t.people == null; }).sort(function (a, b) { return a.number - b.number; });
+    function done(r, tableNo) {
+      if (tableNo != null) SC.toast(r && r.partySet ? tableNo + '번 테이블 인원을 ' + Math.min(x.size, 30) + '명으로 기록했어요' : tableNo + '번 테이블은 이미 인원이 있어서 그대로 뒀어요', 'ok');
+      else SC.toast(x.nick + ' 착석 처리했어요', 'ok');
+      return X.refresh();
+    }
+    if (!tables.length) return X.api('/api/staff/wait/' + x.id + '/seat').then(function (r) { return done(r, null); });
+    return new Promise(function (resolve) {
+      openSheet('착석', function (s) {
+        var finished = false;
+        function fin(p) { if (finished) return; finished = true; resolve(p); }
+        s.dlg.addEventListener('close', function () { fin(Promise.resolve()); });
+        function seat(no) {
+          return X.api('/api/staff/wait/' + x.id + '/seat', no != null ? { table: no } : {}).then(function (r) { fin(done(r, no)); s.close(); }, function (e) { toastErr(e); });
+        }
+        var btns = {};
+        s.show(view(s, x.nick + ' · ' + x.size + '명 착석', '앉은 테이블을 고르면 인원 ' + Math.min(x.size, 30) + '명이 그 테이블에 기록돼요 (선택).', null, [
+          h('div', { class: 'pick' }, tables.map(function (t) { return h('button', { class: 'btn', type: 'button', onclick: function () { seat(t.number); } }, String(t.number), h('small', null, t.status === 'occupied' ? '사용 중' : '비어 있음')); })),
+          note('info', '이미 인원이 기록된 테이블은 목록에 없어요. 테이블을 정하지 않고 착석만 처리할 수도 있어요.')],
+          h('button', { class: 'btn btn-block', type: 'button', onclick: function () { seat(null); } }, '테이블 정하지 않고 착석')));
+      });
+    });
+  };
+
+  // ---- table merge conflict: both seats have a live cover order
+  SO.coverConflict = function (from, to) {
+    openSheet('입장료 충돌', function (s) {
+      function waive(no) { s.close(); SO.openTableSheet(no); }
+      s.show(view(s, '두 테이블 모두 ' + jo(coverLabel(), '이', '가') + ' 있어요', from + '번 → ' + to + '번', null, [
+        note('warn', '두 테이블을 합치려면 한쪽 ' + jo(coverLabel(), '을', '를') + ' 먼저 면제해야 해요. 그러면 남은 쪽 ' + jo(coverLabel(), '이', '가') + ' 합친 인원으로 다시 계산돼요.'),
+        h('div', { class: 'bigacts' },
+          h('button', { class: 'btn bigact', type: 'button', onclick: function () { waive(from); } }, h('b', null, from + '번 ' + coverLabel() + ' 면제하러 가기'), h('span', { class: 'muted' }, '옮기는 쪽 입장료를 없애요')),
+          h('button', { class: 'btn bigact', type: 'button', onclick: function () { waive(to); } }, h('b', null, to + '번 ' + coverLabel() + ' 면제하러 가기'), h('span', { class: 'muted' }, '받는 쪽 입장료를 없애요'))),
+        note('info', '면제한 뒤 다시 "자리 이동"을 눌러 주세요.')]));
+    });
+  };
+
+  // ---- sales: visitors, kind split
+  SO.visitorsCard = function (v) {
+    if (!v || !(v.total || v.parties || v.partiesUnknown)) return null;
+    function tile(k, val, help) { return h('div', { class: 'tile' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, val), h('span', { class: 'help' }, help)); }
+    var hours = (v.byHour || []), maxH = Math.max.apply(null, [1].concat(hours.map(function (x) { return x.people; })));
+    return h('div', { class: 'card' }, h('h3', { class: 'sec-title', style: 'margin:0' }, '방문 인원'),
+      h('div', { class: 'tiles' }, tile('총 인원', (v.total || 0) + '명', '인원이 기록된 자리의 인원 합계'), tile('팀 수', (v.parties || 0) + '팀', '인원이 기록된 자리 수 (자리마다 1팀)'), tile('평균 팀 인원', (v.avgPartySize || 0) + '명', '총 인원 ÷ 팀 수'), tile('인원 미입력', (v.partiesUnknown || 0) + '팀', '주문은 있었지만 인원을 적지 않은 자리')),
+      hours.length ? h('div', { class: 'bars', role: 'list', 'aria-label': '시간대별 방문 인원' }, hours.map(function (x) {
+        return h('div', { class: 'bar', role: 'listitem' }, h('span', null, x.label.slice(5)), h('span', { class: 'track' }, h('i', { style: 'width:' + Math.max(2, Math.round(x.people / maxH * 100)) + '%' })), h('span', { class: 'v' }, x.people + '명 · ' + x.parties + '팀'));
+      })) : null,
+      h('p', { class: 'muted' }, '자리에 처음 앉은 시각을 기준으로 시간대에 넣어요.'));
+  };
+  SO.kindCard = function (bk) {
+    if (!bk || !bk.cover || !bk.cover.orders) return null;
+    function col(title, x) {
+      return h('div', { class: 'card' }, h('h4', { class: 'sub-title', style: 'margin-top:0' }, title + ' · ' + x.orders + '건'),
+        h('div', { class: 'tiles' },
+          kt('청구 금액', won(x.billed), TILE_HELP.billed), kt('실제 받은 돈', won(x.net), TILE_HELP.revenue), kt('받은 돈', won(x.received), '환불 전에 받은 돈'), kt('환불 완료', won(x.refunded), TILE_HELP.refundsDone), kt('미결제', won(x.unpaid), TILE_HELP.unpaid), kt('미수금', won(x.writtenOff), TILE_HELP.wo)));
+    }
+    function kt(k, v, help) { return h('div', { class: 'tile' }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v), h('span', { class: 'help' }, help)); }
+    return h('div', { class: 'card' }, h('h3', { class: 'sec-title', style: 'margin:0' }, '음식 / ' + coverLabel() + ' 나눠 보기'), h('p', { class: 'muted' }, '두 칸을 더하면 위의 전체 금액과 같아요.'), h('div', { class: 'two' }, col('음식', bk.food), col(coverLabel(), bk.cover)));
+  };
+
+  // ---- settings: 입장료
+  SO.coverSection = function () {
+    var dirty = false, enabled = false, mode = 'per_person', requireB = false, askG = true;
+    var amountIn = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '0', max: '100000', step: '100', 'aria-label': '입장료 금액(원)', oninput: function () { dirty = true; ex(); } });
+    var labelIn = h('input', { class: 'field', type: 'text', maxlength: '12', 'aria-label': '입장료 이름', oninput: function () { dirty = true; ex(); } });
+    var example = h('p', { class: 'sheet-note info' }), err = h('div'), cfgNow = null;
+    function tog(label, sub, get, set) {
+      var b = h('button', { class: 'btn al-sw', type: 'button', onclick: function () { if (b.disabled) return; set(!get()); dirty = true; b.refresh(); ex(); } });
+      var subEl = h('span', { class: 'muted' }, sub);
+      b.refresh = function () { var lock = b.lockWhen && b.lockWhen(); b.disabled = !!lock; b.setAttribute('aria-pressed', String(lock ? true : get())); b.textContent = (lock || get()) ? '켜짐' : '꺼짐'; subEl.textContent = lock ? '필수로 켜면 손님에게 항상 물어봐요' : sub; }; b.refresh();
+      return { row: h('div', { class: 'al-row' }, h('div', { class: 'al-txt' }, h('b', null, label), subEl), b), b: b };
+    }
+    var tEn = tog('입장료 받기', '켜면 자리마다 입장료 주문이 만들어져요', function () { return enabled; }, function (v) { enabled = v; });
+    var tReq = tog('인원을 입력해야 주문 가능', '손님이 인원을 적기 전에는 주문할 수 없어요 (입장료 결제는 안 해도 돼요)', function () { return requireB; }, function (v) { requireB = v; tAsk.b.refresh(); });
+    var tAsk = tog('손님에게 인원 묻기', '손님 화면에서 인원을 물어봐요 (입장료와 별개)', function () { return askG; }, function (v) { askG = v; });
+    tAsk.b.lockWhen = function () { return requireB; }; tAsk.b.refresh();
+    var modeBtns = {};
+    var modeSeg = h('div', { class: 'al-seg', role: 'group', 'aria-label': '방식' }, [['per_person', '1인당'], ['per_table', '테이블당']].map(function (m) { var b = h('button', { class: 'btn', type: 'button', onclick: function () { mode = m[0]; dirty = true; ex(); } }, m[1]); modeBtns[m[0]] = b; return b; }));
+    function ex() {
+      Object.keys(modeBtns).forEach(function (k) { modeBtns[k].setAttribute('aria-pressed', String(k === mode)); });
+      var a = Number(amountIn.value), l = labelIn.value.trim() || '입장료';
+      example.textContent = Number.isInteger(a) && a >= 0 ? (mode === 'per_person' ? '예: 4명 테이블 → ' + won(a * 4) + ' (' + l + ' ' + won(a) + ' × 4명)' : '예: 몇 명이든 한 테이블에 ' + won(a)) : '금액을 100원 단위로 입력해 주세요.';
+    }
+    var save = X.abtn('btn btn-primary', '입장료 설정 저장', function () {
+      var a = Number(amountIn.value), l = labelIn.value.trim();
+      if (!Number.isInteger(a) || a < 0 || a > 100000 || a % 100 !== 0) { SC.fill(err, note('bad', '금액은 100원 단위, 0~100,000원이에요.')); return Promise.resolve(); }
+      if (l.length < 1 || l.length > 12) { SC.fill(err, note('bad', '이름은 1~12자로 입력해 주세요.')); return Promise.resolve(); }
+      if (enabled && a === 0) { SC.fill(err, note('bad', '금액이 0원이면 입장료 주문이 만들어지지 않아요. 금액을 넣거나 입장료를 꺼 주세요.')); return Promise.resolve(); }
+      SC.fill(err);
+      var c = cfgNow || {}, diff = {};
+      if (enabled !== !!c.enabled) diff.enabled = enabled;
+      if (mode !== c.mode) diff.mode = mode;
+      if (a !== c.amount) diff.amount = a;
+      if (l !== c.label) diff.label = l;
+      if (requireB !== !!c.requireBeforeOrder) diff.requireBeforeOrder = requireB;
+      if (askG !== (c.askGuest !== false)) diff.askGuest = askG;
+      if (!Object.keys(diff).length) { SC.toast('바뀐 내용이 없어요.'); return Promise.resolve(); }
+      return X.api('/api/staff/cover/settings', diff).then(function () { dirty = false; SC.toast('입장료 설정을 저장했어요', 'ok'); return X.refresh(); });
+    });
+    var el0 = h('div', { class: 'card' }, tEn.row, h('div', { class: 'lab' }, '방식', modeSeg), h('label', { class: 'lab' }, '금액 (100원 단위)', amountIn), h('label', { class: 'lab' }, '이름 (기본 "입장료")', labelIn), example,
+      tReq.row, tAsk.row, err, save, note('info', '설정을 바꿔도 이미 앉은 테이블의 입장료는 그대로예요. 새로 앉는 테이블부터 적용돼요.'));
+    return { el: el0, update: function (d) {
+      var c = d.cover || { enabled: false, mode: 'per_person', amount: 0, label: '입장료', requireBeforeOrder: false, askGuest: true };
+      cfgNow = c;
+      if (!dirty && !el0.contains(document.activeElement)) {
+        enabled = !!c.enabled; mode = c.mode || 'per_person'; requireB = !!c.requireBeforeOrder; askG = c.askGuest !== false;
+        amountIn.value = String(c.amount || 0); labelIn.value = c.label || '입장료';
+        tEn.b.refresh(); tReq.b.refresh(); tAsk.b.refresh(); ex();
+      }
+    } };
+  };
+
+  // real table's guest page in a new tab; orders placed there are real
+  function openGuestScreen(n) {
+    return SC.confirm({ title: n + '번 테이블 손님 화면을 열까요?', ok: '새 탭으로 열기', danger: true, message: '실제 테이블이에요. 여기서 넣은 주문은 실제 주문으로 들어가요.\n연습은 메뉴의 "손님 화면 테스트"를 써 주세요.' }).then(function (ok) {
+      if (!ok) return;
+      return SC.api('/api/staff/tables').then(function (r) {
+        var t = (r.tables || []).filter(function (x) { return x.number === n; })[0];
+        if (!t) { SC.toast('이 테이블의 주소를 찾을 수 없어요.', 'error'); return; }
+        window.open(/^https?:/.test(t.url) ? t.url : location.origin + t.url, '_blank', 'noopener');
+      }, toastErr);
+    });
   }
   function newKey() {
     try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) { /* fall through */ }
@@ -539,7 +987,7 @@
 
   // ---------------------------------------------------------------- refunds (section of the 입금 tab)
   var REFUND_WHY = { cancelled: '주문 취소', overpaid: '초과 입금', edit_lower_total: '주문 수정으로 금액이 줄었어요' };
-  SO.refundCount = function (d) { return (d.refunds || []).filter(function (r) { return !r.doneAt; }).length; };
+  SO.refundCount = function (d) { return (d.refunds || []).filter(function (r) { return !r.doneAt && !r.test && r.table !== 0; }).length; };
   SO.buildRefunds = function () {
     var openBox = h('div', { class: 'list' }), doneBox = h('div', { class: 'list' }), doneSum = h('summary', null, '환불 완료'), title = h('h3', { class: 'sec-title' }, '환불 대기');
     var wrap = h('div', { class: 'refunds', hidden: true }, title, openBox, h('details', { class: 'hist' }, doneSum, doneBox));
@@ -558,8 +1006,8 @@
   };
   function refundCard(r) {
     return h('article', { class: 'ocard refund' },
-      h('div', { class: 'ohead' }, h('div', { class: 'tno' }, h('span', { class: 'n', text: r.table }), h('span', { class: 'u', text: '번 테이블' })),
-        h('div', { class: 'ometa' }, h('div', { class: 'dep-amt' }, won(r.amount)), h('div', { class: 'line' }, h('span', { class: 'tag warn' }, REFUND_WHY[r.reason] || r.reason), h('span', { class: 'tag mute' }, '주문 #' + r.orderId), SC.timeEl(r.createdAt, 'ago')))),
+      h('div', { class: 'ohead' }, r.table === 0 ? h('div', { class: 'tno' }, h('span', { class: 'n tst', text: '테스트' })) : h('div', { class: 'tno' }, h('span', { class: 'n', text: r.table }), h('span', { class: 'u', text: '번 테이블' })),
+        h('div', { class: 'ometa' }, h('div', { class: 'dep-amt' }, won(r.amount)), h('div', { class: 'line' }, r.table === 0 ? h('span', { class: 'tag tst' }, '테스트') : null, h('span', { class: 'tag warn' }, REFUND_WHY[r.reason] || r.reason), h('span', { class: 'tag mute' }, '주문 #' + r.orderId), SC.timeEl(r.createdAt, 'ago')))),
       h('button', { class: 'btn btn-primary btn-block', type: 'button', onclick: function () { refundSheet(((X.S.data && X.S.data.refunds) || []).filter(function (x) { return x.id === r.id && !x.doneAt; })[0] || r); } }, '환불 완료 처리'));
   }
   // The entry (amount + order updatedAt) is captured when the sheet opens; the server must see exactly that amount.
@@ -613,6 +1061,53 @@
       h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { if (SO.goSettings) SO.goSettings('notice'); } }, '고치기'));
     return { el: box, update: function (d) { var n = d.notice; box.hidden = !n; if (n) { box.dataset.level = n.level; if (txt.textContent !== n.text) txt.textContent = n.text; } } };
   };
+  // ---- 설정 -> 테스트
+  SO.testSection = function () {
+    var tt = null;
+    var urlBox = h('code', null, '…');
+    var open = h('a', { class: 'btn', href: '#', target: '_blank', rel: 'noopener' }, '열기');
+    function copyUrl() {
+      var u = SC.testUrl || '';
+      function fallback() { var ta = h('textarea', { 'aria-hidden': 'true', style: 'position:fixed;opacity:0' }); ta.value = u; document.body.appendChild(ta); ta.select(); var ok = false; try { ok = document.execCommand('copy'); } catch (e) { ok = false; } ta.remove(); SC.toast(ok ? '주소를 복사했어요' : '복사하지 못했어요. 주소를 길게 눌러 복사해 주세요.', ok ? 'ok' : 'error'); }
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(u).then(function () { SC.toast('주소를 복사했어요', 'ok'); }, fallback); else fallback();
+    }
+    function tog(label, sub, get, set) {
+      var b = h('button', { class: 'btn al-sw', type: 'button', onclick: function () { set(!get()); } });
+      b.refresh = function () { b.setAttribute('aria-pressed', String(get())); b.textContent = get() ? '켜짐' : '꺼짐'; }; b.refresh();
+      return { row: h('div', { class: 'al-row' }, h('div', { class: 'al-txt' }, h('b', null, label), h('span', { class: 'muted' }, sub)), b), b: b };
+    }
+    function post(body) { return X.api('/api/staff/test/settings', body).then(function () { return X.refresh(); }, function (e) { toastErr(e); return X.refresh(); }); }
+    var tMem = tog('COMS 회원으로 보기', '테스트 화면에서만 회원 할인을 미리 볼 수 있어요 (동아리 서버를 부르지 않아요)', function () { return !!(tt && tt.memberPreview); }, function (v) { return post({ memberPreview: v }); });
+    var tKit = tog('주방에 테스트 주문 표시', '끄면 주방 화면에 테스트 주문이 안 보여요', function () { return !!(tt && tt.showInKitchen); }, function (v) { return post({ showInKitchen: v }); });
+    var tSnd = tog('테스트 주문도 소리 내기', '켜 두면 연습할 때도 실제 주문처럼 소리와 알림이 나요 (이 기기에만 적용)', function () { return SC.testSound(); }, function (v) { SC.testSound(v); tSnd.b.refresh(); });
+    var count = h('p', { class: 'muted' });
+    var reset = X.abtn('btn btn-danger', '테스트 데이터 지우기', function () {
+      var n = tt ? tt.orderCount : 0;
+      return SC.confirm({ title: '테스트 데이터를 지울까요?', danger: true, ok: '지우기', message: '테스트 주문 ' + n + '건과 테스트 쿠폰 · 게임 기록 · 호출 · 인원이 모두 지워져요. 실제 주문과 매출은 그대로예요.' }).then(function (ok) {
+        if (!ok) return;
+        return X.api('/api/staff/test/reset').then(function (r) { SC.toast('테스트 주문 ' + (r.orders != null ? r.orders : n) + '건을 지웠어요', 'ok'); return X.refresh(); }, toastErr);
+      });
+    });
+    var rotate = X.abtn('btn', '테스트 주소 재발급', function () {
+      return SC.confirm({ title: '테스트 주소를 새로 만들까요?', ok: '재발급', message: '이전 테스트 주소와 QR은 바로 열리지 않게 돼요. 열려 있는 테스트 화면도 닫혀요.' }).then(function (ok) {
+        if (!ok) return;
+        return X.api('/api/staff/test/rotate').then(function () { SC.toast('테스트 주소를 새로 만들었어요', 'ok'); return X.refresh(); }, toastErr);
+      });
+    });
+    var el0 = h('div', { class: 'card' },
+      h('p', null, '실제 매출·재고·쿠폰·랭킹에 섞이지 않는 연습용 테이블이에요.'), h('p', null, '주문 보드와 주방에는 \'테스트\' 표시로 나와요.'),
+      h('div', { class: 'test-url' }, urlBox, open, h('button', { class: 'btn', type: 'button', onclick: copyUrl }, '복사')),
+      tMem.row, tKit.row, tSnd.row, count, h('div', { class: 'al-seg' }, reset, rotate));
+    return { el: el0, update: function (d) {
+      tt = d.testTable || null;
+      if (!tt) { urlBox.textContent = '테스트 테이블을 사용할 수 없어요 (서버를 업데이트해 주세요).'; open.hidden = true; return; }
+      var u = SC.testUrl || tt.url;
+      if (urlBox.textContent !== u) urlBox.textContent = u;
+      open.href = u; open.hidden = false;
+      count.textContent = '지금 테스트 주문 ' + (tt.orderCount || 0) + '건 · 호출 ' + (tt.openCalls || 0) + '건' + (tt.people != null ? ' · 인원 ' + tt.people + '명' : '');
+      tMem.b.refresh(); tKit.b.refresh(); tSnd.b.refresh();
+    } };
+  };
   var NOTICE_PRESETS = ['재료가 거의 떨어졌어요', '주문이 밀려서 조금 늦어요', '10분 뒤에 다시 열어요'];
   SO.noticeSection = function () {
     var cur = null, dirty = false, level = 'info';
@@ -661,13 +1156,13 @@
     table_clear: '테이블 정리', table_unclear: '정리 되돌리기', table_move: '자리 이동', refund_done: '환불 완료', coupon_manual: '쿠폰 직접 발급', coupon_void: '쿠폰 무효', coupon_redeem: '쿠폰 사용',
     deposit_assign: '입금 연결', deposit_attach: '입금 알림 연결', deposit_dismiss: '입금 알림 무시', deposit_auto: '입금 자동 확인', deposit_auto_setting: '자동 확인 설정', deposit_secret_rotate: '알림 주소 재발급',
     menu_create: '메뉴 추가', menu_update: '메뉴 변경', pay_settings: '결제 설정', member_discount: '회원 할인 설정', notice: '공지', ordering: '주문 받기 켜기/끄기', table_count: '테이블 수', table_rotate: 'QR 교체',
-    wait_timeout: '노쇼 시간', reset: '전체 초기화', day_close: '영업 마감', login: '로그인', lockout: '로그인 잠금', staff_action: '직원 작업',
+    wait_timeout: '노쇼 시간', party_set: '인원 변경', cover_settings: '입장료 설정', cover_create: '입장료 생성', cover_update: '입장료 변경', cover_waive: '입장료 면제', cover_restore: '입장료 면제 취소', cover_intent_cancel: '낼게요 취소', payment_void: '결제 기록 취소', reset: '전체 초기화', day_close: '영업 마감', login: '로그인', lockout: '로그인 잠금', staff_action: '직원 작업',
   };
   SO.auditSection = function () {
     var list = h('div', { class: 'list' }), more = h('button', { class: 'btn btn-block', type: 'button' }, '더 보기'), next = null, loaded = false, opened = false;
     var box = h('details', { class: 'hist audit' }, h('summary', null, '작업 기록 보기'), h('p', { class: 'muted' }, '누가 언제 무엇을 바꿨는지 최신순으로 남아요. 읽기만 할 수 있어요.'), list, more);
     function row(e) {
-      return h('div', { class: 'row-card audit-row' }, h('div', { class: 'grow' }, h('span', { class: 'tag mute' }, AUDIT_LABEL[e.action] || e.action), h('span', null, e.summaryKo || e.summary || ''), h('span', { class: 'muted' }, SC.clock(e.at) + ' · ' + SC.agoText(e.at))));
+      return h('div', { class: 'row-card audit-row' }, h('div', { class: 'grow' }, h('span', { class: 'tag mute' }, AUDIT_LABEL[e.action] || e.action), e.test ? h('span', { class: 'tag tst' }, '테스트') : null, h('span', null, e.summaryKo || e.summary || ''), h('span', { class: 'muted' }, SC.clock(e.at) + ' · ' + SC.agoText(e.at))));
     }
     function load(reset) {
       var q = '/api/staff/audit?limit=50' + (!reset && next ? '&before=' + next : '');
@@ -773,6 +1268,7 @@
         function tile(k, v, c) { return h('div', { class: 'tile ' + (c || '') }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v)); }
         var body = [h('div', { class: 'tiles' }, tile('받은 돈', won(t.revenue), 'hl'), tile('주문', (t.orders || 0) + '건'), tile('환불 완료', won(t.refundsDone)), tile('환불 대기', won(t.refundDue), t.refundDue ? 'bad' : ''), tile('미결제', won(t.unpaidRevenue), t.unpaidRevenue ? 'bad' : ''), tile('미수금', won(t.writtenOff), t.writtenOff ? 'bad' : '')),
           SO.methodCard(r.byMethod),
+          SO.kindCard(r.byKind), SO.visitorsCard(r.visitors),
           r.forced ? note('warn', '정리 안 된 항목이 있는 채로 마감한 리포트예요.') : null,
           (r.unpaid || []).length ? h('div', null, h('h3', { class: 'sec-title' }, '마감 때 미결제 ' + r.unpaid.length + '건'), r.unpaid.map(function (x) { return h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('b', null, x.table + '번 · #' + x.orderId), h('span', { class: 'muted num' }, '합계 ' + won(x.total) + ' · 받은 ' + won(x.paidAmount))), h('b', { class: 'num' }, '남은 ' + won(x.balance))); })) : null,
           (r.writtenOff || []).length ? h('div', null, h('h3', { class: 'sec-title' }, '미수금 ' + r.writtenOff.length + '건'), r.writtenOff.map(function (x) { return h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('b', null, x.table + '번 · #' + x.orderId), h('span', { class: 'muted num' }, '합계 ' + won(x.total))), h('b', { class: 'num' }, won(x.balance))); })) : null,

@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS table_clears(id INTEGER PRIMARY KEY AUTOINCREMENT, ta
 CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, summary TEXT NOT NULL, summary_ko TEXT);
 CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, amount INTEGER NOT NULL, method TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS payments_o ON payments(order_id);
+CREATE TABLE IF NOT EXISTS seat_info(table_id INTEGER NOT NULL, seat INTEGER NOT NULL, people INTEGER, seated_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(table_id, seat));
+CREATE TABLE IF NOT EXISTS cover_intents(id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, device TEXT NOT NULL, payer TEXT NOT NULL, shares INTEGER NOT NULL, amount INTEGER NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open', payment_id INTEGER);
+CREATE INDEX IF NOT EXISTS cover_intents_ts ON cover_intents(table_id, seat);
 CREATE TABLE IF NOT EXISTS day_reports(id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, created_at INTEGER NOT NULL, summary TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS nicks_ts ON nicks(table_id, seat);
 CREATE INDEX IF NOT EXISTS plays_fin ON plays(finished_at);
@@ -147,7 +150,8 @@ function parseDeposit(rawText) {
     if ([...t].length < 2 || BANK_WORDS.has(t.toLowerCase()) || BANK_RE.test(t) || NOT_NAMES.test(t) || /(했습니다|했어요|되었습니다|완료|확인)$/.test(t)) continue;
     names.push({ t, start: m.index, end: m.index + m[0].length });
   }
-  const depositor = names[0]?.t ?? null;
+  let depositor = names[0]?.t ?? null;
+  const shown = depositor; // checked below with its invisible characters; what is stored / displayed loses them (an RLO would reorder the staff banner)
   if (depositor === null) reasons.push('no_name');
   else if (/\p{Nd}/u.test(depositor)) reasons.push('name_has_digit');
   else if (!/^[가-힣A-Za-z]{2,10}$/.test(depositor)) reasons.push('name_shape');
@@ -162,6 +166,7 @@ function parseDeposit(rawText) {
   const review = IGNORE_WORD_RE.test(text) || String(rawText).length > 300; // contains 입금 AND a reversal / correction / withdrawal word (or is oddly long): manual review, never auto
   if (IGNORE_WORD_RE.test(text)) reasons.unshift('ignore_word');
   const amount = pick ? pick.v : null;
+  depositor = shown === null ? null : shown.replace(INVISIBLE, '') || shown;
   return { kind: review ? 'review' : 'deposit', amount, depositor, autoEligible: !reasons.length && amount !== null, reasons };
 }
 const depKey = (x) => String(x).normalize('NFKC').replace(/\s+/g, '').toLowerCase();
@@ -196,6 +201,12 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     db.exec("UPDATE orders SET member_rule=json_object('mode','fixed','pct',0,'amount',member_discount,'maxDiscount',0,'minOrder',0,'legacy',1) WHERE member_discount>0 AND member_rule IS NULL");
   }
   if (!colsOf('audit_log').includes('summary_ko')) db.exec('ALTER TABLE audit_log ADD COLUMN summary_ko TEXT');
+  for (const [col, ddl] of [['set_by', 'TEXT'], ['set_at', 'INTEGER']]) if (!colsOf('seat_info').includes(col)) db.exec(`ALTER TABLE seat_info ADD COLUMN ${col} ${ddl}`);
+  if (!colsOf('audit_log').includes('test')) db.exec('ALTER TABLE audit_log ADD COLUMN test INTEGER NOT NULL DEFAULT 0');
+  for (const [tbl, col, ddl] of [['orders', 'kind', "TEXT NOT NULL DEFAULT 'food'"], ['orders', 'cover_mode', 'TEXT'], ['payments', 'shares', 'INTEGER'], ['payments', 'payer', 'TEXT'],
+    ['payments', 'notice_id', 'INTEGER'], ['payments', 'voided_at', 'INTEGER'], ['payments', 'void_reason', 'TEXT'], ['waitlist', 'seated_table', 'INTEGER']]) {
+    if (!colsOf(tbl).includes(col)) db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${ddl}`);
+  }
   if (!colsOf('order_items').includes('service')) db.exec('ALTER TABLE order_items ADD COLUMN service INTEGER NOT NULL DEFAULT 0');
   if (!colsOf('menu_items').includes('stock_left')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_left INTEGER');
   if (!colsOf('menu_items').includes('stock_auto')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_auto INTEGER NOT NULL DEFAULT 0');
@@ -217,11 +228,15 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const get = (sql, ...p) => st(sql).get(...p);
   const all = (sql, ...p) => st(sql).all(...p);
   const run = (sql, ...p) => st(sql).run(...p);
+  let txEvents = []; const outbox = []; // events of the running transaction; moved to the outbox only on a real COMMIT (never for a dry run or a rollback)
+  const emit = (type, data) => txEvents.push({ type, data });
+  const drainEvents = () => outbox.splice(0, outbox.length);
   let dryMode = false; // dry(): every tx runs and is rolled back, so a preview shows exactly what the real call would do and writes nothing
   const dry = (fn) => { dryMode = true; try { return fn(); } finally { dryMode = false; } };
   const tx = (fn) => {
     db.exec('BEGIN IMMEDIATE');
-    try { const r = fn(); db.exec(dryMode ? 'ROLLBACK' : 'COMMIT'); return r; } catch (e) { try { db.exec('ROLLBACK'); } catch { /* already rolled back */ } throw e; }
+    txEvents = [];
+    try { const r = fn(); db.exec(dryMode ? 'ROLLBACK' : 'COMMIT'); if (!dryMode) outbox.push(...txEvents); txEvents = []; return r; } catch (e) { try { db.exec('ROLLBACK'); } catch { /* already rolled back */ } throw e; }
   };
   const now = () => Date.now();
   const ph = (n) => Array.from({ length: n }, () => '?').join(',');
@@ -280,6 +295,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   for (let i = 1; i <= tableCount; i++) {
     if (!get('SELECT 1 FROM tables WHERE id=?', i)) run('INSERT INTO tables(id, token) VALUES(?,?)', i, crypto.randomBytes(12).toString('base64url'));
   }
+  // table 0 = the staff-only guest TEST table ("테스트"): never counted in tableCount, never printed, everything created there is test data (table_id = 0)
+  if (!get('SELECT 1 FROM tables WHERE id=0')) run('INSERT INTO tables(id, token) VALUES(0,?)', crypto.randomBytes(12).toString('base64url'));
 
   // ---------- helpers ----------
   const tableRow = (id) => get('SELECT * FROM tables WHERE id=? AND id<=?', id, tableCount) || fail(404, 'no_table', '알 수 없는 테이블입니다.');
@@ -323,9 +340,21 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const W = (n) => `${Number(n).toLocaleString('en-US')}원`;
   const MKO = { transfer: '계좌이체', cash: '현금', other: '기타' };
   const SKO = { pending: '접수 대기', cooking: '조리 중', served: '서빙 완료', cancelled: '취소' };
-  function audit(action, target, summary, ko) { // `summary` machine text (English), `ko` the Korean sentence staff read; never secrets
-    run('INSERT INTO audit_log(at,action,target,summary,summary_ko) VALUES(?,?,?,?,?)', now(), String(action), String(target ?? ''), String(summary ?? '').slice(0, 200), String(ko ?? summary ?? '').slice(0, 200));
+  // does an audit target belong to the TEST table (0)? ("table 0", an order or a coupon of table 0)
+  function isTestTarget(target) {
+    const s = String(target ?? '');
+    if (/^table 0(\D|$)/.test(s)) return true;
+    let m = /^order #(\d+)/.exec(s);
+    if (m) return get('SELECT table_id FROM orders WHERE id=?', Number(m[1]))?.table_id === 0;
+    m = /^coupon ([A-Z0-9]+)/.exec(s);
+    if (m) return get('SELECT table_id FROM coupons WHERE code=?', m[1])?.table_id === 0;
+    return false;
+  }
+  function audit(action, target, summary, ko) { // `summary` machine text (English), `ko` the Korean sentence staff read; never secrets. Rows about the test table carry test=1.
+    const isTest = isTestTarget(target) ? 1 : 0;
+    run('INSERT INTO audit_log(at,action,target,summary,summary_ko,test) VALUES(?,?,?,?,?,?)', now(), String(action), String(target ?? ''), String(summary ?? '').slice(0, 200), (isTest ? '[테스트] ' : '') + String(ko ?? summary ?? '').slice(0, 190), isTest);
     run('DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - 5000');
+    if (isTest) run('DELETE FROM audit_log WHERE test=1 AND id <= (SELECT MAX(id) FROM audit_log WHERE test=1) - 500'); // at most 500 test rows are kept
   }
   const nextTs = (o) => Math.max(now(), (o ? o.updated_at : 0) + 1); // updated_at strictly increases per order (stale detection)
   // re-reads the order (call inside a tx) and rejects a stale client view: 409 stale + the current order
@@ -376,20 +405,25 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   const clearWrittenOff = (oid) => run('UPDATE orders SET written_off=0, written_off_at=NULL, written_off_clear=NULL WHERE id=? AND written_off=1', oid);
   // adds money received for an order (inside a tx): partial payments keep the order unpaid with a balance, overpayments create a refund entry
-  function addPayment(o, amount, method, by, ts, noticeId) {
+  function addPayment(o, amount, method, by, ts, noticeId, extra = {}) { // returns the ledger row id (null for a 0 won payment)
     const paidAmount = o.paid_amount + amount;
     const net = heldOf({ ...o, paid_amount: paidAmount });
     const flag = net >= o.total && (paidAmount > 0 || o.total === 0) ? 1 : 0;
     run('UPDATE orders SET paid=?, paid_amount=?, paid_method=?, paid_at=?, paid_by=?, notice_id=COALESCE(?, notice_id), updated_at=? WHERE id=?',
       flag, paidAmount, method, flag ? ts : o.paid_at, by, noticeId ?? null, nextTs(o), o.id);
-    if (amount > 0) run('INSERT INTO payments(order_id,amount,method,at) VALUES(?,?,?,?)', o.id, amount, method, ts); // per-payment ledger (sales by method)
+    let pid = null;
+    if (amount > 0) {
+      pid = Number(run('INSERT INTO payments(order_id,amount,method,at,shares,payer,notice_id) VALUES(?,?,?,?,?,?,?)', o.id, amount, method, ts, extra.shares ?? null, extra.payer ?? null, noticeId ?? null).lastInsertRowid); // per-payment ledger (sales by method)
+      emit('payment', { orderId: o.id, table: o.table_id, amount, method, auto: by === 'auto', kind: o.kind || 'food', ...(extra.shares ? { shares: extra.shares } : {}), test: o.table_id === 0 });
+    }
     if (flag) clearWrittenOff(o.id);
     syncRefund(o.id, 'overpaid');
+    return pid;
   }
   // guests get visible items only; admin=true (staff) also gets hidden ones plus ids/sort/usage
   function menuView(admin = false) {
     const cats = all('SELECT id, name, sort FROM menu_categories ORDER BY sort, id');
-    const rows = all(`SELECT i.*, c.name cat${admin ? ', (SELECT COUNT(*) FROM order_items oi WHERE oi.item_id=i.id) used' : ''} FROM menu_items i JOIN menu_categories c ON c.id=i.category_id ORDER BY c.sort, c.id, i.sort, i.rowid`);
+    const rows = all(`SELECT i.*, c.name cat${admin ? ', (SELECT COUNT(*) FROM order_items oi JOIN orders oo ON oo.id=oi.order_id WHERE oi.item_id=i.id AND oo.table_id>0) used' : ''} FROM menu_items i JOIN menu_categories c ON c.id=i.category_id ORDER BY c.sort, c.id, i.sort, i.rowid`);
     const vis = admin ? rows : rows.filter((r) => !r.hidden);
     const out = {
       categories: (admin ? cats : cats.filter((c) => vis.some((r) => r.category_id === c.id))).map((c) => c.name),
@@ -479,7 +513,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   function deleteItem(id) {
     if (!get('SELECT 1 FROM menu_items WHERE id=?', id)) fail(404, 'no_item', '없는 메뉴입니다.');
-    if (get('SELECT 1 FROM order_items WHERE item_id=? LIMIT 1', id)) fail(409, 'in_use', '주문 내역이 있는 메뉴는 삭제할 수 없습니다. 숨김 처리해 주세요.');
+    if (get('SELECT 1 FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.item_id=? AND o.table_id>0 LIMIT 1', id)) fail(409, 'in_use', '주문 내역이 있는 메뉴는 삭제할 수 없습니다. 숨김 처리해 주세요.');
     const photo = get('SELECT photo FROM menu_items WHERE id=?', id).photo;
     run('DELETE FROM menu_items WHERE id=?', id);
     removePhotoFile(photo);
@@ -612,7 +646,23 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function setOrdering(open) { tx(() => { const was = orderingOpen(); run('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v', 'ordering_open', open ? '1' : '0'); audit('ordering', 'settings', `${was}→${!!open}`, `주문 받기 ${open ? '켬' : '끔'}`); }); }
 
   const ITEMS_SQL = 'SELECT item_id, name, unit_price, qty, service FROM order_items WHERE order_id=? ORDER BY rowid';
-  const loadOrders = (rows) => rows.map((o) => {
+  const coverUnit = (oid) => get('SELECT unit_price, qty, name FROM order_items WHERE order_id=?', oid);
+  // shares are counted from the MONEY actually held (received minus refunds handed back), uncapped: a refund that was paid out frees its shares again
+  const paidShares = (oid) => { const o = get('SELECT * FROM orders WHERE id=?', oid); const it = o && coverUnit(oid); return it && it.unit_price > 0 ? Math.floor(Math.max(0, heldOf(o)) / it.unit_price) : 0; };
+  const coverFields = (o, view) => {
+    const it = coverUnit(o.id) || { unit_price: 0, qty: 0 };
+    const perPerson = o.cover_mode === 'per_person';
+    const raw = perPerson ? paidShares(o.id) : null; // shares the money held pays for
+    const ledger = perPerson ? get('SELECT COALESCE(SUM(shares),0) s FROM payments WHERE order_id=? AND voided_at IS NULL', o.id).s : 0;
+    const paid = perPerson ? Math.min(raw, it.qty) : null; // after the headcount dropped below the shares already paid, `over` says by how many (the money excess is a refund entry)
+    return { unitPrice: it.unit_price, coverMode: o.cover_mode, waived: o.status === 'cancelled', shares: perPerson ? { total: it.qty, paid, left: Math.max(0, it.qty - raw), over: Math.max(0, Math.min(raw, ledger) - it.qty) } : null };
+  };
+  const paymentsOf = (oid, view) => {
+    const rows = all('SELECT * FROM payments WHERE order_id=? AND voided_at IS NULL ORDER BY id', oid);
+    // guests of the same table see how many shares were paid and who paid (their own party); never amounts, methods or ids
+    return view === 'guest' ? rows.map((p) => ({ shares: p.shares, payer: p.payer, at: p.at })) : rows.map((p) => ({ id: p.id, amount: p.amount, shares: p.shares, method: p.method, payer: p.payer, at: p.at }));
+  };
+  const loadOrders = (rows, view = 'staff') => rows.map((o) => {
     const cancelled = o.status === 'cancelled';
     const refunded = refundDoneSum(o.id);
     const target = cancelled ? o.paid_amount - refunded : Math.max(0, o.paid_amount - refunded - o.total);
@@ -629,6 +679,9 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       refundedAmount: refunded, refundDue: Math.max(0, target),
       writtenOff: !!o.written_off && !o.paid && !cancelled,
       createdAt: o.created_at, updatedAt: o.updated_at, cookingAt: o.cooking_at,
+      kind: o.kind || 'food', test: o.table_id === 0,
+      ...(o.kind === 'cover' ? coverFields(o, view) : {}),
+      ...(view === 'staff' || o.kind === 'cover' ? { payments: paymentsOf(o.id, view) } : {}),
     };
   });
   const orderById = (id) => loadOrders([get('SELECT * FROM orders WHERE id=?', id)])[0];
@@ -648,6 +701,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const dup = get('SELECT id FROM orders WHERE table_id=? AND seat=? AND key=?', tableId, t.seat, key);
     if (dup) return { order: orderById(dup.id), duplicate: true };
     if (!staff && !orderingOpen()) fail(409, 'closed', '지금은 주문을 받지 않습니다.'); // staff may order while ordering is closed
+    if (!staff) { const cs = coverSettings(); if (cs.enabled && cs.requireBeforeOrder && !seatPeople(tableId, t.seat)) fail(409, 'party_required', '먼저 인원 수를 알려 주세요.'); } // never requires PAYMENT first
     const lines = body.items;
     if (!Array.isArray(lines) || lines.length < 1) fail(400, 'bad_items', '주문할 메뉴를 담아 주세요.');
     if (lines.length > 30) fail(400, 'too_many_lines', '한 번에 30종류까지 주문할 수 있습니다.');
@@ -665,7 +719,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (unknown.length) fail(400, 'unknown_item', '없는 메뉴가 있습니다.', { ids: unknown });
     const gone = lines.filter((l) => rows.get(l.id).sold_out && !rows.get(l.id).hidden).map((l) => l.id); // hidden items (staff only) are not sold-out checked
     if (gone.length) fail(409, 'sold_out', '품절된 메뉴가 있습니다.', { ids: gone, names: gone.map((id) => rows.get(id).name) });
-    const short = lines.filter((l) => rows.get(l.id).stock_left != null && l.qty > rows.get(l.id).stock_left);
+    const short = tableId === 0 ? [] : lines.filter((l) => rows.get(l.id).stock_left != null && l.qty > rows.get(l.id).stock_left);
     if (short.length) {
       fail(409, 'insufficient_stock', '남은 수량이 부족한 메뉴가 있습니다.', {
         id: short[0].id, left: rows.get(short[0].id).stock_left, ids: short.map((l) => l.id), names: short.map((l) => rows.get(l.id).name),
@@ -682,7 +736,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     let depositor = null;
     if (body.depositor != null && body.depositor !== '') depositor = cleanDepositor(body.depositor);
     else if (!staff && payAll().requireDepositor) fail(400, 'depositor_required', '입금자명을 입력해 주세요.');
-    if (get('SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=?', tableId, t.seat).n >= MAX_ORDERS_PER_SEAT * (staff ? 2 : 1)) {
+    if (get("SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=? AND kind!='cover'", tableId, t.seat).n >= MAX_ORDERS_PER_SEAT * (staff ? 2 : 1)) {
       fail(429, 'too_many_orders', '이 테이블에서 받을 수 있는 주문 수를 넘었습니다. 직원에게 문의해 주세요.');
     }
     if (!staff && get("SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=? AND status='pending'", tableId, t.seat).n >= MAX_PENDING_PER_TABLE) {
@@ -737,12 +791,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       for (const l of lines) {
         const m = rows.get(l.id); // name and unit price are frozen into the order here
         run('INSERT INTO order_items(order_id,item_id,name,unit_price,qty) VALUES(?,?,?,?,?)', oid, m.id, m.name, m.price, l.qty);
-        takeStock(m.id, l.qty);
+        if (tableId > 0) takeStock(m.id, l.qty); // the test table never consumes stock
       }
       if (coupon && run("UPDATE coupons SET status='used', order_id=?, used_at=? WHERE code=? AND status='issued'", oid, ts, coupon.code).changes !== 1) {
         fail(409, 'coupon_used', '이미 사용된 쿠폰입니다.');
       }
       if (staff) audit('order_create_staff', `order #${oid}`, `table ${tableId}, total ${total}${cooking ? ', cooking' : ''}`, `주문 #${oid} 직원 입력 · ${tableId}번 테이블 · ${W(total)}${cooking ? ' · 바로 접수' : ''}`);
+      ensureCover(tableId, t.seat, ts); // per-table cover: the first order of the seat creates it; per-person: when people is already set
       preview = orderById(Number(oid));
       return Number(oid);
     });
@@ -753,6 +808,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (!ORDER_STATUSES.includes(status)) fail(400, 'bad_status', '상태 값이 올바르지 않습니다.');
     return tx(() => {
       const o = freshOrder(id, expectedUpdatedAt);
+      if (o.kind === 'cover') fail(409, 'cover_order', '입장료 주문은 상태를 바꿀 수 없습니다. 면제는 입장료 면제 기능을 쓰세요.');
       if (o.status === 'cancelled') fail(409, 'order_cancelled', '취소된 주문은 바꿀 수 없습니다.');
       if (o.status !== status) {
         const ts = nextTs(o);
@@ -760,7 +816,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         if (status !== 'cancelled') audit('order_status', `order #${id}`, `${o.status}→${status}`, `주문 #${id} ${SKO[o.status]} → ${SKO[status]}`);
         if (status === 'cancelled') {
           if (o.coupon_code) run("UPDATE coupons SET status='issued', order_id=NULL, used_at=NULL WHERE code=? AND order_id=?", o.coupon_code, id);
-          for (const l of all('SELECT item_id, qty FROM order_items WHERE order_id=?', id)) giveStock(l.item_id, l.qty);
+          if (o.table_id > 0) for (const l of all('SELECT item_id, qty FROM order_items WHERE order_id=?', id)) giveStock(l.item_id, l.qty);
           syncRefund(id, 'cancelled'); // money already received is now owed back
           audit('order_cancel', `order #${id}`, `table ${o.table_id}, paid ${o.paid_amount} won`, `주문 #${id} 취소 · ${o.table_id}번 테이블${heldOf(o) > 0 ? ` · 환불 대기 ${W(heldOf(o))}` : ''}`);
         }
@@ -780,17 +836,30 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (o.status === 'cancelled') fail(409, 'order_cancelled', '취소된 주문입니다.');
       const ts = now();
       if (paid) {
-        if (o.paid && opts.amount == null) fail(409, 'stale', '이미 입금 확인된 주문입니다.', { order: orderById(id) }); // a second tap on another phone must not double-apply
-        const amount = opts.amount ?? balanceOf(o);
+        const hasShares = opts.shares != null;
+        if (o.paid && opts.amount == null && !hasShares) fail(409, 'stale', '이미 입금 확인된 주문입니다.', { order: orderById(id) }); // a second tap on another phone must not double-apply
+        let amount = opts.amount ?? balanceOf(o);
+        let shares = null;
+        if (hasShares) { // 각자 내기: only for per-person cover orders, amount = shares x unit price
+          if (o.kind !== 'cover' || o.cover_mode !== 'per_person') fail(400, 'bad_shares', '입장료(1인당) 주문에만 인원 수(shares)로 받을 수 있습니다.');
+          if (!Number.isInteger(opts.shares) || opts.shares < 1 || opts.shares > 1000) fail(400, 'bad_shares', 'shares는 1 이상의 정수여야 합니다.');
+          const cu = coverUnit(o.id);
+          const leftNow = Math.max(0, cu.qty - paidShares(o.id));
+          if (opts.shares > leftNow) fail(400, 'too_many_shares', `남은 인원(${leftNow}명)보다 많이 받을 수 없습니다.`, { left: leftNow });
+          const want = opts.shares * cu.unit_price;
+          if (opts.amount != null && opts.amount !== want) fail(400, 'bad_shares', `금액은 인원 수 x 1인 요금(${W(want)})과 같아야 합니다.`);
+          amount = want; shares = opts.shares;
+        }
+        const payer = opts.payer == null || opts.payer === '' ? null : cleanPayer(opts.payer);
         if (amount === 0 && o.total > 0) fail(400, 'bad_amount', '입금액은 0보다 커야 합니다.');
-        addPayment(o, amount, method, 'staff', ts, null);
-        audit('order_paid', `order #${id}`, `${method} ${amount} won (total ${o.total})`, `주문 #${id} 입금 확인 · ${MKO[method]} ${W(amount)} · 잔액 ${W(balanceOf(get('SELECT * FROM orders WHERE id=?', id)))}`);
+        addPayment(o, amount, method, 'staff', ts, null, { shares, payer });
+        audit('order_paid', `order #${id}`, `${method} ${amount} won (total ${o.total})${shares ? `, ${shares} shares` : ''}`, `주문 #${id} 입금 확인 · ${MKO[method]} ${W(amount)}${shares ? ` · ${shares}명분` : ''}${payer ? ` · ${payer}` : ''} · 잔액 ${W(balanceOf(get('SELECT * FROM orders WHERE id=?', id)))}`);
       } else {
         if (refundDoneSum(id) > 0) fail(409, 'has_refunds', '환불이 완료된 주문은 입금 취소할 수 없습니다.');
         // undoing an automatic confirmation hands the deposit notice back to staff
         run("UPDATE deposit_notices SET status='pending', order_id=NULL, matched_at=NULL, matched_by=NULL WHERE order_id=? AND status='matched'", id); // EVERY notice linked to the order
         run('UPDATE orders SET paid=0, paid_amount=0, paid_method=NULL, paid_at=NULL, paid_by=NULL, notice_id=NULL, updated_at=? WHERE id=?', nextTs(o), id);
-        run('DELETE FROM payments WHERE order_id=?', id);
+        run('DELETE FROM payments WHERE order_id=? AND voided_at IS NULL', id);
         syncRefund(id, 'overpaid');
         audit('order_unpaid', `order #${id}`, `payments of ${o.paid_amount} won cleared`, `주문 #${id} 입금 취소 · ${W(o.paid_amount)} 되돌림`);
       }
@@ -811,6 +880,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     }
     return tx(() => {
       const o = freshOrder(id, expectedUpdatedAt);
+      if (o.kind === 'cover') fail(409, 'cover_order', '입장료 주문은 메뉴 수정으로 고칠 수 없습니다. 인원 수를 바꾸면 자동으로 다시 계산됩니다.');
       if (o.status === 'cancelled') fail(409, 'order_cancelled', '취소된 주문은 고칠 수 없습니다.');
       const cur = all('SELECT * FROM order_items WHERE order_id=? ORDER BY rowid', id);
       const key = (r) => (r.service ? 's:' : 'n:') + r.item_id;
@@ -834,8 +904,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       // stock counters follow the change in quantity per item (service lines count: the item still leaves the kitchen)
       const sum = (rowsList) => { const m = new Map(); for (const r of rowsList) m.set(r.item_id, (m.get(r.item_id) || 0) + r.qty); return m; };
       const before = sum(cur); const after = sum(next);
-      for (const [item, b] of before) if ((after.get(item) || 0) < b) giveStock(item, b - (after.get(item) || 0));
-      for (const [item, a] of after) if (a > (before.get(item) || 0)) takeStock(item, a - (before.get(item) || 0));
+      if (o.table_id > 0) {
+        for (const [item, b] of before) if ((after.get(item) || 0) < b) giveStock(item, b - (after.get(item) || 0));
+        for (const [item, a] of after) if (a > (before.get(item) || 0)) takeStock(item, a - (before.get(item) || 0));
+      }
       run('DELETE FROM order_items WHERE order_id=?', id);
       for (const l of next) run('INSERT INTO order_items(order_id,item_id,name,unit_price,qty,service) VALUES(?,?,?,?,?,?)', id, l.item_id, l.name, l.unit_price, l.qty, l.service);
       const subtotal = next.reduce((n, l) => n + (l.service ? 0 : l.unit_price * l.qty), 0);
@@ -860,12 +932,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (!Number.isInteger(qty) || qty < 1 || qty > 20) fail(400, 'bad_qty', '수량은 1~20 사이 정수여야 합니다.');
     return tx(() => {
       const o = freshOrder(id, expectedUpdatedAt);
+      if (o.kind === 'cover') fail(409, 'cover_order', '입장료 주문에는 서비스를 넣을 수 없습니다.');
       if (o.status === 'cancelled') fail(409, 'order_cancelled', '취소된 주문입니다.');
       const m = itemRow(itemId) || fail(400, 'unknown_item', '없는 메뉴입니다.', { ids: [itemId] });
       if (m.sold_out && !m.hidden) fail(409, 'sold_out', '품절된 메뉴가 있습니다.', { ids: [itemId], names: [m.name] });
       const ex = get('SELECT rowid AS rid, qty FROM order_items WHERE order_id=? AND item_id=? AND service=1', id, itemId);
       if (ex && ex.qty + qty > 20) fail(400, 'bad_qty', '서비스 수량은 한 메뉴당 20개까지입니다.');
-      takeStock(itemId, qty);
+      if (o.table_id > 0) takeStock(itemId, qty);
       if (ex) run('UPDATE order_items SET qty=qty+? WHERE rowid=?', qty, ex.rid);
       else run('INSERT INTO order_items(order_id,item_id,name,unit_price,qty,service) VALUES(?,?,?,0,?,1)', id, itemId, m.name, qty);
       run('UPDATE orders SET updated_at=? WHERE id=?', nextTs(o), id);
@@ -878,6 +951,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (!Number.isInteger(to)) fail(400, 'bad_tables', '옮길 테이블 번호가 올바르지 않습니다.');
     return tx(() => {
       const o = freshOrder(id, expectedUpdatedAt);
+      if (o.table_id === 0 || to === 0) fail(409, 'test_table', '테스트 테이블과 실제 테이블 사이에서는 옮길 수 없습니다.');
+      if (o.kind === 'cover') fail(409, 'cover_order', '입장료 주문만 따로 옮길 수 없습니다. 테이블 옮기기를 쓰세요.');
       if (o.status === 'cancelled') fail(409, 'order_cancelled', '취소된 주문은 옮길 수 없습니다.');
       if (!orderVisible(o)) fail(404, 'no_order', '없는 주문입니다.');
       const B = tableRow(to);
@@ -898,6 +973,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function setDepositor(tableId, orderId, value) {
     const t = tableRow(tableId);
     const o = get('SELECT * FROM orders WHERE id=? AND table_id=? AND seat=?', orderId, tableId, t.seat) || fail(404, 'no_order', '없는 주문입니다.');
+    if (o.kind === 'cover') fail(409, 'cover_order', '입장료 주문입니다.');
     if (o.status === 'cancelled') fail(409, 'order_cancelled', '취소된 주문입니다.');
     if (o.paid) fail(409, 'already_paid', '이미 입금 확인된 주문은 바꿀 수 없습니다.');
     run('UPDATE orders SET depositor=?, updated_at=? WHERE id=?', cleanDepositor(value), nextTs(o), orderId);
@@ -906,8 +982,303 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function guestCancel(tableId, id) {
     const t = tableRow(tableId);
     const o = get('SELECT * FROM orders WHERE id=? AND table_id=? AND seat=?', id, tableId, t.seat) || fail(404, 'no_order', '없는 주문입니다.');
-    if (o.status !== 'pending' || o.paid || o.paid_amount > 0) fail(409, 'not_cancellable', '이미 접수되었거나 결제된 주문은 직원에게 문의해 주세요.');
+    if (o.kind === 'cover' || o.status !== 'pending' || o.paid || o.paid_amount > 0) fail(409, 'not_cancellable', '이미 접수되었거나 결제된 주문은 직원에게 문의해 주세요.');
     return setStatus(id, 'cancelled');
+  }
+
+  // ======================= headcount, cover charge (입장료), share payments (각자 내기) =======================
+  const PEOPLE_MAX = 30;
+  const OPEN_INTENT_MS = 30 * 60000;
+  const COVER_DEFAULT = { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료' };
+  function coverSettings() {
+    const v = setting('cover', null);
+    try { return { ...COVER_DEFAULT, ...(v ? JSON.parse(v) : {}) }; } catch { return { ...COVER_DEFAULT }; }
+  }
+  function setCoverSettings(body) {
+    const cur = coverSettings();
+    const has = (k) => Object.hasOwn(body, k);
+    if (!['enabled', 'mode', 'amount', 'requireBeforeOrder', 'askGuest', 'label'].some(has)) fail(400, 'nothing_to_update', '바꿀 항목이 없습니다.');
+    const next = { ...cur };
+    for (const [k, code] of [['enabled', 'bad_enabled'], ['requireBeforeOrder', 'bad_require_before_order'], ['askGuest', 'bad_ask_guest']]) {
+      if (has(k)) { if (typeof body[k] !== 'boolean') fail(400, code, `${k}는 true/false여야 합니다.`); next[k] = body[k]; }
+    }
+    if (has('mode')) { if (body.mode !== 'per_person' && body.mode !== 'per_table') fail(400, 'bad_mode', "mode는 'per_person' 또는 'per_table' 여야 합니다."); next.mode = body.mode; }
+    if (has('amount')) {
+      if (!Number.isInteger(body.amount) || body.amount < 0 || body.amount > 100000 || body.amount % 100 !== 0) fail(400, 'bad_amount', '금액은 0~100,000원 사이 100원 단위여야 합니다.');
+      next.amount = body.amount;
+    }
+    if (has('label')) next.label = cleanLabel(body.label, 1, 12, 'bad_label', '입장료 이름');
+    tx(() => {
+      run("INSERT INTO settings(k,v) VALUES('cover',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", JSON.stringify(next));
+      const ch = Object.keys(next).filter((k) => next[k] !== cur[k]);
+      const KOF = { enabled: '사용', mode: '방식', amount: '금액', requireBeforeOrder: '주문 전 인원 필수', askGuest: '손님에게 묻기', label: '이름' };
+      audit('cover_settings', 'settings', ch.map((k) => `${k} ${cur[k]}→${next[k]}`).join(', ') || 'no change',
+        `입장료 설정 · ${next.enabled ? '켜짐' : '꺼짐'} · ${next.mode === 'per_person' ? '1인당' : '테이블당'} ${W(next.amount)}${ch.length ? ` · 바뀐 항목: ${ch.map((k) => KOF[k]).join(', ')}` : ''}`);
+    });
+    return coverSettings();
+  }
+  const seatRow = (tid, seat) => get('SELECT * FROM seat_info WHERE table_id=? AND seat=?', tid, seat);
+  const seatPeople = (tid, seat) => seatRow(tid, seat)?.people ?? null;
+  const coverOrderOf = (tid, seat) => get("SELECT * FROM orders WHERE table_id=? AND seat=? AND kind='cover' ORDER BY (status='cancelled'), id LIMIT 1", tid, seat); // the live one first (a waived cover that was moved in may sit beside it)
+  const openIntents = (tid, seat) => all("SELECT * FROM cover_intents WHERE table_id=? AND seat=? AND status='open' AND created_at>? ORDER BY id", tid, seat, now() - OPEN_INTENT_MS);
+  // a payer name is typed by a guest or staff: cleaned like a depositor (1..10 visible characters)
+  function cleanPayer(v) {
+    if (typeof v !== 'string') fail(400, 'bad_payer', '낸 사람 이름이 올바르지 않습니다.');
+    const s = v.replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
+    if ([...s].length < 1 || [...s].length > 10 || !/[\p{L}\p{N}\p{S}\p{P}]/u.test(s.normalize('NFKC').replace(INVISIBLE, ''))) fail(400, 'bad_payer', '낸 사람 이름은 보이는 글자 1~10자로 입력해 주세요.');
+    return s;
+  }
+  // recomputes paid flag / written-off / refund entries of ONE order after its total or its money changed (inside a tx)
+  function resettle(id, reason) {
+    const o = get('SELECT * FROM orders WHERE id=?', id);
+    if (o.status !== 'cancelled') {
+      const flag = heldOf(o) >= o.total && (o.paid_amount > 0 || (o.paid && o.total === 0)) ? 1 : 0;
+      run('UPDATE orders SET paid=?, paid_at=? WHERE id=?', flag, flag ? (o.paid && o.paid_at ? o.paid_at : now()) : null, id);
+      if (flag) clearWrittenOff(id);
+    } else if (o.paid && heldOf(o) <= 0) run('UPDATE orders SET paid=0, paid_at=NULL WHERE id=?', id); // a cancelled order whose money is gone (void / refund done) is no longer "paid"
+    syncRefund(id, reason);
+  }
+  // exactly ONE cover order per seat (UNIQUE key cover-<table>-<seat>); created / re-priced only from here
+  function ensureCover(tableId, seat, ts) {
+    const cs = coverSettings();
+    const people = seatPeople(tableId, seat);
+    const o = coverOrderOf(tableId, seat);
+    if (o) { // an existing cover order follows the headcount (with the unit price it was created with) even if the setting was switched off later; a waived one stays waived
+      if (o.status === 'cancelled' || o.cover_mode !== 'per_person' || people == null) return o.id;
+      const it = coverUnit(o.id);
+      if (it.qty !== people) {
+        const total = it.unit_price * people;
+        run('UPDATE order_items SET qty=? WHERE order_id=?', people, o.id);
+        run('UPDATE orders SET subtotal=?, total=?, updated_at=? WHERE id=?', total, total, nextTs(o), o.id);
+        resettle(o.id, 'edit_lower_total');
+        { const o2 = get('SELECT * FROM orders WHERE id=?', o.id); const left = Math.max(0, people - paidShares(o.id)); // open guest intents that no longer fit the new headcount are closed
+          for (const i of openIntents(tableId, seat)) if (i.shares > left || i.amount > balanceOf(o2)) run("UPDATE cover_intents SET status='cancelled' WHERE id=?", i.id); }
+        audit('cover_update', `table ${tableId}`, `people ${it.qty}→${people}, total ${o.total}→${total}`, `${tableId}번 테이블 ${it.name} 다시 계산 · ${it.qty}명 → ${people}명 · ${W(o.total)} → ${W(total)}`);
+      }
+      return o.id;
+    }
+    if (!cs.enabled || cs.amount <= 0) return null;
+    const perPerson = cs.mode === 'per_person';
+    if (perPerson && people == null) return null;
+    const qty = perPerson ? people : 1;
+    const total = cs.amount * qty;
+    const oid = Number(run("INSERT INTO orders(table_id,seat,key,status,subtotal,discount,member_discount,total,note,created_at,updated_at,created_by,kind,cover_mode) VALUES(?,?,?,'served',?,0,0,?,'',?,?,'system','cover',?)",
+      tableId, seat, `cover-${tableId}-${seat}`, total, total, ts, ts, cs.mode).lastInsertRowid);
+    run('INSERT INTO order_items(order_id,item_id,name,unit_price,qty) VALUES(?,?,?,?,?)', oid, 'cover', cs.label, cs.amount, qty);
+    audit('cover_create', `table ${tableId}`, `${cs.mode} ${cs.amount} x ${qty}`, `${tableId}번 테이블 ${cs.label} 부과 · ${cs.mode === 'per_person' ? `${W(cs.amount)} x ${qty}명` : '테이블당'} = ${W(total)}`);
+    return oid;
+  }
+  function applyPeople(t, people, ts, by = 'staff') { // inside a tx; returns the previous headcount
+    const cur = seatRow(t.id, t.seat);
+    if (cur) run('UPDATE seat_info SET people=?, updated_at=?, set_by=?, set_at=? WHERE table_id=? AND seat=?', people, Math.max(ts, cur.updated_at + 1), by, ts, t.id, t.seat);
+    else {
+      const first = get("SELECT MIN(created_at) m FROM orders WHERE table_id=? AND seat=? AND kind!='cover'", t.id, t.seat).m;
+      run('INSERT INTO seat_info(table_id,seat,people,seated_at,updated_at,set_by,set_at) VALUES(?,?,?,?,?,?,?)', t.id, t.seat, people, Math.min(ts, first ?? ts), ts, by, ts);
+    }
+    ensureCover(t.id, t.seat, ts);
+    return cur ? cur.people : null;
+  }
+  const checkPeople = (p) => { if (!Number.isInteger(p) || p < 1 || p > PEOPLE_MAX) fail(400, 'bad_people', `인원은 1~${PEOPLE_MAX}명 사이 정수여야 합니다.`); return p; };
+  function partyOut(t) {
+    const r = seatRow(t.id, t.seat);
+    const people = r ? r.people : null;
+    const cs = coverSettings();
+    const required = cs.enabled && cs.requireBeforeOrder; // when the requirement is on, guests can ALWAYS answer (they would otherwise be stuck without staff)
+    return { seat: t.seat, people, askGuest: cs.askGuest, required, canSet: people == null && (cs.askGuest || required), updatedAt: r ? r.updated_at : 0, seatedAt: r ? r.seated_at : null, setBy: r ? r.set_by ?? null : null, setAt: r ? r.set_at ?? null : null };
+  }
+  function setPartyGuest(tableId, people, seat) {
+    checkPeople(people);
+    if (!Number.isInteger(seat)) fail(400, 'bad_seat', '화면의 좌석 번호(seat)가 필요합니다. 새로고침해 주세요.');
+    return tx(() => {
+      const t = tableRow(tableId);
+      if (seat !== t.seat) fail(409, 'seat_changed', '테이블이 새로 정리되었습니다. 화면을 새로고침해 주세요.', { seat: t.seat }); // a stale page of the previous party cannot set people on the new seating
+      if (seatPeople(t.id, t.seat) != null) fail(409, 'party_set', '이미 인원 수를 알려 주셨어요. 바꿀 일이 있으면 직원에게 말씀해 주세요.');
+      const cs = coverSettings();
+      if (!cs.askGuest && !(cs.enabled && cs.requireBeforeOrder)) fail(403, 'party_not_asked', '인원 수는 직원이 입력합니다.');
+      applyPeople(t, people, now(), 'guest');
+      audit('party_set', `table ${t.id}`, `people null→${people} (guest)`, `${t.id}번 테이블 인원 입력(손님) · ${people}명`);
+      return { party: partyOut(t) };
+    });
+  }
+  function setPartyStaff(n, people, expectedUpdatedAt) {
+    checkPeople(people);
+    if (expectedUpdatedAt != null && !Number.isInteger(expectedUpdatedAt)) fail(400, 'bad_expected', 'expectedUpdatedAt은 정수여야 합니다.');
+    return tx(() => {
+      const t = tableRow(n);
+      const cur = partyOut(t);
+      if (expectedUpdatedAt != null && expectedUpdatedAt !== cur.updatedAt) fail(409, 'stale', '다른 직원이 먼저 인원을 바꿨습니다. 최신 상태를 확인해 주세요.', { party: cur });
+      const before = applyPeople(t, people, now());
+      audit('party_set', `table ${t.id}`, `people ${before ?? 'null'}→${people}`, `${t.id}번 테이블 인원 ${before == null ? '입력' : `변경 ${before}명 →`} ${people}명`);
+      const o = coverOrderOf(t.id, t.seat);
+      return { party: partyOut(t), coverOrder: o ? orderById(o.id) : null };
+    });
+  }
+  function coverWaive(n, { reason, expectedUpdatedAt } = {}) {
+    const why = cleanLabel(reason, 1, 30, 'bad_reason', '면제 사유');
+    return tx(() => {
+      const t = tableRow(n);
+      const c = coverOrderOf(t.id, t.seat);
+      if (!c || c.status === 'cancelled') fail(409, 'no_cover', '면제할 입장료가 없습니다.');
+      freshOrder(c.id, expectedUpdatedAt);
+      run("UPDATE orders SET status='cancelled', note=?, updated_at=? WHERE id=?", `면제: ${why}`, nextTs(c), c.id);
+      syncRefund(c.id, 'cancelled'); // money already received is owed back
+      audit('cover_waive', `table ${t.id}`, `order #${c.id}, reason: ${why}`, `${t.id}번 테이블 입장료 면제 · ${why}${c.paid_amount ? ` · 환불 대기 ${W(heldOf(c))}` : ''}`);
+      return orderById(c.id);
+    });
+  }
+  function coverRestore(n, { expectedUpdatedAt } = {}) {
+    return tx(() => {
+      const t = tableRow(n);
+      const c = coverOrderOf(t.id, t.seat);
+      if (!c || c.status !== 'cancelled') fail(409, 'no_cover', '되돌릴 면제된 입장료가 없습니다.');
+      freshOrder(c.id, expectedUpdatedAt);
+      run("UPDATE orders SET status='served', note='', updated_at=? WHERE id=?", nextTs(c), c.id);
+      const people = seatPeople(t.id, t.seat);
+      const it = coverUnit(c.id);
+      if (c.cover_mode === 'per_person' && people != null && people !== it.qty) {
+        run('UPDATE order_items SET qty=? WHERE order_id=?', people, c.id);
+        run('UPDATE orders SET subtotal=?, total=? WHERE id=?', it.unit_price * people, it.unit_price * people, c.id);
+      }
+      resettle(c.id, 'edit_lower_total');
+      audit('cover_restore', `table ${t.id}`, `order #${c.id}`, `${t.id}번 테이블 입장료 면제 취소`);
+      return orderById(c.id);
+    });
+  }
+  // payments can be voided one by one: it was entered by mistake, the money was NOT received. Effect: paid_amount, revenue and byMethod.received/count drop by the amount
+  // (no refund entry: money really handed back is a refund); open refund entries shrink with the money held; the notice of an assigned deposit goes back to pending.
+  function voidPayment(id, { reason, expectedUpdatedAt } = {}) {
+    const why = cleanLabel(reason, 1, 30, 'bad_reason', '취소 사유');
+    return tx(() => {
+      const p = get('SELECT * FROM payments WHERE id=?', id) || fail(404, 'no_payment', '없는 입금 내역입니다.');
+      if (p.voided_at) fail(409, 'payment_void', '이미 취소된 입금입니다.');
+      const o = freshOrder(p.order_id, expectedUpdatedAt);
+      if (o.paid_amount - p.amount < refundDoneSum(o.id)) fail(409, 'cannot_void', '이미 환불한 금액이 있어 이 입금을 취소할 수 없습니다.');
+      run('UPDATE payments SET voided_at=?, void_reason=? WHERE id=?', now(), why, id);
+      const left = o.paid_amount - p.amount;
+      run('UPDATE orders SET paid_amount=?, paid_method=CASE WHEN ?=0 THEN NULL ELSE paid_method END, notice_id=CASE WHEN notice_id=? THEN NULL ELSE notice_id END, updated_at=? WHERE id=?', left, left, p.notice_id ?? -1, nextTs(o), o.id);
+      if (p.notice_id && !get('SELECT 1 FROM payments WHERE notice_id=? AND voided_at IS NULL AND id!=?', p.notice_id, id)) run("UPDATE deposit_notices SET status='pending', order_id=NULL, matched_at=NULL, matched_by=NULL WHERE id=? AND status='matched'", p.notice_id);
+      run("UPDATE cover_intents SET status='void' WHERE payment_id=?", id);
+      resettle(o.id, o.status === 'cancelled' ? 'cancelled' : 'overpaid');
+      { const now0 = get('SELECT * FROM orders WHERE id=?', o.id); // a void that leaves an UNPAID order on a seat nobody sits at any more: written off (미수금) like a force clear would
+        if (now0.status !== 'cancelled' && !now0.paid && o.table_id > 0 && get('SELECT seat FROM tables WHERE id=?', o.table_id)?.seat !== o.seat) run('UPDATE orders SET written_off=1, written_off_at=? WHERE id=?', now(), o.id); }
+      emit('payment_void', { orderId: o.id, table: o.table_id, paymentId: id, amount: p.amount, method: p.method, kind: o.kind || 'food', test: o.table_id === 0 });
+      audit('payment_void', `order #${o.id}`, `payment #${id} ${p.amount} won ${p.method}, reason: ${why}`, `주문 #${o.id} 입금 #${id} 취소 · ${MKO[p.method]} ${W(p.amount)} · 사유: ${why}`);
+      return orderById(o.id);
+    });
+  }
+  // ---- guest payment intents: no money moves, they only help staff match a transfer ----
+  const INTENT_KEEP_MS = 60 * 60000;
+  const INTENT_SEAT_MAX = 30; // rows per seat, closed ones included
+  const INTENT_DEVICE_PER_MIN = 6;
+  // cancelled / expired / void intents are deleted after an hour (paid ones stay with their payment until the day is wiped)
+  const purgeIntents = () => run("DELETE FROM cover_intents WHERE status!='paid' AND created_at<?", now() - INTENT_KEEP_MS).changes;
+  function createIntent(tableId, device, body) {
+    return tx(() => {
+      const t = tableRow(tableId);
+      purgeIntents();
+      if (get('SELECT COUNT(*) n FROM cover_intents WHERE table_id=? AND seat=?', t.id, t.seat).n >= INTENT_SEAT_MAX) fail(429, 'too_many_intents', '이 테이블의 입금 예정 기록이 너무 많습니다. 직원에게 문의해 주세요.');
+      if (get('SELECT COUNT(*) n FROM cover_intents WHERE device=? AND created_at>?', device, now() - 60000).n >= INTENT_DEVICE_PER_MIN) fail(429, 'too_many_intents', '잠시 후에 다시 시도해 주세요.');
+      const o = coverOrderOf(t.id, t.seat);
+      if (!o || o.status === 'cancelled' || o.cover_mode !== 'per_person') fail(409, 'no_cover', '지금은 입장료를 나눠 낼 수 없습니다.');
+      const payer = cleanPayer(body.payer);
+      if (!Number.isInteger(body.shares) || body.shares < 1) fail(400, 'bad_shares', '낼 인원 수(shares)는 1 이상의 정수여야 합니다.');
+      const open = openIntents(t.id, t.seat);
+      if (open.length >= 10) fail(429, 'too_many_intents', '진행 중인 입금 예정이 너무 많습니다. 직원에게 문의해 주세요.');
+      const it = coverUnit(o.id);
+      const left = Math.max(0, it.qty - paidShares(o.id)) - open.reduce((n, x) => n + x.shares, 0);
+      if (body.shares > left) fail(409, 'too_many_shares', `남은 인원보다 많습니다. 더 낼 수 있는 인원: ${Math.max(0, left)}명`, { left: Math.max(0, left) });
+      const amount = body.shares * it.unit_price;
+      const id = Number(run('INSERT INTO cover_intents(table_id,seat,device,payer,shares,amount,created_at) VALUES(?,?,?,?,?,?,?)', t.id, t.seat, device, payer, body.shares, amount, now()).lastInsertRowid);
+      return { id, amount, shares: body.shares, payer, expiresAt: now() + OPEN_INTENT_MS };
+    });
+  }
+  function cancelIntent(tableId, device, id) {
+    const t = tableRow(tableId);
+    const r = run("UPDATE cover_intents SET status='cancelled' WHERE id=? AND table_id=? AND seat=? AND device=? AND status='open'", id, t.id, t.seat, device);
+    if (r.changes !== 1) fail(404, 'no_intent', '없거나 이미 처리된 입금 예정입니다.');
+  }
+  function staffCancelIntent(id) {
+    return tx(() => {
+      const i = get("SELECT * FROM cover_intents WHERE id=? AND status='open'", id) || fail(404, 'no_intent', '없거나 이미 처리된 입금 예정입니다.');
+      run("UPDATE cover_intents SET status='cancelled' WHERE id=?", id);
+      audit('cover_intent_cancel', `table ${i.table_id}`, `intent #${id}, ${i.shares} shares`, `${i.table_id}번 테이블 입금 예정 #${id} 취소 · ${i.shares}명분`);
+      return { ok: true, table: i.table_id };
+    });
+  }
+  const intentOut = (i) => ({ id: i.id, table: i.table_id, payer: i.payer, shares: i.shares, amount: i.amount, createdAt: i.created_at, expiresAt: i.created_at + OPEN_INTENT_MS, test: i.table_id === 0 });
+  function coverGuestView(t, device) {
+    const cs = coverSettings();
+    const o = coverOrderOf(t.id, t.seat);
+    const people = seatPeople(t.id, t.seat);
+    const live = !!o && o.status !== 'cancelled';
+    const it = o ? coverUnit(o.id) : null;
+    const f = o ? coverFields(o, 'guest') : null;
+    return {
+      enabled: cs.enabled || live, settingEnabled: cs.enabled, label: it ? it.name : cs.label, mode: o ? o.cover_mode : cs.mode, unitPrice: it ? it.unit_price : cs.amount, requireBeforeOrder: cs.requireBeforeOrder,
+      people, total: live ? o.total : 0, paid: o ? Math.max(0, heldOf(o)) : 0, left: live ? balanceOf(o) : 0, waived: !!o && !live,
+      shares: f ? f.shares : null,
+      myIntents: openIntents(t.id, t.seat).filter((i) => i.device === device).map(intentOut),
+      payments: o ? paymentsOf(o.id, 'guest') : [],
+    };
+  }
+  // visitors per seating: people counted by the seat's seatedAt; seats with orders but no headcount are "unknown"
+  function visitorStats() {
+    const rows = all('SELECT table_id, seat, people, seated_at FROM seat_info WHERE people IS NOT NULL AND table_id>0');
+    const have = new Set(rows.map((r) => `${r.table_id}:${r.seat}`));
+    const unknown = all("SELECT table_id, seat FROM orders WHERE kind!='cover' AND status!='cancelled' AND table_id>0 GROUP BY table_id, seat").filter((a) => !have.has(`${a.table_id}:${a.seat}`)).length;
+    const hours = new Map();
+    let total = 0;
+    for (const r of rows) {
+      total += r.people;
+      const h = Math.floor(r.seated_at / HOUR) * HOUR;
+      const e = hours.get(h) || { hour: h, label: kst(h), people: 0, parties: 0 };
+      e.people += r.people; e.parties++;
+      hours.set(h, e);
+    }
+    return { total, parties: rows.length, partiesUnknown: unknown, avgPartySize: rows.length ? Math.round((total / rows.length) * 10) / 10 : 0, byHour: [...hours.values()].sort((a, b) => a.hour - b.hour) };
+  }
+
+  // ======================= the staff-only guest TEST table (table 0, "테스트") =======================
+  const TEST_FAKE_MEMBER_ID = -1000001; // negative: can never collide with a real club member id
+  const testSettings = () => ({ memberPreview: setting('test_member_preview', '0') === '1', showInKitchen: setting('test_show_in_kitchen', '1') === '1' });
+  function testTableView() {
+    const t = get('SELECT * FROM tables WHERE id=0');
+    const pr = seatRow(0, t.seat);
+    return { number: 0, label: '테스트', isTest: true, token: t.token, seat: t.seat, people: pr ? pr.people : null, coverOrderId: coverOrderOf(0, t.seat)?.id ?? null, ...testSettings(),
+      openCalls: get('SELECT COUNT(*) n FROM calls WHERE table_id=0 AND seat=? AND resolved_at IS NULL', t.seat).n,
+      orderCount: get("SELECT COUNT(*) n FROM orders WHERE table_id=0 AND seat=? AND kind!='cover'", t.seat).n };
+  }
+  function setTestSettings(body) {
+    const has = (k) => Object.hasOwn(body, k);
+    if (!has('memberPreview') && !has('showInKitchen')) fail(400, 'nothing_to_update', '바꿀 항목이 없습니다.');
+    for (const k of ['memberPreview', 'showInKitchen']) if (has(k) && typeof body[k] !== 'boolean') fail(400, k === 'memberPreview' ? 'bad_member_preview' : 'bad_show_in_kitchen', `${k}는 true/false여야 합니다.`);
+    const before = testSettings();
+    tx(() => {
+      const ko = [];
+      if (has('memberPreview')) { run("INSERT INTO settings(k,v) VALUES('test_member_preview',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", body.memberPreview ? '1' : '0'); ko.push(`회원 미리보기 ${body.memberPreview ? '켬' : '끔'}`); }
+      if (has('showInKitchen')) { run("INSERT INTO settings(k,v) VALUES('test_show_in_kitchen',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", body.showInKitchen ? '1' : '0'); ko.push(`주방에 테스트 주문 ${body.showInKitchen ? '표시' : '숨김'}`); }
+      audit('test_settings', 'table 0', `memberPreview ${before.memberPreview}→${has('memberPreview') ? body.memberPreview : before.memberPreview}, showInKitchen ${before.showInKitchen}→${has('showInKitchen') ? body.showInKitchen : before.showInKitchen}`, `테스트 테이블 설정 · ${ko.join(' · ')}`);
+    });
+    invalidate();
+    return testTableView();
+  }
+  function rotateTestToken() {
+    const token = crypto.randomBytes(12).toString('base64url');
+    tx(() => { run('UPDATE tables SET token=? WHERE id=0', token); audit('table_rotate', 'table 0', 'test QR token replaced (value not logged)', '테스트 테이블 QR 재발급'); });
+    return token;
+  }
+  // wipes every trace of the test table (orders, ledger, refunds, coupons, plays, nicks, calls, intents, headcount) and starts a new seat; real data is not touched
+  function resetTest() {
+    invalidate();
+    return tx(() => {
+      const ids = all('SELECT id FROM orders WHERE table_id=0').map((r) => r.id);
+      for (const id of ids) for (const tbl of ['order_items', 'payments', 'refunds']) run(`DELETE FROM ${tbl} WHERE order_id=?`, id);
+      run('DELETE FROM orders WHERE table_id=0');
+      for (const tbl of ['coupons', 'plays', 'nicks', 'calls', 'cover_intents', 'seat_info', 'table_clears']) run(`DELETE FROM ${tbl} WHERE table_id=0`);
+      run('UPDATE tables SET seat=seat+1 WHERE id=0');
+      audit('test_reset', 'table 0', `${ids.length} test orders wiped`, `테스트 테이블 초기화 · 테스트 주문 ${ids.length}건 삭제`);
+      return { ok: true, orders: ids.length, seat: get('SELECT seat FROM tables WHERE id=0').seat };
+    });
   }
 
   // ---------- table count / QR rotation ----------
@@ -1020,11 +1391,19 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   const checkDepositSecret = (given) => typeof given === 'string' && crypto.timingSafeEqual(Buffer.from(sha(given)), Buffer.from(sha(depositSecret())));
   // only orders staff can see: the CURRENT seat of a table within the table count
-  const depositCandidates = (amount) => all(`SELECT o.id, o.table_id, o.total, o.depositor, o.created_at, o.paid_by, o.total - ${heldSql('o')} AS balance FROM orders o JOIN tables t ON t.id=o.table_id AND t.seat=o.seat WHERE o.status!='cancelled' AND o.paid=0 AND o.total - ${heldSql('o')}=? AND ?>0 AND o.created_at>? AND t.id<=? ORDER BY o.id`, amount, amount, now() - DEPOSIT_WINDOW_MS, tableCount);
+  const depositCandidates = (amount) => all(`SELECT o.id, o.table_id, o.total, o.depositor, o.created_at, o.paid_by, o.total - ${heldSql('o')} AS balance FROM orders o JOIN tables t ON t.id=o.table_id AND t.seat=o.seat WHERE o.status!='cancelled' AND o.paid=0 AND o.total - ${heldSql('o')}=? AND ?>0 AND o.created_at>? AND t.id BETWEEN 1 AND ? ORDER BY o.id`, amount, amount, now() - DEPOSIT_WINDOW_MS, tableCount);
   // orders staff already marked paid by hand (no notice attached) for the same amount: the transfer may belong to one of them
-  const handPaidSame = (amount) => all("SELECT o.id, o.table_id, o.total, o.depositor, o.created_at, o.paid_by FROM orders o JOIN tables t ON t.id=o.table_id AND t.seat=o.seat WHERE o.status!='cancelled' AND o.paid=1 AND o.paid_by='staff' AND o.notice_id IS NULL AND o.total=? AND o.created_at>? AND t.id<=? ORDER BY o.id", amount, now() - DEPOSIT_WINDOW_MS, tableCount);
-  const orderVisible = (o) => !!get('SELECT 1 FROM tables t WHERE t.id=? AND t.seat=? AND t.id<=?', o.table_id, o.seat, tableCount);
-  const candOut = (o) => ({ id: o.id, table: o.table_id, total: o.total, balance: o.balance ?? 0, depositor: o.depositor ?? null, createdAt: o.created_at });
+  const handPaidSame = (amount) => all("SELECT o.id, o.table_id, o.total, o.depositor, o.created_at, o.paid_by FROM orders o JOIN tables t ON t.id=o.table_id AND t.seat=o.seat WHERE o.status!='cancelled' AND o.paid=1 AND o.paid_by='staff' AND o.notice_id IS NULL AND o.total=? AND o.created_at>? AND t.id BETWEEN 1 AND ? ORDER BY o.id", amount, now() - DEPOSIT_WINDOW_MS, tableCount);
+  // open share intents of cover orders whose amount equals the notice: "table N, 입장료, K shares, payer" (same seat rules as orders)
+  const intentCandidates = (amount) => all(`SELECT i.id AS intent_id, i.shares, i.payer, i.created_at, o.id, o.table_id, o.total, o.total - ${heldSql('o')} AS balance
+    FROM cover_intents i JOIN orders o ON o.table_id=i.table_id AND o.seat=i.seat AND o.kind='cover' JOIN tables t ON t.id=i.table_id AND t.seat=i.seat
+    WHERE i.status='open' AND i.amount=? AND ?>0 AND i.created_at>? AND o.status!='cancelled' AND o.paid=0 AND t.id BETWEEN 1 AND ? ORDER BY i.id`, amount, amount, now() - OPEN_INTENT_MS, tableCount)
+    .map((r) => ({ id: r.id, table_id: r.table_id, total: r.total, balance: r.balance, depositor: r.payer, created_at: r.created_at, intent: { id: r.intent_id, shares: r.shares, payer: r.payer } }));
+  // an intent is a candidate only while it still fits: its shares are still left and its amount is within the balance
+  const intentFits = (c) => { const o = get('SELECT * FROM orders WHERE id=?', c.id); const it = coverUnit(c.id); return !!o && c.intent.shares <= Math.max(0, it.qty - paidShares(c.id)) && o.total - heldOf(o) >= c.intent.shares * it.unit_price; };
+  const allCandidates = (amount) => [...intentCandidates(amount).filter(intentFits), ...depositCandidates(amount)];
+  const orderVisible = (o) => !!get('SELECT 1 FROM tables t WHERE t.id=? AND t.seat=? AND t.id BETWEEN 1 AND ?', o.table_id, o.seat, tableCount); // test orders are never matched / assigned a deposit
+  const candOut = (o) => ({ id: o.id, table: o.table_id, total: o.total, balance: o.balance ?? 0, depositor: o.depositor ?? null, createdAt: o.created_at, intent: o.intent ?? null });
   // the one decision function: used for real notices and for the staff "test" preview (which stores nothing)
   function decideDeposit(p, sameRecent) {
     if (p.kind === 'ignore') return { status: 'ignored', reasons: [] };
@@ -1034,7 +1413,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (sameRecent) reasons.push('duplicate');
     if (!autoConfirmOn()) reasons.push('auto_off');
     if (p.amount > autoMax()) reasons.push('over_max_amount');
-    const cands = depositCandidates(p.amount);
+    const cands = allCandidates(p.amount); // whole balances AND open share intents: one unique, name-equal candidate is the strictness for auto-confirm
     const handled = handPaidSame(p.amount);
     if (handled.length) reasons.push('maybe_already_handled');
     if (cands.length === 0) reasons.push('no_candidate');
@@ -1089,7 +1468,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         const id = ins('pending', p.amount, false);
         const row = get('SELECT * FROM orders WHERE id=? AND paid=0', d.order.id);
         if (row) {
-          addPayment(row, p.amount, 'transfer', 'auto', ts, id);
+          const pid = addPayment(row, p.amount, 'transfer', 'auto', ts, id, d.order.intent ? { shares: d.order.intent.shares, payer: d.order.intent.payer } : {});
+          if (d.order.intent) run("UPDATE cover_intents SET status='paid', payment_id=? WHERE id=?", pid, d.order.intent.id);
           run("UPDATE deposit_notices SET status='matched', order_id=?, matched_at=?, matched_by='auto' WHERE id=?", d.order.id, ts, id);
           audit('deposit_auto', `order #${d.order.id}`, `notice #${id}, ${p.amount} won`, `입금 자동 확인 · 주문 #${d.order.id} · ${W(p.amount)}`);
           return { status: 'matched', id, orderId: d.order.id, table: d.order.table_id };
@@ -1100,6 +1480,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       return { status, id: ins(status, status === 'ignored' || status === 'unparsed' ? null : p.amount, guessed && (status === 'pending' || status === 'review')) };
     });
   }
+  const PARSE_REASONS = new Set(['ignore_word', 'multiple_amounts', 'no_amount', 'amount_range', 'no_name', 'name_has_digit', 'name_shape', 'several_names', 'amount_adjacent_to_name', 'text_too_long']);
+  const isStrictNotice = (n) => !n.amount_guessed && !parseReasons(n.reasons).some((r) => PARSE_REASONS.has(r)); // amount is certain: strict parser result
   const parseReasons = (v) => { try { return JSON.parse(v || '[]'); } catch { return []; } };
   function noticeOut(n) {
     const open = n.status === 'pending' && n.amount != null;
@@ -1107,8 +1489,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       id: n.id, receivedAt: n.received_at, text: n.raw, amount: n.amount, amountGuessed: !!n.amount_guessed, depositor: n.depositor, status: n.status, orderId: n.order_id,
       matchedAt: n.matched_at, matchedBy: n.matched_by, repeatCount: n.repeat_count ?? 1, lastAt: n.last_at ?? n.received_at, reasons: parseReasons(n.reasons),
       ...(() => { // at most 10 of each (a synthetic worst case of 200 notices x 190 same-total orders was 7 MB); the counts say how many exist
-        const c = open ? depositCandidates(n.amount) : []; const h = open ? handPaidSame(n.amount) : [];
-        return { candidates: c.slice(0, 10).map(candOut), candidateCount: c.length, handledOrders: h.slice(0, 10).map(candOut), handledCount: h.length };
+        const rs = parseReasons(n.reasons);
+        const c = open ? allCandidates(n.amount) : []; const h = open ? handPaidSame(n.amount) : [];
+        const named = c.filter((x) => n.depositor && x.depositor && sameDepositor(n.depositor, x.depositor)); // the ONE candidate (orders and intents together) with the notice name
+        const sameTable = named.length === 1 && c.every((x) => x.table_id === named[0].table_id); // a same-amount candidate on ANOTHER table makes the name a guess
+        const rec = open && isStrictNotice(n) && sameTable ? named[0] : null; // recommended / one-tap only for a strictly parsed amount: never a guessed one
+        const extra = (named.length > 1 || (named.length === 1 && !sameTable)) && !rs.includes('several_candidates') ? ['several_candidates'] : [];
+        const shown = rec && c.indexOf(rec) >= 10 ? [rec, ...c.filter((x) => x !== rec)] : c;
+        return { candidates: shown.slice(0, 10).map((x) => ({ ...candOut(x), recommended: x === rec })), oneTap: !!rec, ...(extra.length ? { reasons: [...rs, ...extra] } : {}), candidateCount: c.length, handledOrders: h.slice(0, 10).map(candOut), handledCount: h.length };
       })(),
     };
   }
@@ -1117,14 +1505,16 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const rows = all(`SELECT * FROM deposit_notices WHERE (? IS NULL OR id<?)${open ? " AND status IN ('pending','review','unparsed')" : ''} ORDER BY id DESC LIMIT ?`, before, before, lim);
     return { notices: rows.map(noticeOut), next: rows.length === lim ? rows[rows.length - 1].id : null };
   }
+  // is the phone still forwarding? newest received notice of any status, newest match
+  const depositPipeline = () => ({ lastNoticeAt: get('SELECT MAX(COALESCE(last_at, received_at)) m FROM deposit_notices').m ?? null, lastMatchedAt: get('SELECT MAX(matched_at) m FROM deposit_notices').m ?? null });
   const depositCounts = () => {
     const c = (st) => get('SELECT COUNT(*) n FROM deposit_notices WHERE status=?', st).n;
     const review = c('review');
-    return { pending: c('pending') + review, unparsed: c('unparsed'), ignored: c('ignored'), review, autoConfirm: autoConfirmOn(), autoConfirmMaxAmount: autoMax() };
+    return { pending: c('pending') + review, unparsed: c('unparsed'), ignored: c('ignored'), review, autoConfirm: autoConfirmOn(), autoConfirmMaxAmount: autoMax(), ...depositPipeline() };
   };
   const MANUAL = ['pending', 'unparsed', 'review'];
   const needNote = (note) => cleanLabel(note, 1, 60, 'note_required', '사유(메모)');
-  function assignDeposit(noticeId, orderId, force, note) {
+  function assignDeposit(noticeId, orderId, force, note, intentId, staffAmount) {
     return tx(() => {
       const n = get('SELECT * FROM deposit_notices WHERE id=?', noticeId) || fail(404, 'no_notice', '없는 입금 알림입니다.');
       if (!MANUAL.includes(n.status)) fail(409, 'notice_closed', '이미 처리된 입금 알림입니다.');
@@ -1134,15 +1524,41 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (o.status === 'cancelled') fail(409, 'order_cancelled', '취소된 주문입니다.');
       if (o.paid) fail(409, 'order_paid', '이미 입금 확인된 주문입니다. 이미 직접 입금 확인한 주문에는 연결(attach)을 사용하세요.');
       if (n.status === 'review' && force !== true) fail(409, 'review_needs_force', '취소·정정 등 확인이 필요한 알림입니다. 확인 후 force로 연결해 주세요.');
-      const bal = balanceOf(o); // a notice is compared with what is still to pay (partial cash + transfer of the rest matches cleanly)
-      if (n.amount !== bal && force !== true) fail(409, 'amount_mismatch', '입금액과 남은 결제 금액이 다릅니다.', { noticeAmount: n.amount, orderTotal: o.total, orderBalance: bal });
-      const mismatch = n.amount !== bal;
-      const memo = mismatch ? needNote(note) : null; // a forced mismatch must be explained
+      const risky = !isStrictNotice(n); // a guessed amount (or any parse doubt) is never trusted: staff must force with a note and type the amount they really saw
+      let nAmount = n.amount;
+      if (risky) {
+        if (force !== true || typeof note !== 'string' || !note.trim()) fail(409, 'amount_guessed', '입금액이 확실하지 않은 알림입니다. 실제 입금액을 직접 입력하고 사유와 함께 force로 연결해 주세요.', { noticeAmount: n.amount });
+        if (!Number.isInteger(staffAmount) || staffAmount < 1 || staffAmount > 10000000) fail(400, 'bad_amount', 'amount(실제 입금액)는 1~10,000,000 사이 정수여야 합니다.');
+        nAmount = staffAmount;
+      }
+      let staleIntent = false; let leftShares = 0;
+      let intent = null; // assigning to a share intent: the notice must equal the intent's amount, and the payment carries its shares and payer
+      if (intentId != null) {
+        if (!Number.isInteger(intentId)) fail(400, 'bad_intent', 'intentId가 올바르지 않습니다.');
+        intent = get("SELECT * FROM cover_intents WHERE id=? AND status='open' AND created_at>?", intentId, now() - OPEN_INTENT_MS);
+        if (!intent || o.kind !== 'cover' || intent.table_id !== o.table_id || intent.seat !== o.seat) fail(404, 'no_intent', '없거나 만료된 입금 예정입니다.');
+        const cu = coverUnit(o.id);
+        leftShares = Math.max(0, cu.qty - paidShares(o.id));
+        staleIntent = intent.shares > leftShares || intent.amount > balanceOf(o); // the table changed since the guest announced it
+        if (staleIntent && force !== true) fail(409, 'intent_stale', '입금 예정 이후 테이블 상황이 바뀌었습니다. 남은 인원과 금액을 확인해 주세요.', { shares: leftShares, intentShares: intent.shares, balance: balanceOf(o), unitPrice: cu.unit_price });
+      }
+      const bal = intent ? intent.amount : balanceOf(o); // a notice is compared with what is still to pay (or with the intent's amount)
+      if (nAmount !== bal && force !== true) fail(409, 'amount_mismatch', '입금액과 남은 결제 금액이 다릅니다.', { noticeAmount: nAmount, orderTotal: o.total, orderBalance: bal });
+      const mismatch = nAmount !== bal;
+      const memo = risky || mismatch || staleIntent ? needNote(note) : null; // a forced mismatch (or a forced stale intent) must be explained
       const ts = now();
       // the money received is the notice amount (unknown amount: the order balance is assumed); under / over payment follow the normal payment rules
-      addPayment(o, n.amount ?? bal, 'transfer', 'staff', ts, noticeId);
+      const exact = intent && nAmount === intent.amount; // a forced mismatch records a plain payment (no shares) and still closes the intent
+      const total = nAmount ?? bal;
+      let pid;
+      if (exact && staleIntent && leftShares > 0) { // never more shares than are left: those shares as a share payment, the excess as a plain overpayment (refund entry)
+        const unit = coverUnit(o.id).unit_price; const capped = Math.min(intent.shares, leftShares);
+        pid = addPayment(o, capped * unit, 'transfer', 'staff', ts, noticeId, { shares: capped, payer: intent.payer });
+        if (total - capped * unit > 0) addPayment(get('SELECT * FROM orders WHERE id=?', orderId), total - capped * unit, 'transfer', 'staff', ts, noticeId);
+      } else pid = addPayment(o, total, 'transfer', 'staff', ts, noticeId, exact && !staleIntent ? { shares: intent.shares, payer: intent.payer } : {});
+      if (intent) run("UPDATE cover_intents SET status='paid', payment_id=? WHERE id=?", pid, intent.id);
       run("UPDATE deposit_notices SET status='matched', order_id=?, matched_at=?, matched_by='staff' WHERE id=?", orderId, ts, noticeId);
-      audit('deposit_assign', `order #${orderId}`, `notice #${noticeId}, ${n.amount ?? '?'} won${memo ? `, note: ${memo}` : ''}`, `입금 알림 #${noticeId} 연결 · 주문 #${orderId} · ${W(n.amount ?? bal)}${memo ? ` · 사유: ${memo}` : ''} · 잔액 ${W(balanceOf(get('SELECT * FROM orders WHERE id=?', orderId)))}`);
+      audit('deposit_assign', `order #${orderId}`, `notice #${noticeId}, ${nAmount ?? '?'} won${risky ? ` (staff-entered, notice said ${n.amount ?? '?'})` : ''}${memo ? `, note: ${memo}` : ''}`, `입금 알림 #${noticeId} 연결 · 주문 #${orderId} · ${W(nAmount ?? bal)}${risky ? ` (직원 입력, 알림 ${n.amount == null ? '금액 없음' : W(n.amount)})` : ''}${memo ? ` · 사유: ${memo}` : ''} · 잔액 ${W(balanceOf(get('SELECT * FROM orders WHERE id=?', orderId)))}`);
       return { notice: noticeOut(get('SELECT * FROM deposit_notices WHERE id=?', noticeId)), order: orderById(orderId) };
     });
   }
@@ -1158,8 +1574,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (!o.paid) fail(409, 'order_unpaid', '아직 입금 확인되지 않은 주문입니다. 연결(assign)을 사용하세요.');
       if (o.notice_id) fail(409, 'order_has_notice', '이미 다른 입금 알림과 연결된 주문입니다.');
       if (n.status === 'review' && force !== true) fail(409, 'review_needs_force', '취소·정정 등 확인이 필요한 알림입니다. 확인 후 force로 연결해 주세요.');
+      const risky = !isStrictNotice(n);
+      if (risky && (force !== true || typeof note !== 'string' || !note.trim())) fail(409, 'amount_guessed', '입금액이 확실하지 않은 알림입니다. 사유와 함께 force로 연결해 주세요.', { noticeAmount: n.amount });
       if (n.amount !== o.total && force !== true) fail(409, 'amount_mismatch', '입금액과 주문 금액이 다릅니다.', { noticeAmount: n.amount, orderTotal: o.total });
-      const memo = n.amount !== o.total ? needNote(note) : null;
+      const memo = risky || n.amount !== o.total ? needNote(note) : null;
       run('UPDATE orders SET notice_id=?, updated_at=? WHERE id=?', noticeId, nextTs(o), orderId);
       run("UPDATE deposit_notices SET status='matched', order_id=?, matched_at=?, matched_by='staff' WHERE id=?", orderId, now(), noticeId);
       audit('deposit_attach', `order #${orderId}`, `notice #${noticeId}${memo ? `, note: ${memo}` : ''}`, `입금 알림 #${noticeId} 연결(이미 확인된 주문) · 주문 #${orderId}${memo ? ` · 사유: ${memo}` : ''}`);
@@ -1179,14 +1597,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const rewardOut = (r) => ({
     id: r.id, label: r.label, game: r.game, threshold: r.threshold, type: r.type, amount: r.amount ?? null, item: r.item ?? null,
     stock: r.stock, issued: r.issued, remaining: r.stock - r.issued,
-    used: get("SELECT COUNT(*) n FROM coupons WHERE reward_id=? AND status='used'", r.id).n, active: !!r.active,
+    used: get("SELECT COUNT(*) n FROM coupons WHERE reward_id=? AND status='used' AND table_id>0", r.id).n, active: !!r.active,
   });
   const listRewards = () => all('SELECT * FROM rewards ORDER BY sort, rowid').map(rewardOut);
   function rewardsView(tableId, seat) {
     if (tableId == null) return listRewards(); // staff: every reward incl. inactive, with live counts
     return all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => ({
       id: r.id, game: r.game, label: r.label, type: r.type, amount: r.amount ?? null, item: r.item ?? null, threshold: r.threshold,
-      soldOut: r.issued >= r.stock, got: !!get("SELECT 1 FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tableId, seat, r.id),
+      soldOut: tableId !== 0 && r.issued >= r.stock, got: !!get("SELECT 1 FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tableId, seat, r.id),
     }));
   }
   // validates a create body (cur = null) or an update body merged onto the current row
@@ -1307,7 +1725,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         const res = { rewardId: r.id, label: r.label };
         if (score < r.threshold) res.result = 'low_score';
         else if (get("SELECT 1 FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tableId, t.seat, r.id)) res.result = 'already_got';
-        else if (run('UPDATE rewards SET issued=issued+1 WHERE id=? AND issued<stock AND active=1', r.id).changes !== 1) res.result = 'sold_out';
+        else if (tableId !== 0 && run('UPDATE rewards SET issued=issued+1 WHERE id=? AND issued<stock AND active=1', r.id).changes !== 1) res.result = 'sold_out'; // the test table: unlimited, stock untouched
         else {
           const c = insertCoupon({ rewardId: r.id, source: 'score', type: r.type, amount: r.amount ?? null, label: r.label, item: r.type === 'item' ? (r.item ?? r.label) : null, tableId, seat: t.seat });
           issued.push(c);
@@ -1339,7 +1757,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (!Number.isInteger(amount) || amount < 100 || amount > 100000 || amount % 100 !== 0) fail(400, 'bad_amount', '할인 금액은 100~100,000원 사이 100원 단위여야 합니다.');
     }
     return tx(() => {
-      if (get("SELECT COUNT(*) n FROM coupons WHERE source='staff' AND created_at>?", now() - HOUR).n >= 20) fail(409, 'manual_coupon_limit', '직원 쿠폰은 한 시간에 20장까지 만들 수 있습니다.');
+      if (get("SELECT COUNT(*) n FROM coupons WHERE source='staff' AND created_at>? AND (table_id=0)=(?=0)", now() - HOUR, n).n >= 20) fail(409, 'manual_coupon_limit', '직원 쿠폰은 한 시간에 20장까지 만들 수 있습니다.');
       const c = insertCoupon({ rewardId: 'staff', source: 'staff', type: body.type, amount, label, item: body.type === 'item' ? label : null, tableId: n, seat: t.seat });
       audit('coupon_manual', `table ${n}`, `${c.type} ${amount ?? ''} ${label}`.trim(), `${n}번 테이블 직원 쿠폰 발급 · ${label}${amount ? ` ${W(amount)}` : ''}`);
       return c;
@@ -1362,7 +1780,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       e.score += r.s;
       by.set(r.table_id, e);
     }
-    const list = [...by.values()].filter((e) => e.score > 0 && e.table <= tableCount).sort((a, b) => b.score - a.score || a.table - b.table).slice(0, 5);
+    const list = [...by.values()].filter((e) => e.score > 0 && e.table >= 1 && e.table <= tableCount).sort((a, b) => b.score - a.score || a.table - b.table).slice(0, 5);
     for (const e of list) {
       e.nick = get('SELECT nick FROM plays WHERE table_id=? AND score IS NOT NULL AND finished_at>=? AND finished_at<? ORDER BY score DESC, finished_at LIMIT 1', e.table, start, start + HOUR)?.nick ?? null;
     }
@@ -1469,7 +1887,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const w = waitRow(id, secret);
     if (w.status === 'waiting' || w.status === 'called' || w.status === 'noshow') run("UPDATE waitlist SET status='cancelled' WHERE id=?", id);
   }
-  function waitAction(id, action) {
+  function waitAction(id, action, opts = {}) {
     sweepWait();
     const w = get('SELECT * FROM waitlist WHERE id=?', id) || fail(404, 'no_wait', '없는 대기 번호입니다.');
     if (w.status === 'seated' || w.status === 'cancelled') fail(409, 'wait_closed', '이미 처리된 대기입니다.');
@@ -1477,26 +1895,43 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (w.status !== 'noshow') fail(409, 'not_noshow', '미입장 처리된 대기만 다시 부를 수 있습니다.');
       if (w.recalled) fail(409, 'already_recalled', '이미 한 번 다시 불렀습니다.');
       run("UPDATE waitlist SET status='called', called_at=?, recalled=1 WHERE id=?", now(), id);
-      return;
+      return {};
     }
     if (action === 'call' && w.status === 'noshow') fail(409, 'wait_noshow', '미입장 처리된 대기입니다. 다시 부르기(recall)를 사용하세요.');
+    if (action === 'seat' && opts.table != null) { // seated at a table: the party size becomes that seat's headcount when it has none yet
+      if (!Number.isInteger(opts.table) || opts.table < 1 || opts.table > tableCount) fail(400, 'bad_table', `테이블 번호는 1~${tableCount} 사이여야 합니다.`);
+      return tx(() => {
+        const t = tableRow(opts.table);
+        let partySet = false;
+        if (seatPeople(t.id, t.seat) == null) {
+          applyPeople(t, Math.min(PEOPLE_MAX, w.size), now(), 'waitlist');
+          partySet = true;
+          audit('party_set', `table ${t.id}`, `people null→${w.size} (waitlist #${id})`, `${t.id}번 테이블 인원 입력(대기 입장) · ${w.size}명`);
+        }
+        run("UPDATE waitlist SET status='seated', seated_table=? WHERE id=?", t.id, id);
+        return { partySet, table: t.id };
+      });
+    }
     const to = { call: 'called', seat: 'seated', cancel: 'cancelled' }[action];
     run('UPDATE waitlist SET status=?, called_at=? WHERE id=?', to, to === 'called' ? now() : w.called_at, id);
+    return {};
   }
 
   // ---------- snapshots ----------
   function guestState(tableId, device) {
     const t = tableRow(tableId);
     return {
-      table: { number: t.id, seat: t.seat },
+      table: { number: t.id, seat: t.seat, ...(t.id === 0 ? { isTest: true } : {}) },
       orderingOpen: orderingOpen(),
       memberDiscountPct: memberPct(),
-      memberDiscount: (({ enabled, mode, pct, amount, minOrder, maxDiscount, stackWithCoupon }) => ({ enabled: enabled && memberEnabled, mode, pct, amount, minOrder, maxDiscount, stackWithCoupon }))(memberSettings()),
+      memberDiscount: (({ enabled, mode, pct, amount, minOrder, maxDiscount, stackWithCoupon }) => ({ enabled: enabled && (memberEnabled || (tableId === 0 && testSettings().memberPreview)), mode, pct, amount, minOrder, maxDiscount, stackWithCoupon }))(memberSettings()),
       menu: menuView(),
       // cancelled orders: only the newest 5 are shown
-      orders: loadOrders(all("SELECT * FROM orders WHERE table_id=? AND seat=? AND (status!='cancelled' OR id IN (SELECT id FROM orders WHERE table_id=? AND seat=? AND status='cancelled' ORDER BY id DESC LIMIT 5)) ORDER BY id DESC", tableId, t.seat, tableId, t.seat)),
+      orders: loadOrders(all("SELECT * FROM orders WHERE table_id=? AND seat=? AND (status!='cancelled' OR id IN (SELECT id FROM orders WHERE table_id=? AND seat=? AND status='cancelled' ORDER BY id DESC LIMIT 5)) ORDER BY id DESC", tableId, t.seat, tableId, t.seat), 'guest'),
       coupons: all("SELECT * FROM coupons WHERE table_id=? AND seat=? AND status!='void' ORDER BY created_at, code", tableId, t.seat).map(couponOut),
       notice: bannerOut(),
+      party: partyOut(t),
+      cover: coverGuestView(t, device),
       calls: all('SELECT id, type, created_at FROM calls WHERE table_id=? AND seat=? AND resolved_at IS NULL ORDER BY id', tableId, t.seat).map((c) => ({ id: c.id, type: c.type, createdAt: c.created_at })),
       nick: get('SELECT nick FROM nicks WHERE device=? AND table_id=? AND seat=?', device, tableId, t.seat)?.nick ?? null,
       rewards: rewardsView(tableId, t.seat),
@@ -1508,8 +1943,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
 
   function tablesView() {
     const ts = now();
-    return all('SELECT * FROM tables WHERE id<=? ORDER BY id', tableCount).map((t) => {
-      const o = get("SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN paid=0 THEN MAX(0, total-paid_amount+(SELECT COALESCE(SUM(r.amount),0) FROM refunds r WHERE r.order_id=orders.id AND r.done_at IS NOT NULL)) END),0) unpaid, MIN(created_at) first FROM orders WHERE table_id=? AND seat=? AND status!='cancelled'", t.id, t.seat);
+    return all('SELECT * FROM tables WHERE id BETWEEN 1 AND ? ORDER BY id', tableCount).map((t) => {
+      const o = get("SELECT COALESCE(SUM(CASE WHEN kind!='cover' THEN 1 ELSE 0 END),0) n, COALESCE(SUM(CASE WHEN paid=0 THEN MAX(0, total-paid_amount+(SELECT COALESCE(SUM(r.amount),0) FROM refunds r WHERE r.order_id=orders.id AND r.done_at IS NOT NULL)) END),0) unpaid, MIN(created_at) first FROM orders WHERE table_id=? AND seat=? AND status!='cancelled'", t.id, t.seat);
       const p = get('SELECT MIN(started_at) first FROM plays WHERE table_id=? AND seat=?', t.id, t.seat);
       const firsts = [o.first, p.first].filter((x) => x != null);
       return {
@@ -1517,6 +1952,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         minutesSeated: firsts.length ? Math.floor((ts - Math.min(...firsts)) / 60000) : null,
         openCalls: get('SELECT COUNT(*) n FROM calls WHERE table_id=? AND seat=? AND resolved_at IS NULL', t.id, t.seat).n,
         unclearUntil: unclearCheck(t).ok ? unclearCheck(t).until : null,
+        ...(() => { const pr = seatRow(t.id, t.seat); const c = coverOrderOf(t.id, t.seat); return { people: pr ? pr.people : null, partySetBy: pr ? pr.set_by ?? null : null, partySetAt: pr ? pr.set_at ?? null : null, partyUpdatedAt: pr ? pr.updated_at : 0, seatedAt: pr ? pr.seated_at : null, cover: c ? { orderId: c.id, status: c.status, waived: c.status === 'cancelled' } : null }; })(),
       };
     });
   }
@@ -1529,12 +1965,12 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       // cancelled orders only stay on the board for 10 minutes
       orders: loadOrders(all("SELECT o.* FROM orders o JOIN tables t ON t.id=o.table_id AND t.seat=o.seat WHERE t.id<=? AND (o.status!='cancelled' OR o.updated_at>?) ORDER BY o.id", tableCount, now() - 600000)),
       tables: tablesView(),
-      calls: all('SELECT id, table_id, type, created_at FROM calls WHERE resolved_at IS NULL AND table_id<=? ORDER BY id', tableCount).map((c) => ({ id: c.id, table: c.table_id, type: c.type, createdAt: c.created_at })),
+      calls: all('SELECT id, table_id, type, created_at FROM calls WHERE resolved_at IS NULL AND table_id BETWEEN 1 AND ? ORDER BY id', tableCount).map((c) => ({ id: c.id, table: c.table_id, type: c.type, createdAt: c.created_at })),
       waitlist: (sweepWait(), all("SELECT * FROM waitlist WHERE status IN ('waiting','called','noshow') ORDER BY id").map((w) => ({ id: w.id, nick: w.nick, size: w.size, status: w.status, createdAt: w.created_at, calledAt: w.called_at, recalled: !!w.recalled }))),
       waitCallTimeoutMin: waitTimeoutMin(),
       notice: bannerOut(),
-      refunds: all('SELECT r.*, o.table_id, o.updated_at AS order_updated_at FROM refunds r JOIN orders o ON o.id=r.order_id ORDER BY (r.done_at IS NULL) DESC, r.id DESC LIMIT 200').map(refundOut),
-      coupons: all("SELECT c.* FROM coupons c JOIN tables t ON t.id=c.table_id AND t.seat=c.seat WHERE c.status='issued' AND t.id<=? ORDER BY c.created_at DESC", tableCount).map(couponOut),
+      refunds: all('SELECT r.*, o.table_id, o.updated_at AS order_updated_at FROM refunds r JOIN orders o ON o.id=r.order_id ORDER BY (o.table_id=0), (r.done_at IS NULL) DESC, r.id DESC LIMIT 200').map(refundOut), // real refunds first: test ones can never push them out of the window
+      coupons: all("SELECT c.* FROM coupons c JOIN tables t ON t.id=c.table_id AND t.seat=c.seat WHERE c.status='issued' AND t.id BETWEEN 1 AND ? ORDER BY c.created_at DESC", tableCount).map(couponOut),
       rewards: rewardsView(),
       games,
       hourly: hourlyReward(),
@@ -1546,6 +1982,9 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       hiddenTablesWithOpenOrders: hiddenOpen(),
       pay: payAll(),
       deposit: depositCounts(),
+      testTable: testTableView(),
+      cover: coverSettings(),
+      coverIntents: all("SELECT i.* FROM cover_intents i JOIN tables t ON t.id=i.table_id AND t.seat=i.seat JOIN orders co ON co.table_id=i.table_id AND co.seat=i.seat AND co.kind='cover' AND co.status!='cancelled' WHERE i.status='open' AND i.created_at>? AND t.id<=? ORDER BY i.id", now() - OPEN_INTENT_MS, tableCount).map(intentOut),
       depositNotices: listDeposits({ open: true, limit: 50 }).notices, // the newest 50 OPEN notices; everything else: GET /api/staff/deposits?before=&limit=
       memberDiscount: memberSettings(),
       menu: menuView(true),
@@ -1553,16 +1992,17 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
 
   function kitchenState() {
-    const orders = loadOrders(all("SELECT o.* FROM orders o JOIN tables t ON t.id=o.table_id AND t.seat=o.seat WHERE o.status='cooking' AND t.id<=? ORDER BY o.cooking_at, o.id", tableCount));
+    const showTest = setting('test_show_in_kitchen', '1') === '1'; // test orders appear only when staff want them, always flagged
+    const orders = loadOrders(all(`SELECT o.* FROM orders o JOIN tables t ON t.id=o.table_id AND t.seat=o.seat WHERE o.status='cooking' AND t.id${showTest ? '>=0' : '>0'} AND t.id<=? ORDER BY o.cooking_at, o.id`, tableCount));
     const agg = new Map();
-    for (const o of orders) for (const i of o.items) {
+    for (const o of orders.filter((x) => !x.test)) for (const i of o.items) { // the prep totals never include test orders
       const a = agg.get(i.id) || { id: i.id, name: i.name, qty: 0 };
       a.qty += i.qty;
       agg.set(i.id, a);
     }
     return {
       items: [...agg.values()].sort((a, b) => b.qty - a.qty),
-      orders: orders.map((o) => ({ id: o.id, table: o.table, member: o.member, note: o.note, items: o.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty, service: i.service })), since: o.cookingAt })),
+      orders: orders.map((o) => ({ id: o.id, table: o.table, test: o.test, paid: o.paid, balanceDue: o.balanceDue, member: o.member, note: o.note, items: o.items.map((i) => ({ id: i.id, name: i.name, qty: i.qty, service: i.service })), since: o.cookingAt })),
     };
   }
 
@@ -1571,7 +2011,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const cur = hourStartOf(now());
     const g = {};
     for (const name of Object.keys(games)) {
-      g[name] = all('SELECT table_id, nick, MAX(score) score, finished_at FROM plays WHERE game=? AND score IS NOT NULL AND table_id<=? GROUP BY table_id ORDER BY score DESC, finished_at LIMIT 10', name, tableCount)
+      g[name] = all('SELECT table_id, nick, MAX(score) score, finished_at FROM plays WHERE game=? AND score IS NOT NULL AND table_id BETWEEN 1 AND ? GROUP BY table_id ORDER BY score DESC, finished_at LIMIT 10', name, tableCount)
         .map((r, i) => ({ rank: i + 1, table: r.table_id, nick: r.nick, score: r.score }));
     }
     const h = hourInfo(cur);
@@ -1624,6 +2064,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       const n = get(sql, t.id, t.seat).n;
       if (n) used[k] = n;
     }
+    const pr = seatRow(t.id, t.seat); // a headcount (guest or staff) or a live share intent on the new seat is activity too
+    if (pr && pr.people != null) used.party = 1;
+    const oi = openIntents(t.id, t.seat).length;
+    if (oi) used.intents = oi;
     if (Object.keys(used).length) return { ok: false, reason: 'seat_in_use', used };
     return { ok: true, clear: c, until: c.at + UNCLEAR_MS };
   }
@@ -1633,6 +2077,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (!chk.ok) fail(409, 'cannot_undo', '테이블 정리를 되돌릴 수 없습니다.', { reason: chk.reason, ...(chk.used ? { used: chk.used } : {}) });
     invalidate();
     return tx(() => {
+      run('DELETE FROM seat_info WHERE table_id=? AND seat=?', n, t.seat); // nothing of the abandoned seat may leak into the next one
+      run('DELETE FROM cover_intents WHERE table_id=? AND seat=?', n, t.seat);
       run('UPDATE tables SET seat=? WHERE id=?', chk.clear.old_seat, n);
       const flags = run('UPDATE orders SET written_off=0, written_off_at=NULL, written_off_clear=NULL WHERE written_off_clear=?', chk.clear.id).changes;
       run('DELETE FROM table_clears WHERE id=?', chk.clear.id);
@@ -1642,13 +2088,28 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   function moveTable(a, b) {
     if (!Number.isInteger(a) || !Number.isInteger(b) || a === b) fail(400, 'bad_tables', '옮길 테이블 번호가 올바르지 않습니다.');
+    if (a === 0 || b === 0) fail(409, 'test_table', '테스트 테이블과 실제 테이블 사이에서는 옮길 수 없습니다.');
     const A = tableRow(a);
     const B = tableRow(b);
+    const liveCover = (tid, seat) => { const c = coverOrderOf(tid, seat); return !!c && c.status !== 'cancelled'; };
+    if (liveCover(a, A.seat) && liveCover(b, B.seat)) fail(409, 'cover_conflict', '두 테이블 모두 입장료가 있어 합칠 수 없습니다. 한쪽 입장료를 먼저 면제해 주세요.');
     invalidate();
     return tx(() => {
       const mv = (tbl, set = '') => run(`UPDATE ${tbl} SET table_id=?, seat=?${set} WHERE table_id=? AND seat=?`, b, B.seat, a, A.seat).changes;
       // moved orders get a derived key so equal idempotency keys in both seats cannot collide
       const moved = { orders: mv('orders', ", key=key||'~m'||id"), coupons: mv('coupons'), plays: mv('plays') };
+      mv('cover_intents'); // open share intents follow the cover order
+      { // headcount: the destination takes the source's people; when both have one it is the SUM
+        const ar = seatRow(a, A.seat); const br = seatRow(b, B.seat);
+        if (ar) {
+          if (br) {
+            const merged = br.people == null && ar.people == null ? null : (br.people ?? 0) + (ar.people ?? 0);
+            run("UPDATE seat_info SET people=?, seated_at=MIN(seated_at,?), updated_at=?, set_by='staff', set_at=? WHERE table_id=? AND seat=?", merged, ar.seated_at, Math.max(now(), br.updated_at + 1), now(), b, B.seat);
+            run('DELETE FROM seat_info WHERE table_id=? AND seat=?', a, A.seat);
+          } else run('UPDATE seat_info SET table_id=?, seat=? WHERE table_id=? AND seat=?', b, B.seat, a, A.seat);
+        }
+        ensureCover(b, B.seat, now()); // re-price the (single) cover order to the merged headcount
+      }
       // the source is now a new seating: it cannot re-earn rewards in the old one
       run('UPDATE tables SET seat=seat+1 WHERE id=?', a);
       run('UPDATE calls SET resolved_at=? WHERE table_id=? AND resolved_at IS NULL', now(), a);
@@ -1660,10 +2121,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   // ---------- sales ----------
   // revenue = money actually received (paid amounts of ALL orders, cancelled ones included) minus refunds already paid back.
   // refundDue = refund entries still open; writtenOff = balances of unpaid orders of cleared seats (미수금), never part of revenue.
-  const refundOut = (r) => ({ id: r.id, orderId: r.order_id, table: r.table_id, updatedAt: r.order_updated_at ?? null, amount: r.amount, reason: r.reason, createdAt: r.created_at, doneAt: r.done_at ?? null, method: r.done_method ?? null, note: r.done_note ?? null });
+  const refundOut = (r) => ({ id: r.id, orderId: r.order_id, table: r.table_id, test: r.table_id === 0, updatedAt: r.order_updated_at ?? null, amount: r.amount, reason: r.reason, createdAt: r.created_at, doneAt: r.done_at ?? null, method: r.done_method ?? null, note: r.done_note ?? null });
   function sales() {
-    const o = all('SELECT id, table_id, status, total, discount, member_discount, paid, paid_amount, written_off, written_off_at, created_at, updated_at FROM orders');
-    const done = all('SELECT order_id, amount FROM refunds WHERE done_at IS NOT NULL');
+    const o = all('SELECT id, table_id, status, kind, total, discount, member_discount, paid, paid_amount, written_off, written_off_at, created_at, updated_at FROM orders WHERE table_id>0');
+    const done = all('SELECT r.order_id, r.amount FROM refunds r JOIN orders o ON o.id=r.order_id WHERE r.done_at IS NOT NULL AND o.table_id>0');
     const doneBy = new Map();
     for (const r of done) doneBy.set(r.order_id, (doneBy.get(r.order_id) || 0) + r.amount);
     const live = o.filter((x) => x.status !== 'cancelled');
@@ -1678,15 +2139,23 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       paidRevenue: live.reduce((n, x) => n + x.paid_amount, 0),
     };
     totals.revenue = totals.paidAmount - totals.refundsDone;
-    totals.refundDue = get('SELECT COALESCE(SUM(amount),0) s FROM refunds WHERE done_at IS NULL').s;
+    totals.refundDue = get('SELECT COALESCE(SUM(r.amount),0) s FROM refunds r JOIN orders o ON o.id=r.order_id WHERE r.done_at IS NULL AND o.table_id>0').s;
     const held = (x) => x.paid_amount - (doneBy.get(x.id) || 0);
     const wo = live.filter((x) => x.written_off && !x.paid);
     totals.writtenOff = wo.reduce((n, x) => n + Math.max(0, x.total - held(x)), 0);
     totals.unpaidRevenue = live.filter((x) => !x.paid && !x.written_off).reduce((n, x) => n + Math.max(0, x.total - held(x)), 0);
+    const byKind = {}; // food vs cover charge: every figure splits the totals exactly
+    for (const k of ['food', 'cover']) byKind[k] = { orders: 0, billed: 0, received: 0, refunded: 0, net: 0, unpaid: 0, writtenOff: 0 };
+    for (const x of o) {
+      const b = byKind[x.kind === 'cover' ? 'cover' : 'food'];
+      if (x.status !== 'cancelled') { b.orders++; b.billed += x.total; if (!x.paid) { const bal = Math.max(0, x.total - held(x)); if (x.written_off) b.writtenOff += bal; else b.unpaid += bal; } }
+      b.received += x.paid_amount; b.refunded += doneBy.get(x.id) || 0;
+    }
+    for (const k of Object.keys(byKind)) byKind[k].net = byKind[k].received - byKind[k].refunded;
     const byMethod = {};
     for (const m of PAY_METHODS) byMethod[m] = { received: 0, refunded: 0, net: 0, count: 0 };
-    for (const p of all('SELECT method, SUM(amount) s, COUNT(*) n FROM payments GROUP BY method')) if (byMethod[p.method]) { byMethod[p.method].received = p.s; byMethod[p.method].count = p.n; }
-    for (const p of all('SELECT done_method m, SUM(amount) s FROM refunds WHERE done_at IS NOT NULL GROUP BY done_method')) if (byMethod[p.m]) byMethod[p.m].refunded = p.s;
+    for (const p of all('SELECT p.method, SUM(p.amount) s, COUNT(*) n FROM payments p JOIN orders o ON o.id=p.order_id WHERE p.voided_at IS NULL AND o.table_id>0 GROUP BY p.method')) if (byMethod[p.method]) { byMethod[p.method].received = p.s; byMethod[p.method].count = p.n; }
+    for (const p of all('SELECT r.done_method m, SUM(r.amount) s FROM refunds r JOIN orders o ON o.id=r.order_id WHERE r.done_at IS NOT NULL AND o.table_id>0 GROUP BY r.done_method')) if (byMethod[p.m]) byMethod[p.m].refunded = p.s;
     for (const m of PAY_METHODS) byMethod[m].net = byMethod[m].received - byMethod[m].refunded; // Σ net = revenue
     const hours = new Map();
     for (const x of o) {
@@ -1699,14 +2168,16 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return {
       totals,
       byMethod,
+      byKind,
+      visitors: visitorStats(),
       byHour: [...hours.values()].sort((x, y) => x.hour - y.hour),
-      byItem: all("SELECT oi.item_id id, oi.name, SUM(CASE WHEN oi.service=0 THEN oi.qty ELSE 0 END) qty, SUM(CASE WHEN oi.service=1 THEN oi.qty ELSE 0 END) serviceQty, SUM(CASE WHEN oi.service=0 THEN oi.qty*oi.unit_price ELSE 0 END) gross, MAX(oi.rowid) lastrow FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.status!='cancelled' GROUP BY oi.item_id ORDER BY qty DESC, oi.item_id")
+      byItem: all("SELECT oi.item_id id, oi.name, SUM(CASE WHEN oi.service=0 THEN oi.qty ELSE 0 END) qty, SUM(CASE WHEN oi.service=1 THEN oi.qty ELSE 0 END) serviceQty, SUM(CASE WHEN oi.service=0 THEN oi.qty*oi.unit_price ELSE 0 END) gross, MAX(oi.rowid) lastrow FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.status!='cancelled' AND o.kind='food' AND o.table_id>0 GROUP BY oi.item_id ORDER BY qty DESC, oi.item_id")
         .map((r) => ({ id: r.id, name: r.name, qty: r.qty, serviceQty: r.serviceQty, gross: r.gross })),
-      coupons: all("SELECT CASE WHEN source='hour' THEN 'hour' ELSE reward_id END rid, label, type, COUNT(*) issued, SUM(status='used') used FROM coupons GROUP BY rid, label, type ORDER BY rid")
+      coupons: all("SELECT CASE WHEN source='hour' THEN 'hour' ELSE reward_id END rid, label, type, COUNT(*) issued, SUM(status='used') used FROM coupons WHERE table_id>0 GROUP BY rid, label, type ORDER BY rid")
         .map((r) => ({ rewardId: r.rid, label: r.label, type: r.type, issued: r.issued, used: r.used })),
       unpaid: live.filter((x) => !x.paid && !x.written_off).map((x) => ({ orderId: x.id, table: x.table_id, total: x.total, paidAmount: held(x), balance: Math.max(0, x.total - held(x)), updatedAt: x.updated_at })),
       writtenOff: wo.map((x) => ({ orderId: x.id, table: x.table_id, total: x.total, paidAmount: held(x), balance: Math.max(0, x.total - held(x)), writtenOffAt: x.written_off_at, updatedAt: x.updated_at })),
-      refunds: all('SELECT r.*, o.table_id, o.updated_at AS order_updated_at FROM refunds r JOIN orders o ON o.id=r.order_id ORDER BY r.id').map(refundOut),
+      refunds: all('SELECT r.*, o.table_id, o.updated_at AS order_updated_at FROM refunds r JOIN orders o ON o.id=r.order_id WHERE o.table_id>0 ORDER BY r.id').map(refundOut),
     };
   }
   function salesCsv(summary) {
@@ -1719,6 +2190,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       line(t.orders, t.billed, t.revenue, t.paidAmount, t.refundsDone, t.refundDue, t.writtenOff, t.unpaidRevenue, t.discount, t.memberDiscount, t.memberOrders), '',
       line('[결제수단별]'), line('수단', '받은 돈', '환불 완료', '순매출', '결제 건수'),
       ...PAY_METHODS.map((m) => line({ transfer: '계좌이체', cash: '현금', other: '기타' }[m], ...(s.byMethod ? [s.byMethod[m].received, s.byMethod[m].refunded, s.byMethod[m].net, s.byMethod[m].count] : ['', '', '', '']))), '',
+      ...(s.byKind ? [line('[종류별]'), line('종류', '주문수', '청구', '받은 돈', '환불 완료', '순매출', '미결제', '미수금'),
+        ...['food', 'cover'].map((k) => line(k === 'food' ? '음식' : '입장료', s.byKind[k].orders, s.byKind[k].billed, s.byKind[k].received, s.byKind[k].refunded, s.byKind[k].net, s.byKind[k].unpaid, s.byKind[k].writtenOff)), ''] : []),
+      ...(s.visitors ? [line('[방문객]'), line('총 인원', '팀 수', '인원 미입력 팀', '평균 팀 인원'), line(s.visitors.total, s.visitors.parties, s.visitors.partiesUnknown, s.visitors.avgPartySize),
+        line('시간', '인원', '팀'), ...s.visitors.byHour.map((h) => line(h.label, h.people, h.parties)), ''] : []),
       line('[시간대별 매출]'), line('시간', '주문수', '청구', '실매출', '할인'),
       ...s.byHour.map((r) => line(r.label, r.orders, r.billed, r.revenue, r.discount)), '',
       line('[메뉴별 판매]'), line('메뉴', '수량', '서비스', '금액(할인 전)'),
@@ -1749,16 +2224,17 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       const ts2 = nextTs(o);
       run('UPDATE refunds SET done_at=?, done_method=?, done_note=? WHERE id=?', now(), m, memo, id);
       run('UPDATE orders SET updated_at=? WHERE id=?', ts2, r.order_id);
+      resettle(r.order_id, 'overpaid');
       audit('refund_done', `order #${r.order_id}`, `${r.amount} won by ${m}${memo ? `, ${memo}` : ''}`, `주문 #${r.order_id} 환불 완료 · ${MKO[m]} ${W(r.amount)}${memo ? ` · ${memo}` : ''}`);
       return refundOut({ ...get('SELECT * FROM refunds WHERE id=?', id), table_id: o.table_id, order_updated_at: ts2 });
     });
   }
   // shared wipe of the day's data (reset and business-day close): menu, rewards, settings, tokens, audit log and day reports stay
   function wipeData() {
-    for (const t of ['order_items', 'orders', 'payments', 'coupons', 'plays', 'nicks', 'calls', 'waitlist', 'deposit_notices', 'refunds', 'table_clears']) run(`DELETE FROM ${t}`); // notices go; the hook secret and pay settings stay
+    for (const t of ['order_items', 'orders', 'payments', 'seat_info', 'cover_intents', 'coupons', 'plays', 'nicks', 'calls', 'waitlist', 'deposit_notices', 'refunds', 'table_clears']) run(`DELETE FROM ${t}`); // notices go; the hook secret and pay settings stay
     run('UPDATE menu_items SET sold_out=0, stock_auto=0 WHERE 1'); // sold-out flags reset; stock counters keep their numbers
     run('UPDATE menu_items SET sold_out=1, stock_auto=1 WHERE stock_left=0'); // ...so an item that ran out by count stays sold out
-    run("DELETE FROM sqlite_sequence WHERE name IN ('orders','plays','calls','waitlist','deposit_notices','refunds','table_clears')");
+    run("DELETE FROM sqlite_sequence WHERE name IN ('cover_intents','orders','plays','calls','waitlist','deposit_notices','refunds','table_clears')");
     run('UPDATE tables SET seat=1');
     run("DELETE FROM settings WHERE k IN ('ordering_open','wait_open','notice')");
     run('UPDATE rewards SET issued=0'); // definitions, active flags and configured stock stay; remaining returns to the configured stock
@@ -1770,13 +2246,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   // business day close: freeze the sales summary, then wipe like reset. Returns the report.
   // what would be lost from the live tables: staff must see it (or force)
   function closeCheck(force) {
-    const refund = get('SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM refunds WHERE done_at IS NULL');
-    const unpaid = get(`SELECT COUNT(*) n, COALESCE(SUM(MAX(0, total - ${heldSql()})),0) s FROM orders WHERE status!='cancelled' AND paid=0 AND written_off=0`);
-    const wo = get(`SELECT COUNT(*) n, COALESCE(SUM(MAX(0, total - ${heldSql()})),0) s FROM orders WHERE status!='cancelled' AND paid=0 AND written_off=1`);
-    const unserved = get("SELECT COUNT(*) n FROM orders WHERE status IN ('pending','cooking')").n;
+    const refund = get('SELECT COUNT(*) n, COALESCE(SUM(r.amount),0) s FROM refunds r JOIN orders o ON o.id=r.order_id WHERE r.done_at IS NULL AND o.table_id>0');
+    const unpaid = get(`SELECT COUNT(*) n, COALESCE(SUM(MAX(0, total - ${heldSql()})),0) s FROM orders WHERE status!='cancelled' AND paid=0 AND written_off=0 AND table_id>0`);
+    const wo = get(`SELECT COUNT(*) n, COALESCE(SUM(MAX(0, total - ${heldSql()})),0) s FROM orders WHERE status!='cancelled' AND paid=0 AND written_off=1 AND table_id>0`);
+    const unserved = get("SELECT COUNT(*) n FROM orders WHERE status IN ('pending','cooking') AND table_id>0").n;
     const pn = get("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM deposit_notices WHERE status IN ('pending','review')");
     if (force === true) return;
-    if (!get('SELECT 1 FROM orders LIMIT 1')) fail(409, 'nothing_to_close', '마감할 주문이 없습니다.');
+    if (!get('SELECT 1 FROM orders WHERE table_id>0 LIMIT 1')) fail(409, 'nothing_to_close', '마감할 주문이 없습니다.');
     if (refund.n || unpaid.n || wo.n || unserved || pn.n) {
       fail(409, 'open_items', '환불 예정, 미입금, 서빙 전 주문 또는 미수금이 남아 있습니다. 확인 후 force로 마감하면 보고서에 그대로 기록됩니다.', {
         refundDue: { entries: refund.n, amount: refund.s }, unpaid: { orders: unpaid.n, amount: unpaid.s }, unserved: { orders: unserved }, writtenOff: { orders: wo.n, amount: wo.s }, pendingNotices: { count: pn.n, amount: pn.s },
@@ -1788,7 +2264,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     invalidate();
     return tx(() => {
       closeCheck(force);
-      const first = get('SELECT MIN(created_at) m FROM orders').m;
+      const first = get('SELECT MIN(created_at) m FROM orders WHERE table_id>0').m;
       const label = new Date((first ?? now()) + 9 * HOUR).toISOString().slice(0, 10); // KST date of the first order (or today)
       const summary = sales();
       const id = Number(run('INSERT INTO day_reports(label, created_at, summary) VALUES(?,?,?)', label, now(), JSON.stringify({ ...summary, generatedAt: now(), forced: force === true, pendingNotices: all("SELECT id, received_at receivedAt, amount, status FROM deposit_notices WHERE status IN ('pending','review') ORDER BY id").map((n) => ({ ...n })) })).lastInsertRowid);
@@ -1803,7 +2279,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function listAudit(before, limit) {
     const lim = Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 200) : 100;
     const rows = before != null ? all('SELECT * FROM audit_log WHERE id<? ORDER BY id DESC LIMIT ?', before, lim) : all('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?', lim);
-    return { entries: rows.map((r) => ({ id: r.id, at: r.at, action: r.action, target: r.target, summary: r.summary, summaryKo: r.summary_ko || r.summary })), next: rows.length === lim ? rows[rows.length - 1].id : null };
+    return { entries: rows.map((r) => ({ id: r.id, at: r.at, action: r.action, target: r.target, summary: r.summary, summaryKo: r.summary_ko || r.summary, test: !!r.test })), next: rows.length === lim ? rows[rows.length - 1].id : null };
   }
 
   // ---------- staff sessions / tokens / backup ----------
@@ -1835,7 +2311,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return r ? r.fails : 5;
   }
 
-  const tokens = () => all('SELECT id, token FROM tables WHERE id<=? ORDER BY id', tableCount);
+  const tokens = () => all('SELECT id, token FROM tables WHERE id BETWEEN 1 AND ? ORDER BY id', tableCount); // the printed QR codes: real tables only
+  const guestTokens = () => all('SELECT id, token FROM tables WHERE id<=? ORDER BY id', tableCount); // everything a guest URL may resolve to: the test table (0) included
 
   // keeps the newest `keep` copies plus the oldest copy of each of the 8 most recent older hours (within 48 h).
   // periodic backups are skipped (logged once) while the DB file exceeds backupSkipBytes.
@@ -1904,8 +2381,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   // contradicts the money recorded, the flag is trusted. Idempotent: a second boot changes nothing.
   tx(() => {
     const fixed = new Set();
+    const hasLedger = (oid) => !!get('SELECT 1 FROM payments WHERE order_id=?', oid);
     for (const o of all("SELECT * FROM orders WHERE status!='cancelled' AND paid=1 AND total>0")) { // (a) flagged paid, money held < total
       if (heldOf(o) >= o.total) continue;
+      if (hasLedger(o.id)) { run('UPDATE orders SET paid=0, paid_at=NULL WHERE id=?', o.id); fixed.add(o.id); continue; } // the ledger is the truth: repair the flag, never book money nobody paid
       run("UPDATE orders SET paid_amount=?, paid_method='other', paid_at=COALESCE(paid_at,updated_at) WHERE id=?", o.total + refundDoneSum(o.id), o.id);
       syncRefund(o.id, 'overpaid'); fixed.add(o.id);
     }
@@ -1915,16 +2394,20 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       syncRefund(o.id, 'overpaid'); fixed.add(o.id);
     }
     for (const o of all("SELECT * FROM orders WHERE status='cancelled'")) { // (c) cancelled while paid: the money held is owed back
-      if (o.paid === 1 && o.paid_amount === 0 && o.total > 0) { run("UPDATE orders SET paid_amount=?, paid_method=COALESCE(paid_method,'other') WHERE id=?", o.total, o.id); fixed.add(o.id); }
+      if (o.paid === 1 && heldOf(o) <= 0) {
+        if (o.paid_amount === 0 && o.total > 0 && !hasLedger(o.id)) run("UPDATE orders SET paid_amount=?, paid_method=COALESCE(paid_method,'other') WHERE id=?", o.total, o.id); // legacy flag-only row
+        else run('UPDATE orders SET paid=0, paid_at=NULL WHERE id=?', o.id); // money voided or refunded: not paid any more
+        fixed.add(o.id);
+      }
       const before = refundOpenSum(o.id);
       syncRefund(o.id, 'legacy_cancelled', o.updated_at); // dated with the cancellation, not with this boot
       if (refundOpenSum(o.id) !== before) fixed.add(o.id);
     }
     // per-payment ledger (sales by method) must add up to paid_amount: backfill / repair
     for (const o of all('SELECT id, paid_amount, paid_method, paid_at FROM orders')) {
-      const s = get('SELECT COALESCE(SUM(amount),0) s FROM payments WHERE order_id=?', o.id).s;
+      const s = get('SELECT COALESCE(SUM(amount),0) s FROM payments WHERE order_id=? AND voided_at IS NULL', o.id).s;
       if (s === o.paid_amount) continue;
-      if (s > o.paid_amount) run('DELETE FROM payments WHERE order_id=?', o.id);
+      if (s > o.paid_amount) run('DELETE FROM payments WHERE order_id=? AND voided_at IS NULL', o.id);
       const have = s > o.paid_amount ? 0 : s;
       if (o.paid_amount - have > 0) run('INSERT INTO payments(order_id,amount,method,at) VALUES(?,?,?,?)', o.id, o.paid_amount - have, o.paid_method || 'other', o.paid_at || now());
     }
@@ -1941,14 +2424,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
 
   return {
-    audit, dry, editItems, addService, moveOrder, refundDone, unclearTable, setNotice, createManualCoupon, voidCoupon, setWaitTimeout, sweepWait, listAudit, closeCheck, closeDay, listDayReports, dayReport, dayReportCsv,
+    audit, dry, drainEvents, depositPipeline, purgeIntents, coverSettings, setCoverSettings, setPartyGuest, setPartyStaff, coverWaive, coverRestore, voidPayment, createIntent, cancelIntent, staffCancelIntent, editItems, addService, moveOrder, refundDone, unclearTable, setNotice, createManualCoupon, voidCoupon, setWaitTimeout, sweepWait, listAudit, closeCheck, closeDay, listDayReports, dayReport, dayReportCsv,
     createOrder, setStatus, setPaid, guestCancel, menuView, setSoldOut, setOrdering, orderingOpen,
     setTableCount, rotateToken, tableCountNow: () => tableCount, payInfo, staffPay: payAll, setPay, setDepositor, ingestDeposit, previewDeposit, listDeposits, depositCounts, assignDeposit, attachDeposit, dismissDeposit, setAutoConfirm, depositSecret, rotateDepositSecret, checkDepositSecret, deviceSecret, setPhoto, deletePhoto, photosDir, createReward, updateReward, deleteReward, hourlyReward, setHourlyReward, memberSettings, setMemberSettings, listRewards, createItem, updateItem, deleteItem, createCategory, renameCategory, deleteCategory, reorderMenu, memberPct,
     startPlay, finishPlay, redeem, awardHour, setStock, setNick, addCall, resolveCall,
     addWait, waitStatus, waitCancel, waitAction, setWaitOpen, clearWait, waitInfo,
     newLoginKey, validLoginKey, loginKeyOk, loginKeyFail,
     guestState, staffState, kitchenState, boardState, clearTable, moveTable, sales, salesCsv, reset,
-    newSession, validSession, endSession, tokens, backup, orderById,
+    newSession, validSession, endSession, tokens, guestTokens, testSettings, setTestSettings, rotateTestToken, resetTest, TEST_FAKE_MEMBER_ID, backup, orderById,
     close: () => db.close(),
   };
 }

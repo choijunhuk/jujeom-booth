@@ -11,6 +11,9 @@
   font-family: "NeoDgm";
   src: url(__BASE__/static/brand/fonts/neodgm.woff2) format("woff2");
   font-display: swap;
+  /* Digits are excluded on purpose: this font's "4" has a closed top and reads as "9"
+     (14,000 vs 19,000, table 4 vs 9). U+0030-0039 fall through to the system font. */
+  unicode-range: U+0000-002F, U+003A-10FFFF;
 }
 :root {
   --y-bg: #008080;            /* desktop teal; alt silver-blue #c9d6ea */

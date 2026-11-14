@@ -35,6 +35,7 @@
   var gate;
   function stopApp() {
     if (S.live) { S.live.close(); S.live = null; }
+    PW.reset();
     document.querySelectorAll('dialog[open]').forEach(function (d) {
       if (d.classList.contains('wide') || d.classList.contains('hub-sheet')) d.close(); else d.dispatchEvent(new Event('cancel', { cancelable: true })); // resolves pending confirms and removes the node
     });
@@ -44,12 +45,15 @@
     var app = $('#app');
     if (!app.firstChild) buildApp(app);
     S.data = null; S.seen = null; S.sales = null;
+    PW.reset(); PW.mode = 'staff'; PW.refresh = refresh;
+    PW.openDeposits = function (id) { setTab('deposits'); if (id != null) setTimeout(function () { var el = V.deposits.root.querySelector('.ocard.dep[data-nid="' + id + '"]') || V.deposits.root.querySelector('.ocard.dep'); if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('pick'); setTimeout(function () { el.classList.remove('pick'); }, 3000); } }, 150); };
     if (S.live) S.live.close();
     shell.conn.set('wait');
-    S.live = SC.live({ sse: '/api/staff/events', poll: '/api/staff/state', onState: onState, onStatus: function (st) { shell.conn.set(st); }, hints: { new_deposit: onNewDeposit, deposit_matched: onDepositMatched } });
+    S.live = SC.live({ sse: '/api/staff/events', poll: '/api/staff/state', onState: onState, onStatus: function (st) { shell.conn.set(st); }, hints: { new_deposit: onNewDeposit, deposit_matched: onDepositMatched, payment: PW.hintPayment, payment_void: PW.hintVoid } });
     SC.wake.sync();
     var want = location.hash.slice(1);
     setTab(V[want] ? want : S.tab);
+    if (want === 'test') SO.goSettings('test');
   }
 
   function buildApp(app) {
@@ -77,8 +81,8 @@
     if (window.ResizeObserver) new ResizeObserver(function () { document.documentElement.style.setProperty('--toph', top.offsetHeight + 'px'); }).observe(top);
     S.nagBox = buildNag();
     S.noticeStrip = SO.buildNoticeStrip();
-    app.append(SC.audioStrip(), S.nagBox.el, top, S.noticeStrip.el, tabs, main, bill);
-    window.addEventListener('hashchange', function () { var t = location.hash.slice(1); if (V[t] && t !== S.tab) setTab(t); });
+    app.append(SC.audioStrip(), S.nagBox.el, top, S.noticeStrip.el, PW.el, tabs, main, bill);
+    window.addEventListener('hashchange', function () { var t = location.hash.slice(1); if (t === 'test') SO.goSettings('test'); else if (V[t] && t !== S.tab) setTab(t); });
   }
 
   function setTab(id) {
@@ -97,14 +101,15 @@
   function onState(d) {
     S.data = d;
     detectNew(d);
-    var pending = d.orders.filter(function (o) { return o.status === 'pending'; }).length;
+    SC.setTestUrl(d.testTable && d.testTable.url);
+    PW.feed(d);
+    var pending = d.orders.filter(function (o) { return o.status === 'pending' && !SC.isTestOrder(o); }).length;
     var waiting = d.waitlist.filter(function (w) { return w.status === 'waiting'; }).length;
     setBadge('orders', pending);
     setBadge('calls', d.calls.length + waiting);
     var depN = d.deposit ? (d.deposit.pending || 0) + (d.deposit.unparsed || 0) : 0;
     var refN = SO.refundCount(d);
     setBadge('deposits', depN + refN);
-    if (S.depPrev != null && depN > S.depPrev && Date.now() - S.depAlertAt > 3000) { S.depAlertAt = Date.now(); SC.attention('deposit'); SC.toast('입금 확인이 필요해요', 'ok'); } // polling fallback (no SSE hints)
     S.depPrev = depN;
     SC.setTitle(pending + d.calls.length + depN + refN, TITLE);
     S.noticeStrip.update(d);
@@ -128,13 +133,13 @@
     var prev = S.seen;
     S.seen = ids;
     if (!prev) return;
-    var no = d.orders.filter(function (o) { return !prev.o.has(o.id) && o.status === 'pending'; });
+    var no = d.orders.filter(function (o) { return !prev.o.has(o.id) && o.status === 'pending' && (!SC.isTestOrder(o) || SC.testSound()); });
     var nc = d.calls.filter(function (c) { return !prev.c.has(c.id); });
     var nw = d.waitlist.filter(function (w) { return !prev.w.has(w.id); });
-    no.forEach(function (o) { SC.notif.show('새 주문 · ' + o.table + '번 테이블', SC.itemsText(o.items) + ' · ' + won(o.total), 'order-' + o.id); });
+    no.forEach(function (o) { SC.notif.show('새 주문 · ' + (SC.isTestOrder(o) ? '테스트' : o.table + '번 테이블'), SC.itemsText(o.items) + ' · ' + won(o.total), 'order-' + o.id); });
     nc.forEach(function (c) { SC.notif.show('직원 호출 · ' + c.table + '번 테이블', c.type, 'call-' + c.id); });
     nw.forEach(function (w) { SC.notif.show('새 대기 등록', w.nick + ' · ' + w.size + '명', 'wait-' + w.id); });
-    if (no.length) { SC.attention('order'); SC.toast('새 주문 · ' + no.map(function (o) { return o.table + '번'; }).join(', ') + ' 테이블', 'ok'); }
+    if (no.length) { SC.attention('order'); SC.toast('새 주문 · ' + no.map(function (o) { return SC.isTestOrder(o) ? '테스트' : o.table + '번'; }).join(', ') + (no.every(SC.isTestOrder) ? '' : ' 테이블'), 'ok'); }
     if (nc.length) {
       if (no.length) setTimeout(function () { SC.attention('call'); }, 800); else SC.attention('call');
       SC.toast('직원 호출 · ' + nc.map(function (c) { return c.table + '번 ' + c.type; }).join(', '), 'ok');
@@ -174,7 +179,7 @@
     var nb = S.nagBox;
     if (!nb || !S.data || $('#app').hidden) return;
     var now = Date.now(), d = S.data;
-    var oo = d.orders.filter(function (o) { return o.status === 'pending' && now - o.createdAt > NAG_ORDER_MS; }).sort(function (a, b) { return a.createdAt - b.createdAt; });
+    var oo = d.orders.filter(function (o) { return o.status === 'pending' && !SC.isTestOrder(o) && now - o.createdAt > NAG_ORDER_MS; }).sort(function (a, b) { return a.createdAt - b.createdAt; });
     var cc = d.calls.filter(function (c) { return now - c.createdAt > NAG_CALL_MS; }).sort(function (a, b) { return a.createdAt - b.createdAt; });
     if (!oo.length && !cc.length) { if (!nb.el.hidden) { nb.el.hidden = true; setNagHeight(0); } return; }
     var parts = [];
@@ -207,6 +212,8 @@
       chipRow.appendChild(c);
     });
     var unpaidChip = h('button', { class: 'chip', type: 'button', 'aria-pressed': 'false', onclick: function () { S.onlyUnpaid = !S.onlyUnpaid; render(); } }, '미입금만 보기');
+    try { S.hideTest = localStorage.getItem('sc_hidetest') === '1'; } catch (e) { S.hideTest = false; }
+    var testChip = h('button', { class: 'chip', type: 'button', 'aria-pressed': 'false', hidden: true, onclick: function () { S.hideTest = !S.hideTest; try { localStorage.setItem('sc_hidetest', S.hideTest ? '1' : '0'); } catch (e) { /* ignore */ } render(); } }, '테스트 주문 숨기기');
     var board = h('div', { class: 'board' });
     var cols = {};
     ['pending', 'cooking', 'served', 'cancelled'].forEach(function (st) {
@@ -219,12 +226,16 @@
       h('h3', { class: 'sec-title' }, '아직 주문이 없어요'),
       h('p', { class: 'muted' }, '새 주문이 들어오면 여기에 바로 떠요. 그동안 다른 화면으로 이동할 수 있어요.'),
       SC.hubTiles('staff'));
-    var headChips = h('div', { class: 'chips' }, unpaidChip);
-    root.append(h('div', { class: 'view-head' }, h('h2', null, '주문'), headChips), home, chipRow, board);
+    var headChips = h('div', { class: 'chips' }, unpaidChip, testChip);
+    var coverStrip = SO.buildCoverStrip(), recent = SO.buildRecentPays();
+    root.append(h('div', { class: 'view-head' }, h('h2', null, '주문'), headChips), recent.el, coverStrip.el, home, chipRow, board);
 
     function render() {
       var by = { pending: [], cooking: [], served: [], cancelled: [] };
+      coverStrip.update(S.data); recent.update(S.data);
       S.data.orders.forEach(function (o) {
+        if (o.kind === 'cover') return; // cover orders never enter the kitchen columns (strip above)
+        if (S.hideTest && SC.isTestOrder(o)) return;
         if (S.onlyUnpaid && (o.paid || o.status === 'cancelled')) return;
         (by[o.status] || by.pending).push(o);
       });
@@ -232,7 +243,10 @@
       by.cooking.sort(function (a, b) { return (a.cookingAt || a.updatedAt) - (b.cookingAt || b.updatedAt); });
       by.served.sort(function (a, b) { return b.id - a.id; });
       by.cancelled.sort(function (a, b) { return b.id - a.id; });
-      var none = !S.data.orders.length;
+      var none = !S.data.orders.some(function (o) { return o.kind !== 'cover'; });
+      var anyTest = S.data.orders.some(SC.isTestOrder);
+      testChip.hidden = !anyTest && !S.hideTest;
+      testChip.setAttribute('aria-pressed', S.hideTest ? 'true' : 'false');
       home.hidden = !none; board.hidden = none; chipRow.hidden = none; headChips.hidden = none;
       board.dataset.f = S.filter;
       unpaidChip.setAttribute('aria-pressed', S.onlyUnpaid ? 'true' : 'false');
@@ -290,6 +304,7 @@
     if (o.writtenOff) tags.push(h('span', { class: 'tag bad' }, '미수금'));
     if (live && !o.paid && o.depositor) tags.push(h('span', { class: 'tag mute' }, '입금자 ' + o.depositor));
     if (live && o.paid && o.depositor) tags.push(h('span', { class: 'tag mute' }, o.depositor));
+    if (SC.isTestOrder(o)) tags.unshift(h('span', { class: 'tag tst' }, '테스트'));
     if (o.member) tags.push(h('span', { class: 'tag info' }, '★ COMS 회원'));
     if (o.couponCode) tags.push(h('span', { class: 'tag info' }, '쿠폰 ' + o.couponCode));
     var act = h('div', { class: 'oact' });
@@ -302,9 +317,10 @@
       row.appendChild(h('button', { class: 'btn more', type: 'button', onclick: function () { SO.openOrderSheet(o.id); } }, '⋯ 더보기'));
       act.appendChild(row);
     }
-    return h('article', { class: 'ocard st-' + o.status + (live && !o.paid ? ' unpaid' : ''), dataset: { oid: o.id } },
+    var isT = SC.isTestOrder(o);
+    return h('article', { class: 'ocard st-' + o.status + (live && !o.paid ? ' unpaid' : '') + (isT ? ' is-test' : ''), dataset: { oid: o.id } },
       h('div', { class: 'ohead' },
-        h('div', { class: 'tno' }, h('span', { class: 'n', text: o.table }), h('span', { class: 'u', text: '번 테이블' })),
+        isT ? h('div', { class: 'tno' }, h('span', { class: 'n tst', text: '테스트' })) : h('div', { class: 'tno' }, h('span', { class: 'n', text: o.table }), h('span', { class: 'u', text: '번 테이블' })),
         h('div', { class: 'ometa' },
           h('div', { class: 'line' }, h('span', { class: 'oid' }, '#' + o.id), SC.timeEl(o.createdAt, 'ago')),
           h('div', { class: 'line' }, tags))),
@@ -326,17 +342,20 @@
       var hid = S.data.hiddenTablesWithOpenOrders || [];
       SC.fill(warn, hid.length ? h('div', { class: 'banner warn', role: 'alert' }, h('span', null, hiddenTablesText(hid)),
         h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { setTab('settings'); setTimeout(function () { var el = document.getElementById('set-tables'); if (el) el.scrollIntoView({ block: 'start' }); }, 80); } }, '테이블 수 늘리러 가기')) : null);
-      SC.reconcile(grid, S.data.tables.slice().sort(function (a, b) { return a.number - b.number; }), function (t) { return t.number; }, sig, tableCard, null);
+      SC.reconcile(grid, S.data.tables.slice().sort(function (a, b) { return a.number - b.number; }), function (t) { return t.number; }, function (t) { return sig([t, SO.tileSig(t)]); }, tableCard, null);
     }
     return { root: root, render: render };
   }
   function tableCard(t) {
     var occ = t.status === 'occupied';
     var owes = occ && t.unpaidTotal > 0;
+    var cchip = SO.coverChip(t);
     var main = h('button', { class: 'tcard' + (occ ? ' occ' : '') + (owes ? ' owes' : ''), type: 'button', onclick: function () { openBill(t.number); }, 'aria-label': t.number + '번 테이블 ' + (occ ? '사용 중' : '비어 있음') },
       h('div', { class: 'n' }, String(t.number), h('small', null, '번')),
       h('div', null, occ ? h('span', { class: 'tag warn' }, '사용 중') : h('span', { class: 'tag mute' }, '비어 있음')),
       occ ? h('div', { class: 'meta' }, (t.minutesSeated != null ? t.minutesSeated + '분째' : '') + ' · 주문 ' + t.orderCount + '건') : null,
+      (occ || t.people != null) && (t.people != null || SO.coverUIOn()) ? h('div', { class: 'meta people' + (t.people == null ? ' none' : '') }, SO.peopleText(t)) : null,
+      cchip ? h('div', null, h('span', { class: 'tag ' + cchip.cls }, cchip.text)) : null,
       owes ? h('div', { class: 'owe' }, '미입금 ' + won(t.unpaidTotal)) : (occ && t.orderCount ? h('div', { class: 'tag ok' }, '✓ 입금 완료') : null),
       t.openCalls ? h('div', null, h('span', { class: 'tag bad solid' }, '호출 ' + t.openCalls)) : null);
     if (!t.unclearUntil || t.unclearUntil <= Date.now()) return main;
@@ -400,6 +419,14 @@
   }
   function billOrder(o) {
     var live = o.status !== 'cancelled';
+    if (o.kind === 'cover') {
+      return h('div', { class: 'bill-order' + (live ? '' : ' cancelled') },
+        h('div', { class: 'line', style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:center' }, h('span', { class: 'tag info' }, coverName()),
+          o.waived ? h('span', { class: 'tag mute' }, '면제') : o.paid ? h('span', { class: 'tag ok' }, '✓ 납부') : o.shares && o.shares.paid > 0 ? h('span', { class: 'tag warn' }, o.shares.paid + '/' + o.shares.total + '명 납부') : h('span', { class: 'tag bad' }, '미납'),
+          h('b', { class: 'num', style: 'margin-left:auto' }, won(o.total))),
+        h('div', { class: 'muted' }, o.shares ? o.shares.total + '명 × ' + won(o.unitPrice) : '테이블당'),
+        h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { SO.openTableSheet(o.table); } }, coverName() + ' 관리'));
+    }
     return h('div', { class: 'bill-order' + (live ? '' : ' cancelled') },
       h('div', { class: 'line', style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:center' },
         h('span', { class: 'oid' }, '#' + o.id), h('span', { class: 'tag ' + STTAG[o.status] }, LABEL[o.status]),
@@ -452,7 +479,8 @@
       message: from + '번 테이블의 주문 · 쿠폰 · 게임 기록을 ' + x.number + '번으로 옮겨요.' + (x.status === 'occupied' ? ' ' + x.number + '번에 이미 손님이 있어 합쳐져요.' : '') + '\n' + from + '번 테이블은 새 손님용으로 비워지고(정리와 같음) 열린 호출도 처리돼요.',
     }).then(function (ok) {
       if (!ok) return;
-      return api('/api/staff/tables/move', { from: from, to: x.number }).then(function (r) {
+      return api('/api/staff/tables/move', { from: from, to: x.number }).then(null, function (e) { if (e.code === 'cover_conflict') { closeBill(); SO.coverConflict(from, x.number); return null; } throw e; }).then(function (r) {
+        if (!r) return;
         SC.toast('주문 ' + r.orders + '건 · 쿠폰 ' + r.coupons + '개를 옮겼어요', 'ok');
         S.billTable = x.number; S.moving = false; bill._sig = '';
         return refresh().then(renderBill);
@@ -512,7 +540,7 @@
   }
   function waitAct(x, what, label, okMsg, cls) {
     return abtn(cls || 'btn', label, function () {
-      var go = function () { return api('/api/staff/wait/' + x.id + '/' + what).then(refresh); };
+      var go = function () { if (what === 'seat') return SO.seatWait(x); return api('/api/staff/wait/' + x.id + '/' + what).then(refresh); };
       if (what !== 'cancel') return go();
       return SC.confirm({ title: '대기 취소', message: x.nick + ' (' + x.size + '명) 대기를 취소할까요?', ok: '대기 취소', danger: true, cancel: '돌아가기' }).then(function (ok) { if (ok) return go(); });
     }, okMsg);
@@ -869,7 +897,7 @@
   function mapErr(fn) { return fn().then(null, function (e) { menuFail(e); }); }
 
   // small text prompt dialog -> Promise<string|null>
-  function askText(title, label, value, max, msg) {
+  function askText(title, label, value, max, msg, okText) {
     return new Promise(function (resolve) {
       var done = false;
       var input = h('input', { class: 'field', type: 'text', maxlength: String(max), value: value || '', 'aria-label': label });
@@ -877,7 +905,7 @@
       function finish(v) { if (done) return; done = true; dlg.close(); dlg.remove(); resolve(v); }
       dlg.appendChild(h('form', { class: 'dlg-body', onsubmit: function (e) { e.preventDefault(); var v = input.value.trim(); if (v) finish(v); } },
         h('h2', { class: 'dlg-title' }, title), msg ? h('p', { class: 'dlg-msg' }, msg) : null, h('label', { class: 'lab' }, label, input),
-        h('div', { class: 'dlg-actions' }, h('button', { class: 'btn', type: 'button', onclick: function () { finish(null); } }, '취소'), h('button', { class: 'btn btn-primary', type: 'submit' }, '저장'))));
+        h('div', { class: 'dlg-actions' }, h('button', { class: 'btn', type: 'button', onclick: function () { finish(null); } }, '취소'), h('button', { class: 'btn btn-primary', type: 'submit' }, okText || '저장'))));
       dlg.addEventListener('cancel', function (e) { e.preventDefault(); finish(null); });
       document.body.appendChild(dlg); dlg.showModal(); input.focus(); input.select();
     });
@@ -1172,6 +1200,7 @@
   // deposits (bank deposit notices): one-tap confirmation
   // =====================================================================
   // Open notices come from state.depositNotices (newest 50); this paged endpoint feeds the history / ignored lists and "더 보기".
+  function coverName() { return (S.data && S.data.cover && S.data.cover.label) || '입장료'; }
   function loadDeposits(more) {
     var before = more && S.deposits && S.deposits.next != null ? '&before=' + S.deposits.next : '';
     return SC.api('/api/staff/deposits?limit=50' + before).then(function (r) {
@@ -1180,16 +1209,9 @@
     }, function () { return null; });
   }
   function noticeAmount(n) { return n.amount != null ? (n.amountGuessed ? '추정 ' : '') + won(n.amount) : '금액 읽기 실패'; }
-  function onNewDeposit(ev) {
-    S.depAlertAt = Date.now();
-    SC.attention('deposit');
-    SC.toast('입금 확인이 필요해요', 'ok');
-    loadDeposits().then(function (r) {
-      var n = r && r.notices.filter(function (x) { return x.id === ev.id; })[0];
-      SC.notif.show('입금 확인 필요', n ? noticeAmount(n) + ' · ' + (n.depositor || '이름 없음') : '새 입금 알림', 'dep-' + ev.id);
-    });
-  }
-  function onDepositMatched() { SC.audio.beep('tick'); loadDeposits(); }
+  // arrival banner, sound and notification live in pay-alerts.js (PW); here only the data reloads
+  function onNewDeposit(ev) { PW.hintDeposit(ev); loadDeposits(); }
+  function onDepositMatched() { refresh(); loadDeposits(); }
 
   // Amount differs from the order's remaining balance: staff must say why (note is required by the server and kept in the audit log).
   function confirmMismatch(n, o, balance) {
@@ -1200,28 +1222,80 @@
   }
   function assignNotice(n, o, force) {
     var pre = n.status === 'review'
-      ? SC.confirm({ title: '취소·정정 문자일 수 있어요', danger: true, ok: '그래도 확인', cancel: '돌아가기', message: '문자: ' + n.text + '\n정말 ' + o.table + '번 주문 #' + o.id + ' (' + won(o.total) + ')의 입금이 맞나요?' })
+      ? SC.confirm({ title: '취소·정정 문자일 수 있어요', danger: true, ok: '그래도 확인', cancel: '돌아가기', message: '문자: ' + SC.safeText(n.text, 80) + '\n정말 ' + o.table + '번 주문 #' + o.id + ' (' + won(o.total) + ')의 입금이 맞나요?' })
       : Promise.resolve(true);
-    return pre.then(function (ok) { if (ok) return doAssign(n, o, force || n.status === 'review'); });
+    return pre.then(function (ok) { if (ok) return n.amountGuessed ? manualSheet(n, o, 'assign') : doAssign(n, o, force || n.status === 'review'); });
+  }
+  // The notice amount is a GUESS (or the text has parse reasons): the server refuses a plain confirm (409 amount_guessed).
+  // Staff must type the amount they checked in the bank app (no prefill) and a note; sent as force + note + amount.
+  function manualSheet(n, o, kind) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var amt = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '1', step: '1', required: true, autocomplete: 'off', 'aria-label': '은행 앱에서 확인한 실제 입금액 (원)' });
+      var note = h('input', { class: 'field', type: 'text', maxlength: '60', required: true, autocomplete: 'off', 'aria-label': '이유 메모 (필수, 60자 이하)' });
+      var err = h('p', { class: 'err', role: 'alert' });
+      var dlg = h('dialog', { class: 'dlg', 'aria-label': '실제 입금액 직접 입력' });
+      function finish(v) { if (done) return; done = true; dlg.close(); dlg.remove(); resolve(v); }
+      function submit() {
+        var a = Number(amt.value), nt = note.value.trim();
+        if (amt.value === '' || !Number.isInteger(a) || a < 1) { err.textContent = '은행 앱에서 확인한 입금액을 원 단위 숫자로 입력해 주세요.'; amt.focus(); return; }
+        if (!nt) { err.textContent = '이유 메모를 적어 주세요. 작업 기록에 남아요.'; note.focus(); return; }
+        var body = { orderId: o.id, force: true, note: nt, amount: a };
+        if (kind === 'assign' && o.intentId) body.intentId = o.intentId;
+        sub.disabled = true;
+        api('/api/staff/deposits/' + n.id + '/' + kind, body).then(function () {
+          SC.toast(kind === 'attach' ? o.table + '번 주문 #' + o.id + '에 입금 알림을 연결했어요 (입금 상태는 그대로)' : o.table + '번 테이블 주문 #' + o.id + ' 입금 확인했어요 · ' + won(a), 'ok');
+          finish(true); return Promise.all([refresh(), loadDeposits()]);
+        }, function (e) {
+          sub.disabled = false;
+          if (['notice_closed', 'order_paid', 'order_unpaid', 'order_cancelled', 'order_has_notice', 'no_notice', 'no_order', 'no_intent'].indexOf(e.code) >= 0) { SC.toast(SC.errText(e), 'error'); finish(null); refresh(); loadDeposits(); return; }
+          err.textContent = SC.errText(e);
+        });
+      }
+      var sub = h('button', { class: 'btn btn-primary', type: 'submit' }, '이 금액으로 입금 확인');
+      dlg.appendChild(h('form', { class: 'dlg-body', novalidate: true, onsubmit: function (e) { e.preventDefault(); submit(); } },
+        h('h2', { class: 'dlg-title' }, '실제 입금액을 직접 입력해 주세요'),
+        h('p', { class: 'dlg-msg warnline' }, '보낸 사람이 이름 칸에 숫자를 적어 금액을 속일 수 있어요. 은행 앱에서 실제 입금액을 확인하세요.'),
+        h('pre', { class: 'rawtext' }, SC.cleanRaw(n.text)),
+        n.amount != null ? h('p', { class: 'guess' }, h('s', null, won(n.amount)), h('span', null, ' 문자에서 추정한 금액 · 믿지 마세요')) : null,
+        h('p', { class: 'muted' }, o.table + '번 · 주문 #' + o.id + ' · ' + (o.intentId ? '"낼게요" 요청 · ' : '') + '남은 금액 ' + won(o.balance != null ? o.balance : o.total)),
+        h('label', { class: 'lab' }, '실제 입금액 (원, 은행 앱에서 확인)', amt),
+        h('label', { class: 'lab' }, '이유 메모 (필수, 60자 이하)', note),
+        err,
+        h('div', { class: 'dlg-actions' }, h('button', { class: 'btn', type: 'button', onclick: function () { finish(null); } }, '취소'), sub)));
+      dlg.addEventListener('cancel', function (e) { e.preventDefault(); finish(null); });
+      document.body.appendChild(dlg); dlg.showModal(); amt.focus();
+    });
   }
   function doAssign(n, o, force, note) {
     var body = force ? { orderId: o.id, force: true } : { orderId: o.id };
+    if (o.intentId) body.intentId = o.intentId;
     if (note) body.note = note;
     return api('/api/staff/deposits/' + n.id + '/assign', body).then(function () {
       SC.toast(o.table + '번 테이블 주문 #' + o.id + ' 입금 확인했어요', 'ok');
       return Promise.all([refresh(), loadDeposits()]);
     }, function (e) {
+      if (e.code === 'amount_guessed') return manualSheet(n, o, 'assign');
       if (e.code === 'amount_mismatch' && !note) return confirmMismatch(n, o, e.data && e.data.orderBalance).then(function (v) { if (v) return doAssign(n, o, true, v); });
       if (e.code === 'note_required' && !note) return confirmMismatch(n, o).then(function (v) { if (v) return doAssign(n, o, true, v); });
+      if (e.code === 'intent_stale' && !note) {
+        var d0 = e.data || {}, extra = Math.max(0, (d0.intentShares || 0) - (d0.shares || 0)) * (d0.unitPrice || 0);
+        refresh(); loadDeposits();
+        return askText('남은 몫이 달라졌어요', '이유 메모 (필수, 60자 이하)', '', 60,
+          '이 요청은 ' + d0.intentShares + '명분인데 지금 남은 몫은 ' + d0.shares + '명분이에요.\n"' + d0.shares + '명분만 확인"을 누르면 남은 ' + d0.shares + '명분은 입금 확인으로 기록하고, 넘치는 ' + (extra ? won(extra) : '나머지') + '은 환불 대기에 올라가요.\n아니면 취소하고 입금 탭에서 다른 후보를 골라 주세요.',
+          '남은 ' + d0.shares + '명분만 확인 · 나머지는 환불 대기').then(function (v) { if (v) return doAssign(n, o, true, v); });
+      }
       menuFail(e);
       if (e.code === 'notice_closed' || e.code === 'order_paid' || e.code === 'order_cancelled' || e.code === 'no_notice') { refresh(); loadDeposits(); }
     });
   }
   function attachNotice(n, o, note) {
+    if (n.amountGuessed && !note) return manualSheet(n, o, 'attach');
     return api('/api/staff/deposits/' + n.id + '/attach', note ? { orderId: o.id, force: true, note: note } : { orderId: o.id }).then(function () {
       SC.toast(o.table + '번 주문 #' + o.id + '에 입금 알림을 연결했어요 (입금 상태는 그대로)', 'ok');
       return Promise.all([refresh(), loadDeposits()]);
     }, function (e) {
+      if (e.code === 'amount_guessed') return manualSheet(n, o, 'attach');
       if ((e.code === 'amount_mismatch' || e.code === 'note_required') && !note) return confirmMismatch(n, o, e.data && e.data.orderBalance).then(function (v) { if (v) return attachNotice(n, o, v); });
       menuFail(e); if (e.code === 'notice_closed' || e.code === 'order_unpaid' || e.code === 'order_has_notice') loadDeposits();
     });
@@ -1233,7 +1307,7 @@
     function close() { if (dlg.open) dlg.close(); dlg.remove(); }
     dlg.appendChild(h('div', { class: 'dlg-body' },
       h('h2', { class: 'dlg-title' }, '어느 주문의 입금인가요?'),
-      h('p', { class: 'dlg-msg' }, '입금 ' + noticeAmount(n) + (n.depositor ? ' · ' + n.depositor : '')),
+      h('p', { class: 'dlg-msg' }, '입금 ' + noticeAmount(n) + (n.depositor ? ' · ' + SC.safeText(n.depositor, 12) : '')),
       h('div', { class: 'bill-list' }, orders.length ? orders.map(function (o) {
         var same = o.balanceDue === n.amount;
         var ob = { table: o.table, id: o.id, total: o.total, balance: o.balanceDue };
@@ -1269,52 +1343,54 @@
   function reasonList(reasons, n, cands) {
     var out = (reasons || []).filter(function (r) { return r !== 'auto_off'; }).map(function (r) {
       var t = REASON_TEXT[r] || r;
-      if (r === 'name_mismatch' && n && n.depositor && cands && cands.length === 1 && cands[0].depositor) t += ": 문자 '" + n.depositor + "' / 주문 '" + cands[0].depositor + "'";
+      if (r === 'several_candidates' && cands && cands.some(function (c) { return c.intent; })) t = '같은 금액의 주문과 입장료 "낼게요"가 함께 있어서 어느 쪽인지 몰라요';
+      if (r === 'name_mismatch' && n && n.depositor && cands && cands.length === 1 && cands[0].depositor) t += ": 문자 '" + SC.safeText(n.depositor, 12) + "' / 주문 '" + SC.safeText(cands[0].depositor, 12) + "'";
       return t;
     });
     return out;
   }
   function whyBlock(n) {
     var list = reasonList(n.reasons, n, n.candidates);
+    if (n.amountGuessed) list.unshift('문자의 금액은 추정값이에요. 은행 앱에서 실제 입금액을 확인해야 해요');
+    if (!list.length && n.status === 'pending') list.push('확실한 후보를 하나로 좁히지 못했어요. 직접 골라 주세요');
     if (!list.length) return null;
     return h('div', { class: 'why' }, h('b', null, '자동 확인하지 않은 이유'), h('ul', null, list.map(function (t) { return h('li', null, t); })));
   }
   function rateBanner() { return h('div', { class: 'banner bad', role: 'alert' }, '입금 알림 주소로 요청이 너무 많이 들어오고 있어요. 주소가 노출됐다면 재발급하세요.'); }
   function normName(x) { return String(x || '').normalize('NFKC').replace(/\s/g, '').toLowerCase(); }
   function noticeCard(n) {
-    var rec = null;
-    if (n.status === 'pending' && n.depositor && (n.candidates || []).length === 1 && (n.candidateCount == null || n.candidateCount === 1) && !reasonList(n.reasons).length && !(n.handledOrders || []).length) {
-      var c0 = n.candidates[0];
-      if (c0.depositor && normName(c0.depositor) === normName(n.depositor)) rec = c0;
-    }
+    var rec = null, nm = function (x) { return SC.safeText(x, 12) || '이름 없음'; };
+    function cLabel(c) { return c.intent ? c.table + '번 테이블 · ' + coverName() + ' ' + c.intent.shares + '명분 · ' + nm(c.intent.payer || c.depositor) : c.table + '번 · ' + won(c.balance != null ? c.balance : c.total) + (c.balance != null && c.balance !== c.total ? ' (남은 금액)' : ''); }
+    function cObj(c) { return { table: c.table, id: c.id, total: c.total, balance: c.intent ? n.amount : c.balance, intentId: c.intent ? c.intent.id : null }; }
+    rec = PW.recOf(n);   // one-tap only when the server says oneTap === true (never derived here)
     var recBox = rec ? h('div', { class: 'rec' },
-      h('div', { class: 'grow' }, h('span', { class: 'tag ok' }, '추천'), h('b', { style: 'font-size:1.15rem' }, rec.table + '번 · ' + won(rec.balance != null ? rec.balance : rec.total)), h('span', { class: 'muted' }, '입금자 ' + rec.depositor + ' · 문자와 같은 이름 · ' + SC.agoText(rec.createdAt))),
-      abtn('btn btn-primary btn-block rec-btn', '입금 확인', function () { return doAssign(n, { table: rec.table, id: rec.id, total: rec.total, balance: rec.balance }, false); })) : null;
+      h('div', { class: 'grow' }, h('span', { class: 'tag ok' }, '추천'), h('b', { style: 'font-size:1.15rem' }, rec.intent ? cLabel(rec) : rec.table + '번 · ' + won(rec.balance != null ? rec.balance : rec.total)), h('span', { class: 'muted' }, (rec.intent ? '"낼게요"를 누른 이름과 문자 이름이 같아요' : '입금자 ' + nm(rec.depositor) + ' · 문자와 같은 이름') + ' · ' + SC.agoText(rec.createdAt))),
+      abtn('btn btn-primary btn-block rec-btn', '입금 확인', function () { return doAssign(n, cObj(rec), false); })) : null;
     var cands = (n.candidates || []).filter(function (c) { return !rec || c.id !== rec.id; }).map(function (c) {
-      var o = { table: c.table, id: c.id, total: c.total, balance: c.balance };
+      var o = cObj(c);
       return h('div', { class: 'cand' },
-        h('div', { class: 'grow' }, h('b', null, c.table + '번 · ' + won(c.balance != null ? c.balance : c.total) + (c.balance != null && c.balance !== c.total ? ' (남은 금액)' : '')), h('span', { class: 'muted' }, (c.depositor ? '입금자 ' + c.depositor : '입금자명 없음') + ' · ' + SC.agoText(c.createdAt))),
-        abtn('btn btn-primary', '이 주문으로 확인', function () { return assignNotice(n, o, false); }));
+        h('div', { class: 'grow' }, h('b', null, cLabel(c)), h('span', { class: 'muted' }, c.intent ? '손님이 "낼게요"를 눌렀어요 · ' + SC.agoText(c.createdAt) : (c.depositor ? '입금자 ' + nm(c.depositor) : '입금자명 없음') + ' · ' + SC.agoText(c.createdAt))),
+        abtn('btn btn-primary', c.intent ? '이 낼게요로 확인' : '이 주문으로 확인', function () { return assignNotice(n, o, false); }));
     });
     var handled = (n.handledOrders && n.handledOrders.length) ? h('div', { class: 'cands' }, h('b', null, '이미 손으로 입금 확인한 같은 금액 주문 (' + (n.handledCount || n.handledOrders.length) + ')'), h('span', { class: 'muted' }, '이 입금이 그 주문의 것이면 연결만 해 두세요. 입금 상태는 바뀌지 않아요.'), n.handledOrders.map(function (c) {
       var o = { table: c.table, id: c.id, total: c.total, balance: c.balance };
-      return h('div', { class: 'cand' }, h('div', { class: 'grow' }, h('b', null, c.table + '번 · ' + won(c.total)), h('span', { class: 'muted' }, (c.depositor ? '입금자 ' + c.depositor : '입금자명 없음') + ' · ' + SC.agoText(c.createdAt) + ' · 입금 확인됨')),
+      return h('div', { class: 'cand' }, h('div', { class: 'grow' }, h('b', null, c.table + '번 · ' + won(c.total)), h('span', { class: 'muted' }, (c.depositor ? '입금자 ' + nm(c.depositor) : '입금자명 없음') + ' · ' + SC.agoText(c.createdAt) + ' · 입금 확인됨')),
         abtn('btn', '이 주문에 연결', function () { return attachNotice(n, o); }));
     }), n.handledCount > n.handledOrders.length ? h('span', { class: 'muted' }, '외 ' + (n.handledCount - n.handledOrders.length) + '건 더 있어요.') : null) : null;
-    return h('article', { class: 'ocard dep ' + (n.status === 'unparsed' ? 'unparsed' : 'pending') },
+    return h('article', { class: 'ocard dep ' + (n.status === 'unparsed' ? 'unparsed' : 'pending'), dataset: { nid: n.id } },
       h('div', { class: 'ohead' },
         h('div', { class: 'ometa' },
           h('div', { class: 'dep-amt' }, noticeAmount(n)),
           h('div', { class: 'line' }, n.status === 'unparsed' ? h('span', { class: 'tag bad solid' }, '! 읽지 못함') : n.status === 'review' ? h('span', { class: 'tag bad solid' }, '! 취소·정정 단어 포함') : h('span', { class: 'tag warn' }, '확인 필요'),
             n.amountGuessed ? h('span', { class: 'tag mute' }, '추정 금액') : null,
-            h('span', { class: 'tag mute' }, n.depositor ? '입금자 ' + n.depositor : '이름 없음'),
+            h('span', { class: 'tag mute' }, n.depositor ? '입금자 ' + nm(n.depositor) : '이름 없음'),
             n.repeatCount > 1 ? h('span', { class: 'tag warn' }, '같은 문자 ' + n.repeatCount + '번 수신') : null, SC.timeEl(n.lastAt || n.receivedAt, 'ago')))),
-      h('pre', { class: 'rawtext' }, n.text),
+      h('pre', { class: 'rawtext' }, SC.cleanRaw(n.text)),
       (n.status === 'pending' || n.status === 'review') ? h('div', { class: 'cands' }, recBox, rec ? null : whyBlock(n), cands.length ? [h('b', null, '금액이 같은 주문 (' + (n.candidateCount || cands.length) + ')'), cands, n.candidateCount > (n.candidates || []).length ? h('span', { class: 'muted' }, '외 ' + (n.candidateCount - n.candidates.length) + '건 더 있어요. "다른 주문 선택"에서 찾아 주세요.') : null] : null, handled) : h('p', { class: 'muted' }, '알림에서 금액을 읽지 못했어요. 아래에서 주문을 직접 고를 수 있어요.'),
       h('div', { class: 'row', style: 'display:flex;gap:8px;flex-wrap:wrap' },
         abtn('btn', '다른 주문 선택', function () { pickOrder(n); return Promise.resolve(); }),
         abtn('btn btn-danger', '무시', function () {
-          return SC.confirm({ title: '이 입금 알림을 무시할까요?', danger: true, ok: '무시', message: noticeAmount(n) + (n.depositor ? ' · ' + n.depositor : '') + '\n주문과 연결하지 않고 목록에서 치워요.' }).then(function (ok) {
+          return SC.confirm({ title: '이 입금 알림을 무시할까요?', danger: true, ok: '무시', message: noticeAmount(n) + (n.depositor ? ' · ' + SC.safeText(n.depositor, 12) : '') + '\n주문과 연결하지 않고 목록에서 치워요.' }).then(function (ok) {
             if (ok) return api('/api/staff/deposits/' + n.id + '/dismiss').then(function () { return loadDeposits().then(refresh); }, function (e) { menuFail(e); loadDeposits(); });
           });
         })));
@@ -1325,16 +1401,16 @@
     var autoTag = h('span', { class: 'tag' });
     var histSum = h('summary', null, '처리된 입금');
     var hist = h('details', { class: 'hist' }, histSum, histBox);
-    var refunds = SO.buildRefunds();
+    var refunds = SO.buildRefunds(), intents = SO.buildIntents();
     var moreBtn = abtn('btn btn-block', '이전 알림 더 보기', function () { return loadDeposits(true); });
     moreBtn.hidden = true;
     var rateBox = h('div'), ignBox = h('div', { class: 'list' }), ignSum = h('summary', null, '무시된 알림');
     var ign = h('details', { class: 'hist' }, ignSum, h('p', { class: 'muted' }, '출금·취소·정정 같은 문자는 입금으로 보지 않고 여기에 모아요. 읽기만 할 수 있어요.'), ignBox);
-    root.append(h('div', { class: 'view-head' }, h('h2', null, '입금 확인'), autoTag), rateBox, refunds.el, h('p', { class: 'muted', style: 'margin-bottom:10px' }, '은행 입금 알림이 오면 여기에 떠요. 문자 내용과 주문을 비교해서 한 번 눌러 확인해요.'), pendBox, hist, ign, moreBtn);
+    root.append(h('div', { class: 'view-head' }, h('h2', null, '입금 확인'), autoTag), rateBox, refunds.el, intents.el, h('p', { class: 'muted', style: 'margin-bottom:10px' }, '은행 입금 알림이 오면 여기에 떠요. 문자 내용과 주문을 비교해서 한 번 눌러 확인해요.'), pendBox, hist, ign, moreBtn);
     var none = emptyEl('확인할 입금이 없어요');
     function render() {
       var d = S.data;
-      refunds.update(d);
+      refunds.update(d); intents.update(d);
       var ds = sig([d.deposit, d.orders.map(function (o) { return o.id + (o.paid ? 'p' : ''); }).join()]);
       if (ds !== S.depSig) { S.depSig = ds; loadDeposits(); }
       var auto = d.deposit ? d.deposit.autoConfirm : true;
@@ -1344,7 +1420,7 @@
       var ignored = notices.filter(function (n) { return n.status === 'ignored'; }).sort(function (a, b) { return b.receivedAt - a.receivedAt; });
       ignSum.textContent = '무시된 알림 (' + (d.deposit && d.deposit.ignored != null ? d.deposit.ignored : ignored.length) + ')';
       SC.reconcile(ignBox, ignored.slice(0, 50), function (n) { return n.id; }, sig, function (n) {
-        return h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('pre', { class: 'rawtext' }, n.text), h('span', { class: 'muted' }, SC.agoText(n.lastAt || n.receivedAt) + ' · 무시됨 (입금 아님)' + (n.repeatCount > 1 ? ' · ' + n.repeatCount + '번 수신' : ''))));
+        return h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('pre', { class: 'rawtext' }, SC.cleanRaw(n.text)), h('span', { class: 'muted' }, SC.agoText(n.lastAt || n.receivedAt) + ' · 무시됨 (입금 아님)' + (n.repeatCount > 1 ? ' · ' + n.repeatCount + '번 수신' : ''))));
       }, emptyEl('없어요'));
       var inState = {}, stateOpen = d.depositNotices || [];
       stateOpen.forEach(function (n) { inState[n.id] = 1; });
@@ -1359,7 +1435,7 @@
       histSum.textContent = '처리된 입금 (' + done.length + ')';
       SC.reconcile(histBox, done.slice(0, 50), function (n) { return n.id; }, sig, function (n) {
         var ord = n.orderId ? '→ 주문 #' + n.orderId + (n.matchedBy === 'auto' ? ' (자동)' : ' (직원)') : '';
-        return h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('b', null, noticeAmount(n) + (n.depositor ? ' · ' + n.depositor : '')), h('span', { class: 'muted' }, SC.agoText(n.receivedAt) + ' · ' + (n.status === 'dismissed' ? '무시함' : '확인됨 ' + ord))));
+        return h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('b', null, noticeAmount(n) + (n.depositor ? ' · ' + SC.safeText(n.depositor, 12) : '')), h('span', { class: 'muted' }, SC.agoText(n.receivedAt) + ' · ' + (n.status === 'dismissed' ? '무시함' : '확인됨 ' + ord))));
       }, emptyEl('아직 없어요'));
     }
     return { root: root, render: render };
@@ -1724,20 +1800,39 @@
     var headerBox = h('div', { class: 'lab' }, h('b', null, '헤더 방식 (권장)'), h('span', { class: 'muted' }, '비밀 값이 주소에 남지 않아서 더 안전해요. 문자 전달 앱이 사용자 지정 헤더를 지원하면 이 방식을 쓰세요.'),
       '주소', hdrUrl, '헤더 이름', hdrName, '헤더 값 (비밀)', hdrVal,
       h('div', { class: 'al-seg' }, copyBtnFor(function () { return new URL(hook.headerUrl, location.origin).href; }, '주소'), copyBtnFor(function () { return hook.header || 'X-Booth-Hook'; }, '헤더 이름'), copyBtnFor(function () { return hook.secret; }, '헤더 값')));
-    var el = h('div', { class: 'card' }, hrateBox,
+    // 3-step pipeline status: address issued -> last text received -> auto-confirm
+    var pipe = h('ol', { class: 'pipe', 'aria-label': '입금 알림 연결 상태' }), depNow = null, pipeAt = 0;
+    function drawPipe() {
+      var issued = !!hook, last = depNow && depNow.lastNoticeAt, matched = depNow && depNow.lastMatchedAt;
+      var openDay = !!(S.data && S.data.orderingOpen !== false && S.data.orders && S.data.orders.some(function (o) { return o.kind !== 'cover' && !SC.isTestOrder(o); }));
+      var old = last && Date.now() - last > 30 * 60000;
+      function li(cls, text, sub) { return h('li', { class: cls }, h('b', null, text), sub ? h('span', { class: 'muted' }, sub) : null); }
+      SC.fill(pipe,
+        li(issued ? 'ok' : 'wait', issued ? '① 주소 발급됨' : '① 주소 확인 중…', issued ? '문자 전달 앱에 이 주소가 들어가 있어야 해요' : ''),
+        !depNow ? li('wait', '② 마지막 문자 확인 중…')
+          : !last ? li('none', '② 아직 받은 문자가 없어요', '"테스트 보내기"로 먼저 확인해 보세요')
+          : old && openDay ? li('warn', '② 마지막 문자 ' + SC.agoText(last) + ' · 전달 설정을 확인해 보세요', SC.clock(last) + '에 받았어요. 휴대폰이 문자를 계속 전달하는지 봐 주세요')
+          : li('ok', '② 마지막 문자 ' + SC.agoText(last), SC.clock(last) + '에 받았어요'),
+        li(autoState.v ? 'ok' : 'none', autoState.v ? '③ 자동 확인 켜짐' : '③ 자동 확인 꺼짐', (autoState.v ? '조건이 맞는 입금은 저절로 확인돼요' : '입금 문자는 "입금" 탭에서 한 번 눌러 확인해요') + (matched ? ' · 마지막 확인 ' + SC.agoText(matched) : '')));
+    }
+    function loadPipe() { pipeAt = Date.now(); return (hook ? Promise.resolve() : SC.api('/api/staff/deposit-hook').then(function (r) { hook = r; }, function () { /* shown as pending */ })).then(function () { drawPipe(); draw(); }); }
+    var el = h('div', { class: 'card' }, pipe, hrateBox,
       srow('입금 자동 확인 (기본: 꺼짐)', '꺼져 있어도 "입금" 탭에서 한 번만 누르면 확인돼요. 켜기 전에 경고를 꼭 읽어 주세요.', tAuto),
       h('p', { class: 'tag warn', style: 'white-space:normal' }, '같은 금액의 미입금 주문이 하나뿐이고, 입금자명이 주문에 적힌 이름과 같을 때만 자동으로 확인돼요. 그 밖에는 여기서 한 번 눌러 확인합니다.'),
       srow('자동 확인 최대 금액', '이 금액을 넘는 입금은 자동으로 확인하지 않아요 (0 = 자동 확인 안 함)', h('div', { class: 'stockctl' }, maxIn, h('b', null, '원'), maxSave)),
       h('div', { class: 'lab' }, '입금 알림 주소 (비밀 주소예요. 남에게 보이지 마세요)', url, h('div', { class: 'al-seg' }, reveal, copyBtn, rotate)),
       headerBox, guide,
       h('div', { class: 'lab' }, '테스트 보내기', sample, send, result));
-    draw();
-    function update(d) { autoState.v = d.deposit ? d.deposit.autoConfirm !== false : true; tAuto.refresh(); if (!maxDirty && d.deposit && d.deposit.autoConfirmMaxAmount != null) maxIn.value = String(d.deposit.autoConfirmMaxAmount); SC.fill(hrateBox, d.hookRateLimited ? rateBanner() : null); }
+    draw(); drawPipe();
+    setInterval(drawPipe, 15000); // the "N분 전" text and the 30-minute warning age on their own
+    function update(d) { depNow = d.deposit || null; if (!hook && Date.now() - pipeAt > 30000) loadPipe(); autoState.v = d.deposit ? d.deposit.autoConfirm !== false : true; tAuto.refresh(); drawPipe(); if (!maxDirty && d.deposit && d.deposit.autoConfirmMaxAmount != null) maxIn.value = String(d.deposit.autoConfirmMaxAmount); SC.fill(hrateBox, d.hookRateLimited ? rateBanner() : null); }
     return { el: el, update: update };
   }
   SETTINGS_SECTIONS.push({ id: 'hook', title: '입금 알림 연동', build: buildHookSection });
 
   SETTINGS_SECTIONS.push({ id: 'member', title: '회원 할인', build: buildMemberRule });
+  SETTINGS_SECTIONS.push({ id: 'test', title: '테스트', build: SO.testSection });
+  SETTINGS_SECTIONS.push({ id: 'cover', title: '입장료', build: SO.coverSection });
   SETTINGS_SECTIONS.push({ id: 'notice', title: '손님 공지', build: SO.noticeSection });
   SETTINGS_SECTIONS.push({ id: 'waittimeout', title: '대기 호출 노쇼 시간', build: SO.waitTimeoutSection });
   SETTINGS_SECTIONS.push({ id: 'audit', title: '작업 기록', build: SO.auditSection });
@@ -1781,6 +1876,8 @@
         tile('주문 수', t.orders + '건', '', '취소를 뺀 주문 수'), tile('회원 할인', won(t.memberDiscount || 0) + ' · ' + (t.memberOrders || 0) + '건', '', '회원 할인을 받은 금액과 주문 수'), tile('할인 합계', won(t.discount), '', '회원 할인과 쿠폰 할인을 합친 금액')),
       h('div', { class: 'list' }, SO.salesExtras(r)),
       SO.methodCard(r.byMethod) || '',
+      SO.kindCard(r.byKind) || '',
+      SO.visitorsCard(r.visitors) || '',
       h('div', { class: 'two' },
         h('div', { class: 'card' }, h('h3', { class: 'sec-title', style: 'margin:0' }, '시간대별 매출'),
           r.byHour.length ? h('div', { class: 'bars' }, r.byHour.map(function (x) {

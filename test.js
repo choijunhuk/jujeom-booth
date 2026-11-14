@@ -288,6 +288,65 @@ CREATE INDEX IF NOT EXISTS nicks_ts ON nicks(table_id, seat);
 CREATE INDEX IF NOT EXISTS plays_fin ON plays(finished_at);
 `;
 
+// schema written by Release 2 (git 308295c, the version running in production): the cover-charge migration test boots on a database created with it
+const R2_SCHEMA = `
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA busy_timeout=5000;
+CREATE TABLE IF NOT EXISTS tables(id INTEGER PRIMARY KEY, token TEXT NOT NULL UNIQUE, seat INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS orders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', paid INTEGER NOT NULL DEFAULT 0,
+  subtotal INTEGER NOT NULL, discount INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL,
+  member_discount INTEGER NOT NULL DEFAULT 0, member_id INTEGER, depositor TEXT, paid_by TEXT, notice_id INTEGER,
+  created_by TEXT, member_rule TEXT, paid_amount INTEGER NOT NULL DEFAULT 0, paid_method TEXT, paid_at INTEGER, written_off INTEGER NOT NULL DEFAULT 0, written_off_at INTEGER, written_off_clear INTEGER,
+  coupon_code TEXT, note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  cooking_at INTEGER, UNIQUE(table_id, seat, key));
+CREATE INDEX IF NOT EXISTS orders_ts ON orders(table_id, seat);
+CREATE TABLE IF NOT EXISTS order_items(order_id INTEGER NOT NULL, item_id TEXT NOT NULL, name TEXT NOT NULL, unit_price INTEGER NOT NULL, qty INTEGER NOT NULL, service INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS order_items_o ON order_items(order_id);
+CREATE TABLE IF NOT EXISTS menu_categories(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS menu_items(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, price INTEGER NOT NULL, category_id INTEGER NOT NULL, descr TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0, sold_out INTEGER NOT NULL DEFAULT 0, sort INTEGER NOT NULL DEFAULT 0, photo TEXT, stock_left INTEGER, stock_auto INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS order_items_item ON order_items(item_id);
+CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rewards(
+  id TEXT PRIMARY KEY, label TEXT NOT NULL, game TEXT NOT NULL, threshold INTEGER NOT NULL, type TEXT NOT NULL, amount INTEGER, item TEXT,
+  stock INTEGER NOT NULL, issued INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS coupons(
+  code TEXT PRIMARY KEY, reward_id TEXT NOT NULL, source TEXT NOT NULL, type TEXT NOT NULL, amount INTEGER, label TEXT NOT NULL, item TEXT,
+  table_id INTEGER NOT NULL, seat INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'issued', order_id INTEGER, used_at INTEGER, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS coupons_ts ON coupons(table_id, seat);
+CREATE TABLE IF NOT EXISTS plays(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, game TEXT NOT NULL, device TEXT NOT NULL,
+  nick TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, score INTEGER, rejected INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS plays_dev ON plays(device);
+CREATE INDEX IF NOT EXISTS plays_ts ON plays(table_id, seat);
+CREATE TABLE IF NOT EXISTS nicks(device TEXT NOT NULL, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, nick TEXT NOT NULL, PRIMARY KEY(device, table_id, seat));
+CREATE TABLE IF NOT EXISTS calls(id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER);
+CREATE TABLE IF NOT EXISTS waitlist(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL, size INTEGER NOT NULL, secret TEXT NOT NULL, device TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'waiting', created_at INTEGER NOT NULL, called_at INTEGER, recalled INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS login_keys(hash TEXT PRIMARY KEY, fails INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS deposit_notices(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, received_at INTEGER NOT NULL, raw TEXT NOT NULL, norm TEXT NOT NULL, amount INTEGER, depositor TEXT,
+  status TEXT NOT NULL, order_id INTEGER, matched_at INTEGER, matched_by TEXT, duplicate_of INTEGER, reasons TEXT, amount_guessed INTEGER NOT NULL DEFAULT 0, repeat_count INTEGER NOT NULL DEFAULT 1, last_at INTEGER);
+CREATE INDEX IF NOT EXISTS deposit_norm ON deposit_notices(norm, received_at);
+CREATE TABLE IF NOT EXISTS refunds(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, amount INTEGER NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL,
+  done_at INTEGER, done_method TEXT, done_note TEXT);
+CREATE INDEX IF NOT EXISTS refunds_order ON refunds(order_id);
+CREATE TABLE IF NOT EXISTS table_clears(id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, old_seat INTEGER NOT NULL, new_seat INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, summary TEXT NOT NULL, summary_ko TEXT);
+CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, amount INTEGER NOT NULL, method TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS payments_o ON payments(order_id);
+CREATE TABLE IF NOT EXISTS day_reports(id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, created_at INTEGER NOT NULL, summary TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS nicks_ts ON nicks(table_id, seat);
+CREATE INDEX IF NOT EXISTS plays_fin ON plays(finished_at);
+`;
+
 // stands in for the club site's GET /api/auth/me
 async function startFakeClub() {
   const specs = new Map();
@@ -2880,7 +2939,7 @@ test('a database created by the previous release is upgraded in place: rewards, 
     assert.equal(await guestOk(srv, tokensOld[8]), 404, 'table 9 stays hidden');
     // payment settings were seeded from the environment; deposit notices and the hook secret exist
     assert.deepEqual(st.pay, { bank: '신한', account: '110-123-456789', holder: '동아리', tossEnabled: false, kakaoPayUrl: '', requireDepositor: false, changedAt: null });
-    assert.deepEqual(st.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000 }, 'auto-confirm ships OFF');
+    assert.deepEqual(st.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000, lastNoticeAt: null, lastMatchedAt: null }, 'auto-confirm ships OFF');
     assert.match((await s.get('/api/staff/deposit-hook')).json.secret, /^[a-f0-9]{64}$/);
     assert.deepEqual((await s.get('/api/staff/deposits')).json.notices, []);
     assert.deepEqual((await new Client(srv).get(`/api/t/${tokensOld[0]}`)).json.pay, { bank: '신한', account: '110-123-456789', holder: '동아리', tossEnabled: false, kakaoPayUrl: '', requireDepositor: false });
@@ -3475,13 +3534,16 @@ test('deposit notices: reversal / withdrawal texts never pay an order: reviewabl
     assert.deepEqual(list.map((n) => n.status), ['review', 'ignored', 'review', 'review']);
     const rev = list.filter((n) => n.status === 'review');
     assert.ok(rev.every((n) => n.reasons.includes('ignore_word') && n.amountGuessed === true && n.amount === 16000 && n.candidates.length === 0));
-    assert.deepEqual((await d.s.get('/api/staff/state')).json.deposit, { pending: 3, unparsed: 0, ignored: 1, review: 3, autoConfirm: true, autoConfirmMaxAmount: 30000 }, 'review notices are counted in the pending badge');
+    const dep0 = (await d.s.get('/api/staff/state')).json.deposit;
+    assert.deepEqual({ ...dep0, lastNoticeAt: typeof dep0.lastNoticeAt }, { pending: 3, unparsed: 0, ignored: 1, review: 3, autoConfirm: true, autoConfirmMaxAmount: 30000, lastNoticeAt: 'number', lastMatchedAt: null }, 'review notices are counted in the pending badge');
     // review notices are manual: assignable only with force, dismissable; ignored ones are final
     const asg = (id, body) => d.s.post(`/api/staff/deposits/${id}/assign`, { orderId: o.id, ...body });
     assert.equal((await asg(rev[0].id, {})).json.error, 'review_needs_force');
     assert.equal((await asg(list[1].id, { force: true })).json.error, 'notice_closed');
     assert.equal((await d.s.post(`/api/staff/deposits/${list[1].id}/dismiss`)).json.error, 'notice_closed');
-    const done = await asg(rev[0].id, { force: true }); // t4 (the 정정훈 deposit) newest first
+    assert.equal((await asg(rev[0].id, { force: true })).json.error, 'amount_guessed', 'changed in 3b: a review notice (parse reason ignore_word) needs force + note + the staff-typed amount');
+    assert.equal((await asg(rev[0].id, { force: true, note: '정정 문자 확인' })).json.error, 'bad_amount');
+    const done = await asg(rev[0].id, { force: true, note: '정정 문자 확인', amount: o.total }); // t4 (the 정정훈 deposit) newest first
     assert.equal(done.status, 200, done.text);
     assert.deepEqual([done.json.order.paid, done.json.order.paidBy], [true, 'staff']);
     assert.equal((await d.s.post(`/api/staff/deposits/${rev[1].id}/dismiss`)).json.notice.status, 'dismissed');
@@ -3741,9 +3803,10 @@ test('deposit notices: undo, assign, dismiss, auto-confirm switch, unparsed, sec
     const st = (await s.get('/api/staff/state')).json.deposit;
     assert.deepEqual([st.pending, st.unparsed, st.autoConfirm], [0, 1, true]);
     const o4 = await d.place(tk[3], '박넷째');
-    assert.equal((await asg(garbage.id, { orderId: o4.id })).json.error, 'amount_mismatch', 'no amount known: staff has to force it');
-    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true })).json.error, 'note_required');
-    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true, note: '문자 형식이 달라 직접 확인' })).status, 200);
+    assert.equal((await asg(garbage.id, { orderId: o4.id })).json.error, 'amount_guessed', 'no amount known (changed in 3b: was amount_mismatch): staff has to force it');
+    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true })).json.error, 'amount_guessed', 'force alone is not enough: a note is needed');
+    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true, note: '문자 형식이 달라 직접 확인' })).json.error, 'bad_amount', 'and the amount staff saw');
+    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true, note: '문자 형식이 달라 직접 확인', amount: o4.total })).status, 200);
     assert.equal((await s.post(`/api/staff/deposits/${garbage.id}/dismiss`)).json.error, 'notice_closed');
     // ---- the auto-confirm switch ----
     for (const bad of ['yes', 1, null, undefined]) assert.equal((await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: bad })).json.error, 'bad_auto_confirm', String(bad));
@@ -3799,7 +3862,7 @@ test('deposit notices: the staff list is capped at the newest 200', () => {
     assert.equal(next, list[199].id, 'a full page tells where the next one starts');
     assert.equal(store.listDeposits({ before: next, limit: 50 }).notices.length, 5);
     assert.equal(list[0].amount, 1204);
-    assert.deepEqual(store.depositCounts(), { pending: 205, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000 });
+    assert.deepEqual({ ...store.depositCounts(), lastNoticeAt: 0 }, { pending: 205, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000, lastNoticeAt: 0, lastMatchedAt: null });
   } finally { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -3827,7 +3890,7 @@ test('deposit injection: the sender-controlled name can never make a 100 won tra
     // staff can still assign it by hand; a guessed amount that differs from the order total needs force
     const stray = (await d.notices()).find((n) => n.status === 'pending');
     const noForce = await s.post(`/api/staff/deposits/${stray.id}/assign`, { orderId: (await d.place(tk[1], '박다른', 'cola')).id });
-    assert.equal(noForce.json.error, 'amount_mismatch');
+    assert.equal(noForce.json.error, 'amount_guessed', 'changed in 3b: was amount_mismatch; a guessed amount is refused without force + note + staff amount');
   } finally { await d.srv.stop(); }
 });
 
@@ -3900,7 +3963,7 @@ test('deposit test endpoint: real parser and matcher, stores and changes nothing
     // nothing happened
     assert.equal((await d.order(o18.id)).paid, false);
     assert.deepEqual(await d.notices(), []);
-    assert.deepEqual((await s.get('/api/staff/state')).json.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: true, autoConfirmMaxAmount: 30000 });
+    assert.deepEqual((await s.get('/api/staff/state')).json.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: true, autoConfirmMaxAmount: 30000, lastNoticeAt: null, lastMatchedAt: null });
     // the real hook with the same text DOES pay it (and the preview afterwards reports the duplicate)
     assert.equal((await d.notice(sample)).status, 'matched');
     assert.equal((await d.order(o18.id)).paidBy, 'auto');
@@ -3985,7 +4048,7 @@ test('auto-confirm ships OFF: fresh databases, and existing ones are forced off 
   let a; let b; let c;
   try {
     const s = await staffLogin(srv);
-    assert.deepEqual((await s.get('/api/staff/state')).json.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000 });
+    assert.deepEqual((await s.get('/api/staff/state')).json.deposit, { pending: 0, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000, lastNoticeAt: null, lastMatchedAt: null });
     assert.equal((await s.get('/api/staff/deposits')).json.autoConfirm, false);
     // with it off a perfect notice stays pending (reason auto_off) and nothing is paid
     const T = (await tablesOf(s))[0].token;
@@ -4868,7 +4931,7 @@ test('every new staff endpoint requires a session', async () => {
     ['POST', '/api/staff/tables/1/orders', { key: 'abcdefgh', items: [{ id: 'cola', qty: 1 }] }], ['POST', '/api/staff/orders/1/items', { items: [] }], ['POST', '/api/staff/orders/1/service', { itemId: 'cola', qty: 1 }],
     ['POST', '/api/staff/orders/1/move', { to: 2 }], ['POST', '/api/staff/refunds/1/done', {}], ['POST', '/api/staff/tables/1/unclear', {}], ['POST', '/api/staff/notice', { text: 'x' }],
     ['POST', '/api/staff/tables/1/coupons', { type: 'item', label: 'x' }], ['POST', '/api/staff/coupons/ABCDEF/void', {}], ['POST', '/api/staff/waitlist/timeout', { minutes: 3 }],
-    ['POST', '/api/staff/wait/1/recall', {}], ['GET', '/api/staff/audit'], ['POST', '/api/staff/day/close', { confirm: '마감' }], ['GET', '/api/staff/day/reports'], ['GET', '/api/staff/day/reports/1'], ['GET', '/api/staff/day/reports/1.csv'],
+    ['POST', '/api/staff/wait/1/recall', {}], ['GET', '/api/staff/audit'], ['POST', '/api/staff/cover/settings', { enabled: true }], ['POST', '/api/staff/test/reset', {}], ['POST', '/api/staff/test/settings', { memberPreview: true }], ['POST', '/api/staff/test/rotate', {}], ['POST', '/api/staff/tables/1/party', { people: 2 }], ['POST', '/api/staff/tables/1/cover/waive', { reason: 'x' }], ['POST', '/api/staff/tables/1/cover/restore', {}], ['POST', '/api/staff/payments/1/void', { reason: 'x' }], ['POST', '/api/staff/cover/intents/1/cancel', {}], ['POST', '/api/staff/day/close', { confirm: '마감' }], ['GET', '/api/staff/day/reports'], ['GET', '/api/staff/day/reports/1'], ['GET', '/api/staff/day/reports/1.csv'],
   ];
   for (const [m, p, b] of checks) {
     const r = await anon.req(m, p, b);
@@ -4884,6 +4947,10 @@ for (const seed of [11, 4242, 90210]) {
     const pick = (a) => a[Math.floor(rnd() * a.length)];
     await withBooth(async ({ srv, s }) => {
       const ids = ['tteokbokki', 'odeng', 'fries', 'cola'];
+      await s.post('/api/staff/cover/settings', { enabled: true, mode: 'per_person', amount: 3000 });
+      const secret = (await s.get('/api/staff/deposit-hook')).json.secret;
+      const gdev = {}; let seq = 0;
+      const tally = { sharepay: 0, void: 0, waive: 0, restore: 0, peopleUp: 0, peopleDown: 0, intentAssign: 0 }; // successes: the test fails if an operation never ran
       let refundsDoneByMe = 0;
       const check = async (step) => {
         const st = (await s.get('/api/staff/state')).json;
@@ -4898,18 +4965,39 @@ for (const seed of [11, 4242, 90210]) {
           assert.equal(o.refundDue, Math.max(0, expectedDue), `refundDue: ${where}`);
           if (o.status !== 'cancelled') assert.equal(o.paid, o.paidAmount - o.refundedAmount >= o.total && (o.paidAmount > 0 || o.total === 0) ? true : false, `paid flag follows the money held: ${where}`);
           doneSum += o.refundedAmount;
+          assert.equal(o.payments.reduce((n, p) => n + p.amount, 0), o.paidAmount, `ledger of the order adds up to paidAmount: ${where}`);
+          if (o.kind === 'cover') {
+            if (o.coverMode === 'per_person') { // 3b: shares follow the MONEY held (not the ledger's share rows)
+              const held = o.paidAmount - o.refundedAmount; const unit = o.unitPrice;
+              assert.equal(o.shares.paid, Math.min(o.shares.total, Math.floor(Math.max(0, held) / unit)), `shares.paid = min(total, floor(held / unit)): ${where}`);
+              assert.ok(o.shares.over >= 0 && o.shares.over <= o.payments.reduce((n, p) => n + (p.shares || 0), 0), `over comes from share rows only: ${where}`);
+              const balance = Math.max(0, o.total - held);
+              if (o.status !== 'cancelled') {
+                if (held % unit === 0) assert.equal(o.shares.left * unit, balance, `shares.left x unit = balance: ${where}`);
+                if (balance > 0) assert.ok(o.shares.left > 0, `a cover with a balance has shares left: ${where}`);
+              }
+            }
+            assert.ok(o.shares.paid <= o.shares.total && o.shares.paid >= 0 && o.shares.left >= 0, `shares.paid <= shares.total always: ${where}`);
+            assert.equal(o.shares.left, Math.max(0, o.shares.total - o.shares.paid), `shares left: ${where}`);
+            assert.ok(o.payments.every((p) => p.shares == null || p.amount === p.shares * o.unitPrice), `a share payment is shares x unit price: ${where}`);
+            if (o.status !== 'cancelled') assert.equal(o.total, o.unitPrice * st.tables.find((x) => x.number === o.table).people, `cover total follows the headcount: ${where}`);
+          }
         }
         // orders cleared away still count: the sales figure is global
         assert.equal(sale.totals.revenue, sale.totals.paidAmount - sale.totals.refundsDone, `revenue = received - refunded: ${step}`);
         assert.equal(Object.values(sale.byMethod).reduce((n, m) => n + m.net, 0), sale.totals.revenue, `Σ net by method = revenue: ${step}`);
+        for (const [f, tot] of [['billed', 'billed'], ['received', 'paidAmount'], ['refunded', 'refundsDone'], ['net', 'revenue'], ['unpaid', 'unpaidRevenue'], ['writtenOff', 'writtenOff'], ['orders', 'orders']]) {
+          assert.equal(sale.byKind.food[f] + sale.byKind.cover[f], sale.totals[tot], `byKind ${f} adds up to totals.${tot}: ${step}`);
+        }
         assert.equal(Object.values(sale.byMethod).reduce((n, m) => n + m.received, 0), sale.totals.paidAmount, `Σ received by method = paidAmount: ${step}`);
         assert.ok(sale.totals.revenue >= 0 && sale.totals.refundDue >= 0 && sale.totals.writtenOff >= 0 && sale.totals.unpaidRevenue >= 0 && sale.totals.billed >= 0, `no negative totals: ${step}`);
         assert.equal(sale.totals.refundsDone, refundsDoneByMe, `refunds done = those staff confirmed: ${step}`);
         assert.ok(doneSum <= sale.totals.refundsDone);
       };
-      for (let step = 0; step < 70; step++) {
-        const kind = pick(['order', 'order', 'edit', 'pay', 'pay', 'overpay', 'cancel', 'refund', 'clear', 'unclear', 'service', 'unpay']);
-        const live = (await s.get('/api/staff/state')).json.orders;
+      for (let step = 0; step < 220; step++) {
+        const kind = pick(['order', 'order', 'edit', 'pay', 'pay', 'overpay', 'cancel', 'refund', 'clear', 'unclear', 'service', 'unpay', 'party', 'party', 'sharepay', 'sharepay', 'sharepay', 'void', 'void', 'waive', 'restore', 'restore', 'intent', 'intent']);
+        const stNow = (await s.get('/api/staff/state')).json;
+        const live = stNow.orders;
         const o = live.length ? pick(live) : null;
         const label = `${kind}#${step}`;
         if (kind === 'order' || !o) {
@@ -4935,13 +5023,40 @@ for (const seed of [11, 4242, 90210]) {
           if (open.length) { const r = pick(open); const res = await s.post(`/api/staff/refunds/${r.id}/done`, { amount: r.amount }); if (res.status === 200) refundsDoneByMe += r.amount; }
         } else if (kind === 'clear') {
           await s.post(`/api/staff/tables/${o.table}/clear`, { force: true });
+        } else if (kind === 'party') {
+          const tn = 1 + Math.floor(rnd() * 3); const people = 1 + Math.floor(rnd() * 6);
+          const was = stNow.tables.find((x) => x.number === tn).people;
+          const r = await s.post(`/api/staff/tables/${tn}/party`, { people });
+          if (r.status === 200 && was != null) { if (people > was) tally.peopleUp++; else if (people < was) tally.peopleDown++; }
+        } else if (kind === 'sharepay') {
+          const c = live.filter((x) => x.kind === 'cover' && x.status !== 'cancelled');
+          if (c.length) { const r = await s.post(`/api/staff/orders/${pick(c).id}/paid`, { paid: true, method: pick(['cash', 'transfer', 'other']), shares: 1 + Math.floor(rnd() * 3), payer: '가나' }); if (r.status === 200) tally.sharepay++; }
+        } else if (kind === 'void') {
+          const w = live.filter((x) => x.payments.length);
+          if (w.length) { const r = await s.post(`/api/staff/payments/${pick(pick(w).payments).id}/void`, { reason: '입력 실수' }); if (r.status === 200) tally.void++; }
+        } else if (kind === 'waive') {
+          const r = await s.post(`/api/staff/tables/${1 + Math.floor(rnd() * 3)}/cover/waive`, { reason: '임원' }); if (r.status === 200) tally.waive++;
+        } else if (kind === 'restore') {
+          const r = await s.post(`/api/staff/tables/${1 + Math.floor(rnd() * 3)}/cover/restore`, {}); if (r.status === 200) tally.restore++;
+        } else if (kind === 'intent') { // guest announces shares, the bank SMS arrives, staff assign it to the intent
+          const tn = 1 + Math.floor(rnd() * 3);
+          const c = live.find((x) => x.table === tn && x.kind === 'cover' && x.status !== 'cancelled' && x.shares && x.shares.left > 0);
+          if (c) {
+            gdev[tn] ||= await guestWithDevice(srv);
+            const it = await gdev[tn].post(`/api/t/${(await tablesOf(s))[tn - 1].token}/cover/intents`, { payer: '가나', shares: 1 });
+            if (it.status === 201) {
+              const sms = JSON.parse((await hookPost(srv, secret, { text: smsText(3000, '가나', ++seq) })).text);
+              if (sms.status === 'pending') { const r = await s.post(`/api/staff/deposits/${sms.id}/assign`, { orderId: c.id, intentId: it.json.id }); if (r.status === 200) tally.intentAssign++; }
+            }
+          }
         } else if (kind === 'unclear') {
           await s.post(`/api/staff/tables/${1 + Math.floor(rnd() * 3)}/unclear`, {});
         }
         await check(label);
       }
       const fin = (await s.get('/api/staff/sales')).json; // the sequence really moved money in every way
-      assert.ok(fin.totals.paidAmount > 0 && fin.totals.refundsDone > 0 && fin.refunds.length > 0 && fin.totals.writtenOff > 0, JSON.stringify(fin.totals));
+      assert.ok(fin.totals.paidAmount > 0 && fin.totals.refundsDone > 0 && fin.refunds.length > 0 && fin.totals.writtenOff > 0 && fin.byKind.cover.billed + fin.byKind.cover.received > 0, JSON.stringify([fin.totals, fin.byKind]));
+      for (const [k, v] of Object.entries(tally)) assert.ok(v >= 1, `the random run never completed a '${k}' (counters ${JSON.stringify(tally)})`);
     });
   });
 }
@@ -5261,6 +5376,15 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
       '/api/staff/coupons/([A-Za-z0-9]{1,12})/void': [`/api/staff/coupons/${cp2.code}/void`, {}],
       '/api/staff/notice': ['/api/staff/notice', { text: '감사 공지', level: 'warn' }],
       '/api/staff/waitlist/timeout': ['/api/staff/waitlist/timeout', { minutes: 7 }],
+      '/api/staff/cover/settings': ['/api/staff/cover/settings', { enabled: true, mode: 'per_person', amount: 3000 }],
+      '/api/staff/test/settings': ['/api/staff/test/settings', { showInKitchen: false }],
+      '/api/staff/test/rotate': ['/api/staff/test/rotate', {}],
+      '/api/staff/test/reset': ['/api/staff/test/reset', {}],
+      '/api/staff/tables/(\\d{1,4})/party': ['/api/staff/tables/11/party', { people: 3 }],
+      '/api/staff/tables/(\\d{1,4})/cover/waive': 'cover-waive',
+      '/api/staff/tables/(\\d{1,4})/cover/restore': 'cover-restore',
+      '/api/staff/payments/(\\d{1,9})/void': 'payment-void',
+      '/api/staff/cover/intents/(\\d{1,9})/cancel': 'intent-cancel',
       '/api/staff/reset': 'reset',
       '/api/staff/day/close': 'day-close',
       '/api/staff/login': null,
@@ -5274,6 +5398,21 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
       if (spec === 'rename-cat') { const cat = (await s.get('/api/staff/state')).json.menu.categoryList.find((c) => c.name === '새분류'); return [`/api/staff/menu/categories/${cat.id}`, { name: '이름바꿈' }]; }
       if (spec === 'delete-cat') { const cat = (await s.post('/api/staff/menu/categories', { name: '빈분류' })).json.category; return [`/api/staff/menu/categories/${cat.id}/delete`, {}]; }
       if (spec === 'delete-reward') { const rw = (await s.post('/api/staff/rewards', { label: '지울보상', game: 'pour', threshold: 10, type: 'item', stock: 1 })).json.reward; return [`/api/staff/rewards/${rw.id}/delete`, {}]; }
+      if (spec === 'cover-waive') { await s.post('/api/staff/tables/12/party', { people: 2 }); return ['/api/staff/tables/12/cover/waive', { reason: '감사' }]; }
+      if (spec === 'cover-restore') return ['/api/staff/tables/12/cover/restore', {}];
+      if (spec === 'payment-void') {
+        await s.post('/api/staff/tables/13/party', { people: 2 });
+        const c = (await s.get('/api/staff/state')).json.orders.find((x) => x.table === 13 && x.kind === 'cover');
+        await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 1 });
+        const p = (await s.get('/api/staff/state')).json.orders.find((x) => x.id === c.id).payments[0];
+        return [`/api/staff/payments/${p.id}/void`, { reason: '감사' }];
+      }
+      if (spec === 'intent-cancel') {
+        await s.post('/api/staff/tables/14/party', { people: 2 });
+        const g = await guestWithDevice(srv);
+        const it = await g.post(`/api/t/${tk[13]}/cover/intents`, { payer: '감사', shares: 1 });
+        return [`/api/staff/cover/intents/${it.json.id}/cancel`, {}];
+      }
       if (spec === 'reset') return ['/api/staff/reset', { confirm: '초기화' }];
       if (spec === 'day-close') return ['/api/staff/day/close', { confirm: '마감', force: true }];
       throw new Error(key);
@@ -5404,17 +5543,28 @@ async function healCase(mutate, { items = [{ id: 'tteokbokki', qty: 1 }], setup 
   } catch (e) { await cleanup(); throw e; }
 }
 
-test('R3-2a self-heal: Release 1 marks a partly paid order paid -> the missing money is recorded (flag trusted), ledger adds up', async () => {
+test('R3-2a self-heal: Release 1 marks a partly paid order paid -> the ledger wins: the flag is repaired, no money is booked (changed in release 3b: was "missing money recorded")', async () => {
   const result = await healCase((db, id) => db.prepare('UPDATE orders SET paid=1 WHERE id=?').run(id), {
     items: [{ id: 'tteokbokki', qty: 1 }], setup: async (s, o) => { await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 3000 }); } });
   try {
     const { order, s } = result;
-    assert.deepEqual([order.paid, order.paidAmount, order.balanceDue, order.refundDue], [true, 8000, 0, 0], 'the 5,000 R1 marked as paid is now recorded');
+    assert.deepEqual([order.paid, order.paidAmount, order.balanceDue, order.refundDue], [false, 3000, 5000, 0], 'the flag is repaired from the ledger, 3,000 stays 3,000');
     const sale = (await s.get('/api/staff/sales')).json;
-    assert.deepEqual([sale.totals.revenue, sale.byMethod.cash.received, sale.byMethod.other.received], [8000, 3000, 5000]);
+    assert.deepEqual([sale.totals.revenue, sale.byMethod.cash.received, sale.byMethod.other.received], [3000, 3000, 0]);
     assert.ok(result.audit.some((e) => e.action === 'migrated' && /1차 버전/.test(e.summaryKo)));
     const second = await result.again();
     assert.equal(second.audit.filter((e) => e.action === 'migrated').length, 1, 'idempotent: no second migration row');
+    assert.equal((await orderOf(second.s, result.o.id)).paidAmount, 3000);
+  } finally { await result.cleanup(); }
+});
+
+test('R3-2a2 self-heal: a flag-only legacy order (no ledger rows at all) keeps the old rule -> the missing money is recorded', async () => {
+  const result = await healCase((db, id) => db.prepare('UPDATE orders SET paid=1 WHERE id=?').run(id), { items: [{ id: 'tteokbokki', qty: 1 }] });
+  try {
+    const { order, s } = result;
+    assert.deepEqual([order.paid, order.paidAmount, order.balanceDue, order.refundDue], [true, 8000, 0, 0]);
+    assert.deepEqual([(await s.get('/api/staff/sales')).json.byMethod.other.received], [8000]);
+    const second = await result.again();
     assert.equal((await orderOf(second.s, result.o.id)).paidAmount, 8000);
   } finally { await result.cleanup(); }
 });
@@ -5510,7 +5660,7 @@ test('R3-5 dryRun previews exactly what the real call returns and writes nothing
     const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 2 }])).json.order; // 16,000
     await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
     const snap = async () => JSON.stringify([(await s.get('/api/staff/state')).json, (await s.get('/api/staff/audit?limit=200')).json.entries.map((e) => e.id), (await s.get('/api/staff/sales')).json]);
-    const strip = (x) => JSON.parse(JSON.stringify(x, (k, v) => (['updatedAt', 'createdAt', 'paidAt', 'cookingAt'].includes(k) ? undefined : v)));
+    const strip = (x) => JSON.parse(JSON.stringify(x, (k, v) => (['updatedAt', 'createdAt', 'paidAt', 'cookingAt', 'at'].includes(k) ? undefined : v)));
     const cases = [
       [`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }, { id: it, qty: 2 }] }], // lower total? 8,000 + 6,000 = 14,000 -> refund 2,000
       [`/api/staff/orders/${o.id}/service`, { itemId: it, qty: 1 }],
@@ -5649,4 +5799,1541 @@ test('R3-10 day close: unconfirmed deposit notices count as open items and are k
     assert.ok(!JSON.stringify(rep.pendingNotices).includes('Web발신'), 'no SMS text in the report');
     assert.ok((await csvOf(d.srv, s, '/api/staff/day/reports/1.csv')).text.includes('[미확인 입금 알림]'));
   } finally { await d.srv.stop(); }
+});
+
+
+// ==================== feature I: headcount, cover charge (입장료), share payments (각자 내기) ====================
+async function guestWithDevice(srv) { const g = new Client(srv); g.jar.booth_d = await realDevice(srv); return g; }
+const coverOn = (s, extra = {}) => s.post('/api/staff/cover/settings', { enabled: true, mode: 'per_person', amount: 3000, ...extra });
+const partyOf = (s, n, people, extra = {}) => s.post(`/api/staff/tables/${n}/party`, { people, ...extra });
+const coverIn = async (s, n) => { const l = (await s.get('/api/staff/state')).json.orders.filter((o) => o.table === n && o.kind === 'cover'); return l.find((o) => o.status !== 'cancelled') || l[0]; };
+const tableIn = async (s, n) => (await s.get('/api/staff/state')).json.tables.find((x) => x.number === n);
+
+test('I1 guest headcount: once per seating (1..30), the askGuest switch, snapshot party', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = await guestWithDevice(srv);
+    const p0 = (await g.get(`/api/t/${tk[0]}`)).json.party;
+    assert.deepEqual([p0.people, p0.askGuest, p0.canSet], [null, true, true]);
+    for (const people of [0, 31, 1.5, '3', null, undefined]) assert.equal((await g.post(`/api/t/${tk[0]}/party`, { seat: 1, people })).json.error, 'bad_people', String(people));
+    const ok = await g.post(`/api/t/${tk[0]}/party`, { seat: 1, people: 4 });
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.json.party.people, 4);
+    const second = await g.post(`/api/t/${tk[0]}/party`, { seat: 1, people: 5 });
+    assert.deepEqual([second.status, second.json.error], [409, 'party_set']);
+    const p1 = (await g.get(`/api/t/${tk[0]}`)).json.party;
+    assert.deepEqual([p1.people, p1.canSet], [4, false]);
+    const t1 = await tableIn(s, 1);
+    assert.deepEqual([t1.people, typeof t1.seatedAt], [4, 'number']);
+    // staff turned the question off: guests cannot answer, staff can
+    assert.equal((await s.post('/api/staff/cover/settings', { askGuest: false })).status, 200);
+    const p2 = (await g.get(`/api/t/${tk[1]}`)).json.party;
+    assert.deepEqual([p2.askGuest, p2.canSet], [false, false]);
+    assert.deepEqual([(await g.post(`/api/t/${tk[1]}/party`, { seat: 1, people: 2 })).status, (await g.post(`/api/t/${tk[1]}/party`, { seat: 1, people: 2 })).json.error], [403, 'party_not_asked']);
+    assert.equal((await partyOf(s, 2, 2)).status, 200);
+    assert.equal((await g.get(`/api/t/${tk[1]}`)).json.party.people, 2);
+  });
+});
+
+test('I1 staff headcount: any time, audit row with before->after, stale guard', async () => {
+  await withBooth(async ({ s }) => {
+    const a = await partyOf(s, 1, 3);
+    assert.equal(a.status, 200, a.text);
+    assert.equal(a.json.party.people, 3);
+    for (const people of [0, 31, 2.5, 'x']) assert.equal((await partyOf(s, 1, people)).json.error, 'bad_people');
+    assert.equal((await partyOf(s, 99, 2)).status, 404);
+    const stamp = (await tableIn(s, 1)).partyUpdatedAt;
+    assert.equal((await partyOf(s, 1, 5, { expectedUpdatedAt: stamp - 1 })).json.error, 'stale');
+    assert.equal((await partyOf(s, 1, 5, { expectedUpdatedAt: 'x' })).json.error, 'bad_expected');
+    const b = await partyOf(s, 1, 5, { expectedUpdatedAt: stamp });
+    assert.equal(b.status, 200, b.text);
+    assert.ok((await tableIn(s, 1)).partyUpdatedAt > stamp);
+    const rows = (await auditOf(s)).filter((e) => e.action === 'party_set');
+    assert.deepEqual(rows.map((e) => e.summary), ['people 3→5', 'people null→3']);
+    assert.equal(rows[0].summaryKo, '1번 테이블 인원 변경 3명 → 5명');
+  });
+});
+
+test('I1 waitlist seat with a table: the party size becomes the headcount when the seat has none, the entry records the table', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const g = new Client(srv);
+    const w1 = (await g.post('/api/wait', { nick: '손님', size: 4 })).json;
+    await s.post(`/api/staff/wait/${w1.id}/call`, {});
+    const r = await s.post(`/api/staff/wait/${w1.id}/seat`, { table: 2 });
+    assert.deepEqual([r.status, r.json.partySet, r.json.table], [200, true, 2]);
+    assert.equal((await tableIn(s, 2)).people, 4);
+    const db = dbOf(srv); assert.equal(db.prepare('SELECT seated_table t FROM waitlist WHERE id=?').get(w1.id).t, 2); db.close();
+    const w2 = (await g.post('/api/wait', { nick: '둘째', size: 2 })).json;
+    const r2 = await s.post(`/api/staff/wait/${w2.id}/seat`, { table: 2 });
+    assert.deepEqual([r2.json.partySet, (await tableIn(s, 2)).people], [false, 4], 'an existing headcount is not overwritten');
+    const w3 = (await g.post('/api/wait', { nick: '셋째', size: 3 })).json;
+    for (const table of [0, 99, 'x', 1.5]) assert.equal((await s.post(`/api/staff/wait/${w3.id}/seat`, { table })).json.error, 'bad_table', String(table));
+    const plain = await s.post(`/api/staff/wait/${w3.id}/seat`, {});
+    assert.deepEqual([plain.status, plain.json.partySet], [200, undefined], 'without a table nothing changes');
+    assert.equal((await tableIn(s, 3)).people, null);
+    assert.ok((await auditOf(s)).some((e) => e.action === 'party_set' && /대기 입장/.test(e.summaryKo)));
+  });
+});
+
+test('I1 clear starts a new seat without headcount, unclear restores it, table move carries or sums it', async () => {
+  await withBooth(async ({ s, srv, tk }) => {
+    await partyOf(s, 1, 3); await partyOf(s, 2, 2);
+    assert.equal((await s.post('/api/staff/tables/1/clear', {})).status, 200);
+    assert.deepEqual([(await tableIn(s, 1)).people, (await tableIn(s, 1)).seatedAt], [null, null]);
+    assert.equal((await new Client(srv).get(`/api/t/${tk[0]}`)).json.party.people, null);
+    assert.equal((await s.post('/api/staff/tables/1/unclear', {})).status, 200);
+    assert.equal((await tableIn(s, 1)).people, 3, 'undo restores the headcount');
+    // move to an empty table: the destination takes it
+    await s.post('/api/staff/tables/move', { from: 2, to: 5 });
+    assert.deepEqual([(await tableIn(s, 5)).people, (await tableIn(s, 2)).people], [2, null]);
+    // merge into an occupied table: SUM
+    await staffOrder(s, 1, [{ id: 'cola', qty: 1 }]);
+    await s.post('/api/staff/tables/move', { from: 5, to: 1 });
+    assert.deepEqual([(await tableIn(s, 1)).people, (await tableIn(s, 5)).people], [5, null]);
+    // one side unknown: the other's number is kept
+    await partyOf(s, 6, 4);
+    await s.post('/api/staff/tables/move', { from: 6, to: 7 });
+    assert.equal((await tableIn(s, 7)).people, 4);
+    await partyOf(s, 8, 3);
+    await s.post('/api/staff/tables/move', { from: 9, to: 8 });
+    assert.equal((await tableIn(s, 8)).people, 3);
+  });
+});
+
+test('I1 visitors statistics: per seat by seatedAt, unknown headcounts, in sales, the CSV and frozen in the day report', async () => {
+  await withBooth(async ({ srv, s }) => {
+    await partyOf(s, 1, 4); await partyOf(s, 2, 2);
+    await staffOrder(s, 3, [{ id: 'cola', qty: 1 }]); // a seat with activity but no headcount
+    const v = (await s.get('/api/staff/sales')).json.visitors;
+    assert.deepEqual([v.total, v.parties, v.partiesUnknown, v.avgPartySize], [6, 2, 1, 3]);
+    assert.equal(v.byHour.length, 1);
+    assert.deepEqual([v.byHour[0].people, v.byHour[0].parties, typeof v.byHour[0].label], [6, 2, 'string']);
+    const csv = await csvOf(srv, s, '/api/staff/sales.csv');
+    assert.ok(csv.text.includes('[방문객]') && csv.text.includes('6,2,1,3'), csv.text);
+    await s.post('/api/staff/day/close', { confirm: '마감', force: true });
+    assert.deepEqual((await s.get('/api/staff/day/reports/1')).json.visitors, v, 'frozen in the report');
+    assert.deepEqual((await s.get('/api/staff/sales')).json.visitors, { total: 0, parties: 0, partiesUnknown: 0, avgPartySize: 0, byHour: [] });
+    assert.ok((await csvOf(srv, s, '/api/staff/day/reports/1.csv')).text.includes('[방문객]'));
+  });
+});
+
+test('I2 cover settings: validation, audit, guest and staff snapshots', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    assert.deepEqual((await s.get('/api/staff/state')).json.cover, { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료' });
+    const bad = async (body, code) => assert.equal((await s.post('/api/staff/cover/settings', body)).json.error, code, JSON.stringify(body));
+    await bad({}, 'nothing_to_update'); await bad({ enabled: 'yes' }, 'bad_enabled'); await bad({ mode: 'x' }, 'bad_mode');
+    for (const amount of [150, -100, 100100, 'x', 1e9]) await bad({ amount }, 'bad_amount');
+    await bad({ label: '' }, 'bad_label'); await bad({ label: '가'.repeat(13) }, 'bad_label'); await bad({ requireBeforeOrder: 1 }, 'bad_require_before_order'); await bad({ askGuest: 'no' }, 'bad_ask_guest');
+    assert.equal((await new Client(srv).post('/api/staff/cover/settings', { enabled: true })).status, 401);
+    const ok = await s.post('/api/staff/cover/settings', { enabled: true, mode: 'per_table', amount: 2000, label: '테이블비' });
+    assert.deepEqual(ok.json.cover, { enabled: true, mode: 'per_table', amount: 2000, requireBeforeOrder: false, askGuest: true, label: '테이블비' });
+    const row = (await auditOf(s)).find((e) => e.action === 'cover_settings');
+    assert.match(row.summary, /enabled false→true.*amount 0→2000/);
+    assert.match(row.summaryKo, /입장료 설정 · 켜짐 · 테이블당 2,000원/);
+    const gc = (await new Client(srv).get(`/api/t/${tk[0]}`)).json.cover;
+    assert.deepEqual([gc.enabled, gc.label, gc.mode, gc.unitPrice, gc.people, gc.total, gc.waived, gc.shares], [true, '테이블비', 'per_table', 2000, null, 0, false, null]);
+  });
+});
+
+test('I2 per-person cover order: one per seat, served, never in the kitchen or the caps, untouchable by the normal order endpoints', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await coverOn(s);
+    assert.equal((await partyOf(s, 1, 3)).status, 200);
+    const c = await coverIn(s, 1);
+    assert.deepEqual([c.kind, c.status, c.total, c.subtotal, c.memberDiscount, c.couponDiscount, c.createdBy, c.paid, c.balanceDue], ['cover', 'served', 9000, 9000, 0, 0, 'system', false, 9000]);
+    assert.deepEqual(c.items, [{ id: 'cover', name: '입장료', qty: 3, unitPrice: 3000, service: false }]);
+    assert.deepEqual([c.unitPrice, c.shares, c.coverMode, c.waived, c.payments], [3000, { total: 3, paid: 0, left: 3, over: 0 }, 'per_person', false, []]);
+    await partyOf(s, 1, 3); await partyOf(s, 1, 3);
+    assert.equal((await s.get('/api/staff/state')).json.orders.filter((o) => o.kind === 'cover' && o.table === 1).length, 1, 'exactly one cover order per seat');
+    assert.deepEqual((await s.get('/api/kitchen')).json.orders, []);
+    assert.equal((await tableIn(s, 1)).orderCount, 0, 'the cover order is not counted as an order of the table');
+    assert.equal((await tableIn(s, 1)).status, 'occupied');
+    // untouchable
+    const g = await guestWithDevice(srv);
+    assert.deepEqual([(await g.post(`/api/t/${tk[0]}/orders/${c.id}/cancel`, {})).status, (await g.post(`/api/t/${tk[0]}/orders/${c.id}/cancel`, {})).json.error], [409, 'not_cancellable']);
+    assert.equal((await g.post(`/api/t/${tk[0]}/orders/${c.id}/depositor`, { depositor: '가나' })).json.error, 'cover_order');
+    for (const [p, body] of [[`/api/staff/orders/${c.id}/status`, { status: 'cancelled' }], [`/api/staff/orders/${c.id}/status`, { status: 'cooking' }], [`/api/staff/orders/${c.id}/items`, { items: [{ id: 'cola', qty: 1 }] }],
+      [`/api/staff/orders/${c.id}/service`, { itemId: 'cola', qty: 1 }], [`/api/staff/orders/${c.id}/move`, { to: 2 }]]) {
+      const r = await s.post(p, body);
+      assert.deepEqual([r.status, r.json.error], [409, 'cover_order'], p);
+    }
+    // the per-seat caps do not count it: 80 staff orders still fit
+    for (let i = 0; i < 80; i++) assert.equal((await staffOrder(s, 1, [{ id: 'cola', qty: 1 }])).status, 201, `order ${i}`);
+    assert.equal((await staffOrder(s, 1, [{ id: 'cola', qty: 1 }])).json.error, 'too_many_orders');
+    // no stock, no member discount: the line is a plain 'cover' item that is not a menu item
+    assert.ok(!(await s.get('/api/staff/sales')).json.byItem.some((i) => i.id === 'cover'), 'food items only in byItem');
+  });
+});
+
+test('I2 headcount changes re-price the cover order (H2 rules); settings changes affect only NEW seats; disabling touches nothing', async () => {
+  await withBooth(async ({ s }) => {
+    await coverOn(s);
+    await partyOf(s, 1, 4);
+    let c = await coverIn(s, 1);
+    assert.equal(c.total, 12000);
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash' })).json.order.paid, true);
+    await partyOf(s, 1, 4); // unchanged and fully paid: nothing happens
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.total, c.paid, c.refundDue], [12000, true, 0]);
+    await partyOf(s, 1, 3); // one leaves after paying
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.total, c.paid, c.overpaid, c.refundDue], [9000, true, 3000, 3000]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.refunds.map((r) => [r.orderId, r.amount, r.reason]), [[c.id, 3000, 'edit_lower_total']]);
+    await partyOf(s, 1, 5);
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.total, c.paid, c.balanceDue, c.refundDue], [15000, false, 3000, 0]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.refunds, [], 'the refund entry disappears when the order grows again');
+    // the price it was created with sticks
+    await s.post('/api/staff/cover/settings', { amount: 5000 });
+    await partyOf(s, 1, 6);
+    assert.deepEqual([(await coverIn(s, 1)).total, (await coverIn(s, 1)).unitPrice], [18000, 3000]);
+    // a new seat uses the new price
+    await s.post('/api/staff/tables/1/clear', { force: true });
+    await partyOf(s, 1, 2);
+    assert.deepEqual([(await coverIn(s, 1)).total, (await coverIn(s, 1)).unitPrice], [10000, 5000]);
+    // disabled: the existing order still follows the headcount, no new cover order appears
+    await s.post('/api/staff/cover/settings', { enabled: false });
+    await partyOf(s, 1, 3);
+    assert.equal((await coverIn(s, 1)).total, 15000);
+    await partyOf(s, 2, 3);
+    assert.equal(await coverIn(s, 2), undefined);
+  });
+});
+
+test('I2 per-table cover is created by the first order; requireBeforeOrder gates guests (never on payment); staff orders are not gated', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await coverOn(s, { mode: 'per_table', amount: 2000 });
+    const g = await guestWithDevice(srv);
+    assert.equal((await order(g, tk[0], [{ id: 'cola', qty: 1 }])).status, 201);
+    const c = await coverIn(s, 1);
+    assert.deepEqual([c.total, c.items[0].qty, c.shares, c.coverMode], [2000, 1, null, 'per_table']);
+    await order(g, tk[0], [{ id: 'cola', qty: 1 }]);
+    assert.equal((await s.get('/api/staff/state')).json.orders.filter((o) => o.kind === 'cover').length, 1);
+    // per-person with the gate
+    await s.post('/api/staff/cover/settings', { mode: 'per_person', requireBeforeOrder: true });
+    const r = await order(g, tk[1], [{ id: 'cola', qty: 1 }]);
+    assert.deepEqual([r.status, r.json.error], [409, 'party_required']);
+    assert.equal((await staffOrder(s, 2, [{ id: 'cola', qty: 1 }])).status, 201, 'staff orders are not gated');
+    assert.equal((await g.post(`/api/t/${tk[1]}/party`, { seat: 1, people: 2 })).status, 200);
+    assert.equal((await order(g, tk[1], [{ id: 'cola', qty: 1 }])).status, 201, 'allowed with the cover still UNPAID');
+    assert.equal((await coverIn(s, 2)).paid, false);
+    // the gate off: no headcount needed
+    await s.post('/api/staff/cover/settings', { requireBeforeOrder: false });
+    assert.equal((await order(g, tk[2], [{ id: 'cola', qty: 1 }])).status, 201);
+  });
+});
+
+test('I2 waive and restore: refund entry when money was received, a waived cover is not re-created or re-priced, restore re-prices', async () => {
+  await withBooth(async ({ s }) => {
+    await coverOn(s);
+    await partyOf(s, 1, 3);
+    const c0 = await coverIn(s, 1);
+    await s.post(`/api/staff/orders/${c0.id}/paid`, { paid: true, method: 'cash', shares: 1 });
+    for (const reason of ['', '가'.repeat(31), undefined]) assert.equal((await s.post('/api/staff/tables/1/cover/waive', { reason })).json.error, 'bad_reason');
+    assert.equal((await s.post('/api/staff/tables/2/cover/waive', { reason: '임원' })).json.error, 'no_cover');
+    const w = await s.post('/api/staff/tables/1/cover/waive', { reason: '임원' });
+    assert.equal(w.status, 200, w.text);
+    assert.deepEqual([w.json.order.status, w.json.order.note, w.json.order.waived, w.json.order.refundDue], ['cancelled', '면제: 임원', true, 3000]);
+    assert.deepEqual((await tableIn(s, 1)).cover, { orderId: c0.id, status: 'cancelled', waived: true });
+    assert.equal((await s.post('/api/staff/tables/1/cover/waive', { reason: '임원' })).json.error, 'no_cover');
+    await partyOf(s, 1, 5); // a waived cover is not touched
+    assert.equal((await coverIn(s, 1)).total, 9000);
+    assert.equal((await s.get('/api/staff/state')).json.orders.filter((o) => o.kind === 'cover').length, 1);
+    const r = await s.post('/api/staff/tables/1/cover/restore', {});
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual([r.json.order.status, r.json.order.total, r.json.order.paid, r.json.order.balanceDue, r.json.order.refundDue, r.json.order.note], ['served', 15000, false, 12000, 0, '']);
+    assert.deepEqual((await s.get('/api/staff/state')).json.refunds, []);
+    assert.equal((await s.post('/api/staff/tables/1/cover/restore', {})).json.error, 'no_cover');
+    const kinds = (await auditOf(s)).map((e) => e.action);
+    assert.ok(kinds.includes('cover_waive') && kinds.includes('cover_restore'));
+  });
+});
+
+test('I2 clear, write-off, table move and day close treat the cover order like any other order', async () => {
+  await withBooth(async ({ srv, s }) => {
+    await coverOn(s);
+    await partyOf(s, 1, 2);
+    const refused = await s.post('/api/staff/tables/1/clear', {});
+    assert.deepEqual([refused.status, refused.json.error, refused.json.unpaid, refused.json.unpaidTotal], [409, 'unsettled', 1, 6000]);
+    const cleared = await s.post('/api/staff/tables/1/clear', { force: true });
+    assert.deepEqual(cleared.json.writtenOff, { orders: 1, amount: 6000 });
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.byKind.cover.writtenOff, sale.byKind.food.writtenOff, sale.totals.writtenOff], [6000, 0, 6000]);
+    // merging two seats that both have a cover order is refused; waive one and it merges (people summed, one re-priced cover order)
+    await partyOf(s, 2, 2); await partyOf(s, 3, 3);
+    const conflict = await s.post('/api/staff/tables/move', { from: 2, to: 3 });
+    assert.deepEqual([conflict.status, conflict.json.error], [409, 'cover_conflict']);
+    assert.equal((await tableIn(s, 2)).people, 2, 'nothing moved');
+    await s.post('/api/staff/tables/2/cover/waive', { reason: '합석' });
+    assert.equal((await s.post('/api/staff/tables/move', { from: 2, to: 3 })).status, 200);
+    assert.equal((await tableIn(s, 3)).people, 5);
+    const c3 = await coverIn(s, 3);
+    assert.deepEqual([c3.total, c3.status, c3.shares.total], [15000, 'served', 5], 'the surviving cover order follows the merged headcount');
+    assert.equal((await s.get('/api/staff/state')).json.orders.filter((o) => o.kind === 'cover' && o.status !== 'cancelled' && o.table === 3).length, 1);
+    // a waived cover moves along with the source and does not count; only A has a cover: it moves into B
+    await partyOf(s, 4, 2);
+    await partyOf(s, 6, 1); await s.post('/api/staff/cover/settings', { enabled: false }); await partyOf(s, 7, 4); // 7 has people but never got a cover
+    assert.equal(await coverIn(s, 7), undefined);
+    assert.equal((await s.post('/api/staff/tables/move', { from: 4, to: 7 })).status, 200);
+    assert.deepEqual([(await tableIn(s, 7)).people, (await coverIn(s, 7)).total], [6, 18000], 'the cover order of the source moved and was re-priced to 6 people');
+    // day close keeps cover figures in the report
+    await s.post('/api/staff/day/close', { confirm: '마감', force: true });
+    const rep = (await s.get('/api/staff/day/reports/1')).json;
+    assert.ok(rep.byKind.cover.billed > 0 && rep.byKind.food.billed === 0);
+    assert.equal(rep.byKind.cover.billed + rep.byKind.food.billed, rep.totals.billed);
+    const csv = await csvOf(srv, s, '/api/staff/day/reports/1.csv');
+    assert.ok(csv.text.includes('[종류별]') && csv.text.includes('입장료,'));
+  });
+});
+
+test('I3 share payments: amount = shares x unit price, payer cleaned, shares counted; validation', async () => {
+  await withBooth(async ({ s }) => {
+    await coverOn(s);
+    await partyOf(s, 1, 4);
+    const c = await coverIn(s, 1);
+    const pay = (body) => s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, ...body });
+    for (const shares of [0, -1, 1.5, '2', 1001]) assert.equal((await pay({ method: 'cash', shares })).json.error, 'bad_shares', String(shares));
+    assert.equal((await pay({ method: 'cash', shares: 2, amount: 5000 })).json.error, 'bad_shares', 'amount must equal shares x 3,000');
+    assert.equal((await pay({ method: 'cash', shares: 1, payer: '가'.repeat(11) })).json.error, 'bad_payer');
+    const a = (await pay({ method: 'cash', shares: 2, payer: '  가나   다 ' })).json.order;
+    assert.deepEqual([a.paidAmount, a.balanceDue, a.shares, a.paid], [6000, 6000, { total: 4, paid: 2, left: 2, over: 0 }, false]);
+    assert.deepEqual(a.payments.map((p) => [p.amount, p.shares, p.method, p.payer]), [[6000, 2, 'cash', '가나 다']]);
+    const b = (await pay({ method: 'transfer', shares: 1, amount: 3000 })).json.order; // amount given and equal: fine; payer optional
+    assert.deepEqual([b.paidAmount, b.shares.paid, b.shares.left, b.payments[1].payer], [9000, 3, 1, null]);
+    const plain = (await pay({ method: 'other', amount: 1000 })).json.order; // a plain money payment has no shares
+    assert.deepEqual([plain.paidAmount, plain.shares.paid, plain.payments[2].shares], [10000, 3, null]);
+    const last = (await pay({ method: 'cash', shares: 1 })).json.order; // default amount derived
+    assert.deepEqual([last.paid, last.paidAmount, last.shares.paid, last.overpaid, last.refundDue], [true, 13000, 4, 1000, 1000]);
+    const tooMany = await pay({ method: 'cash', shares: 1 }); // nothing is left: more shares than that are refused (a double tap on two phones)
+    assert.deepEqual([tooMany.status, tooMany.json.error, tooMany.json.left], [400, 'too_many_shares', 0]);
+    const over = (await pay({ method: 'cash', amount: 3000 })).json.order; // over-payment by plain money works as always: the excess is owed back
+    assert.deepEqual([over.paidAmount, over.overpaid, over.refundDue, over.shares], [16000, 4000, 4000, { total: 4, paid: 4, left: 0, over: 0 }]);
+    // only per-person cover orders take shares
+    const food = (await staffOrder(s, 2, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    assert.equal((await s.post(`/api/staff/orders/${food.id}/paid`, { paid: true, shares: 1 })).json.error, 'bad_shares');
+    await s.post('/api/staff/cover/settings', { mode: 'per_table', amount: 2000 });
+    await staffOrder(s, 3, [{ id: 'cola', qty: 1 }]);
+    const pt = await coverIn(s, 3);
+    assert.equal((await s.post(`/api/staff/orders/${pt.id}/paid`, { paid: true, shares: 1 })).json.error, 'bad_shares');
+    assert.equal((await s.post(`/api/staff/orders/${pt.id}/paid`, { paid: true, method: 'cash', amount: 2000, payer: '홍길동' })).json.order.payments[0].payer, '홍길동');
+    // dry run previews it
+    const dry = await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', amount: 1000, dryRun: true });
+    assert.equal(dry.json.dryRun, true);
+  });
+});
+
+test('I3 what guests see: reduced payment list for the same table only, never on the board or other tables', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await coverOn(s);
+    await partyOf(s, 1, 3); await partyOf(s, 2, 2);
+    const c = await coverIn(s, 1);
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 1, payer: '김철수' });
+    const g1 = await guestWithDevice(srv); const g2 = await guestWithDevice(srv);
+    const snap1 = (await g1.get(`/api/t/${tk[0]}`)).json;
+    assert.deepEqual(snap1.cover.payments.map((p) => Object.keys(p).sort()), [['at', 'payer', 'shares']]);
+    assert.deepEqual([snap1.cover.payments[0].payer, snap1.cover.payments[0].shares], ['김철수', 1]);
+    assert.deepEqual([snap1.cover.people, snap1.cover.total, snap1.cover.paid, snap1.cover.left, snap1.cover.unitPrice], [3, 9000, 3000, 6000, 3000]);
+    assert.deepEqual(snap1.cover.shares, { total: 3, paid: 1, left: 2, over: 0 });
+    const guestCover = snap1.orders.find((o) => o.kind === 'cover');
+    assert.deepEqual(guestCover.payments.map((p) => Object.keys(p).sort()), [['at', 'payer', 'shares']], 'the order JSON for guests carries the same reduced list');
+    const snap2 = (await g2.get(`/api/t/${tk[1]}`)).json;
+    assert.ok(!JSON.stringify(snap2).includes('김철수'), 'another table never sees the name');
+    for (const p of ['/api/board', '/api/menu', '/api/wait/info']) assert.ok(!(await g2.get(p)).text.includes('김철수'), p);
+    assert.ok(!(await g2.get('/api/board')).text.includes('payer'));
+    const staffText = JSON.stringify((await s.get('/api/staff/state')).json);
+    assert.ok(staffText.includes('김철수'), 'staff see the name');
+  });
+});
+
+test('I3 void a payment: it was never received (paid_amount, revenue, byMethod drop), refunds are separate, the notice returns to pending', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    await coverOn(s);
+    await partyOf(s, 1, 3);
+    const c = await coverIn(s, 1);
+    const a = (await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 2, payer: '가나' })).json.order;
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'transfer', shares: 1 });
+    let sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.byMethod.cash, sale.byMethod.transfer, sale.totals.revenue], [{ received: 6000, refunded: 0, net: 6000, count: 1 }, { received: 3000, refunded: 0, net: 3000, count: 1 }, 9000]);
+    const cashId = a.payments[0].id;
+    assert.equal((await s.post(`/api/staff/payments/${cashId}/void`, {})).json.error, 'bad_reason');
+    assert.equal((await s.post(`/api/staff/payments/99999/void`, { reason: 'x' })).status, 404);
+    assert.equal((await s.post(`/api/staff/payments/${cashId}/void`, { reason: 'x', expectedUpdatedAt: 1 })).json.error, 'stale');
+    const v = await s.post(`/api/staff/payments/${cashId}/void`, { reason: '입력 실수' });
+    assert.equal(v.status, 200, v.text);
+    assert.deepEqual([v.json.order.paidAmount, v.json.order.paid, v.json.order.balanceDue, v.json.order.shares, v.json.order.payments.length], [3000, false, 6000, { total: 3, paid: 1, left: 2, over: 0 }, 1]);
+    sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.byMethod.cash, sale.totals.paidAmount, sale.totals.revenue, sale.totals.refundDue], [{ received: 0, refunded: 0, net: 0, count: 0 }, 3000, 3000, 0]);
+    assert.equal((await s.post(`/api/staff/payments/${cashId}/void`, { reason: 'x' })).json.error, 'payment_void');
+    assert.ok((await auditOf(s)).some((e) => e.action === 'payment_void' && /입금 #\d+ 취소 · 현금 6,000원 · 사유: 입력 실수/.test(e.summaryKo)));
+    // voiding the payment that covered the order flips it back to unpaid; the open refund entry that came from it shrinks
+    const o2 = (await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', amount: 9000 })).json.order; // 3,000 + 9,000 = 12,000 on a 9,000 order
+    assert.deepEqual([o2.paid, o2.overpaid, o2.refundDue], [true, 3000, 3000]);
+    const big = o2.payments.find((p) => p.amount === 9000);
+    const vb = (await s.post(`/api/staff/payments/${big.id}/void`, { reason: '다시' })).json.order;
+    assert.deepEqual([vb.paidAmount, vb.refundDue, vb.paid], [3000, 0, false]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.refunds, []);
+    // after a refund was handed back the money cannot be voided away
+    const x = (await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', amount: 12000 })).json.order; // + 12,000 -> 15,000 on 9,000
+    const rf = (await s.get('/api/staff/state')).json.refunds[0];
+    assert.equal(rf.amount, 6000);
+    await s.post(`/api/staff/refunds/${rf.id}/done`, { amount: 6000, method: 'cash' });
+    const last = x.payments.find((p) => p.amount === 12000);
+    const stuck = await s.post(`/api/staff/payments/${last.id}/void`, { reason: '늦음' });
+    assert.deepEqual([stuck.status, stuck.json.error], [409, 'cannot_void']);
+    // deposit-linked payment: voiding hands the notice back
+    const o3 = await d.place(tk[3], '박철수'); // 8,000
+    const n = await d.sms(8000, '박철수');
+    assert.equal(n.status, 'matched');
+    const paidOrder = await d.order(o3.id);
+    const dep = paidOrder.payments[0];
+    await s.post(`/api/staff/payments/${dep.id}/void`, { reason: '다른 주문' });
+    assert.equal((await d.notices()).find((q) => q.id === n.id).status, 'pending');
+    assert.equal((await d.order(o3.id)).paid, false);
+  } finally { await d.srv.stop(); }
+});
+
+test('I3 payment intents: guest-only, device-bound, limited by the shares left and 10 per seat, expire after 30 minutes', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = await guestWithDevice(srv); const other = await guestWithDevice(srv);
+    const mk = (cli, body, i = 0) => cli.post(`/api/t/${tk[i]}/cover/intents`, body);
+    assert.equal((await mk(g, { payer: '가나', shares: 1 })).json.error, 'no_cover', 'cover disabled');
+    await coverOn(s);
+    assert.equal((await mk(g, { payer: '가나', shares: 1 })).json.error, 'no_cover', 'no headcount yet');
+    await partyOf(s, 1, 3);
+    assert.equal((await mk(new Client(srv), { payer: '가나', shares: 1 })).json.error, 'no_device');
+    assert.equal((await mk(g, { shares: 1 })).json.error, 'bad_payer');
+    assert.equal((await mk(g, { payer: '가나다라마바사아자차카', shares: 1 })).json.error, 'bad_payer');
+    for (const shares of [0, 1.5, '1', undefined]) assert.equal((await mk(g, { payer: '가나', shares })).json.error, 'bad_shares');
+    const i1 = await mk(g, { payer: '가나', shares: 2 });
+    assert.equal(i1.status, 201, i1.text);
+    assert.deepEqual([i1.json.amount, i1.json.shares], [6000, 2]);
+    const over = await mk(other, { payer: '다라', shares: 2 });
+    assert.deepEqual([over.status, over.json.error, over.json.left], [409, 'too_many_shares', 1], '3 shares - 2 already announced');
+    const i2 = await mk(other, { payer: '다라', shares: 1 });
+    assert.equal(i2.status, 201);
+    assert.equal((await mk(g, { payer: '마바', shares: 1 })).json.error, 'too_many_shares');
+    // visible only to the staff and to the announcing device
+    const snap = (await g.get(`/api/t/${tk[0]}`)).json.cover;
+    assert.deepEqual(snap.myIntents.map((x) => [x.id, x.payer, x.shares, x.amount]), [[i1.json.id, '가나', 2, 6000]]);
+    assert.deepEqual((await other.get(`/api/t/${tk[0]}`)).json.cover.myIntents.map((x) => x.id), [i2.json.id]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents.map((x) => [x.id, x.table, x.payer, x.shares, x.amount]), [[i1.json.id, 1, '가나', 2, 6000], [i2.json.id, 1, '다라', 1, 3000]]);
+    // cancel: only the owner's device
+    assert.equal((await other.post(`/api/t/${tk[0]}/cover/intents/${i1.json.id}/cancel`, {})).status, 404);
+    assert.equal((await g.post(`/api/t/${tk[0]}/cover/intents/${i1.json.id}/cancel`, {})).status, 200);
+    assert.equal((await g.post(`/api/t/${tk[0]}/cover/intents/${i1.json.id}/cancel`, {})).status, 404);
+    assert.equal((await s.post(`/api/staff/cover/intents/${i2.json.id}/cancel`, {})).status, 200);
+    assert.equal((await s.post(`/api/staff/cover/intents/${i2.json.id}/cancel`, {})).status, 404);
+    assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents, []);
+    // expiry after 30 minutes
+    const i3 = await mk(g, { payer: '가나', shares: 3 });
+    const db = dbOf(srv); db.prepare('UPDATE cover_intents SET created_at=created_at-?').run(31 * 60000); db.close();
+    assert.deepEqual([(await s.get('/api/staff/state')).json.coverIntents.length, (await g.get(`/api/t/${tk[0]}`)).json.cover.myIntents.length], [0, 0]);
+    assert.equal((await mk(g, { payer: '가나', shares: 3 })).status, 201, 'the expired one no longer blocks the shares');
+    void i3;
+    // 10 open intents per seat
+    await partyOf(s, 2, 12);
+    let cur;
+    for (let i = 0; i < 10; i++) { if (i % 5 === 0) cur = await guestWithDevice(srv); assert.equal((await mk(cur, { payer: `손${i}`, shares: 1 }, 1)).status, 201); } // (a device may create 6 per minute)
+    const fresh = await guestWithDevice(srv);
+    assert.deepEqual([(await mk(fresh, { payer: '열하나', shares: 1 }, 1)).status, (await mk(fresh, { payer: '열하나', shares: 1 }, 1)).json.error], [429, 'too_many_intents']);
+    // per-table cover cannot be split
+    await s.post('/api/staff/cover/settings', { mode: 'per_table' });
+    await staffOrder(s, 3, [{ id: 'cola', qty: 1 }]);
+    assert.equal((await mk(g, { payer: '가나', shares: 1 }, 2)).json.error, 'no_cover');
+  });
+});
+
+test('I3 deposit notices match share intents: candidates, recommended payer, assign with intentId, strict auto-confirm', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    await coverOn(s);
+    await partyOf(s, 1, 4);
+    const gA = await guestWithDevice(srv); const gB = await guestWithDevice(srv);
+    const iA = (await gA.post(`/api/t/${tk[0]}/cover/intents`, { payer: '김철수', shares: 1 })).json;
+    const iB = (await gB.post(`/api/t/${tk[0]}/cover/intents`, { payer: '이영희', shares: 1 })).json;
+    // two intents with the same amount: never automatic
+    const n1 = await d.sms(3000, '김철수');
+    assert.equal(n1.status, 'pending');
+    const notice1 = (await d.notices()).find((n) => n.id === n1.id);
+    assert.ok(notice1.reasons.includes('several_candidates'));
+    assert.deepEqual(notice1.candidates.map((x) => [x.intent && x.intent.id, x.intent && x.intent.payer, x.intent && x.intent.shares, x.table, x.recommended]).sort(), [[iA.id, '김철수', 1, 1, true], [iB.id, '이영희', 1, 1, false]].sort());
+    // assign to the recommended intent: a share payment with the payer, the intent is closed
+    const c = await coverIn(s, 1);
+    assert.equal((await s.post(`/api/staff/deposits/${n1.id}/assign`, { orderId: c.id, intentId: 424242 })).json.error, 'no_intent');
+    const as = await s.post(`/api/staff/deposits/${n1.id}/assign`, { orderId: c.id, intentId: iA.id });
+    assert.equal(as.status, 200, as.text);
+    assert.deepEqual([as.json.order.paidAmount, as.json.order.shares, as.json.order.payments[0].payer, as.json.order.payments[0].shares, as.json.order.payments[0].method], [3000, { total: 4, paid: 1, left: 3, over: 0 }, '김철수', 1, 'transfer']);
+    assert.equal((await s.post(`/api/staff/deposits/${(await d.sms(3000, '김철수')).id}/assign`, { orderId: c.id, intentId: iA.id })).json.error, 'no_intent', 'a closed intent cannot be used again');
+    // now exactly one open intent (이영희) and no other unpaid order with a 3,000 balance: the notice with the same name is automatic
+    const n2 = await d.sms(3000, '이영희');
+    assert.equal(n2.status, 'matched', JSON.stringify(n2));
+    const after = await coverIn(s, 1);
+    assert.deepEqual([after.paidAmount, after.shares, after.payments.map((p) => [p.payer, p.shares])], [6000, { total: 4, paid: 2, left: 2, over: 0 }, [['김철수', 1], ['이영희', 1]]]);
+    assert.equal((await s.get('/api/staff/state')).json.coverIntents.length, 0);
+    // a different name never auto-confirms an intent
+    const gC = await guestWithDevice(srv);
+    const iC = (await gC.post(`/api/t/${tk[0]}/cover/intents`, { payer: '박민수', shares: 1 })).json;
+    const n3 = await d.sms(3000, '다른사람');
+    assert.deepEqual([n3.status, (await d.notices()).find((n) => n.id === n3.id).reasons.includes('name_mismatch')], ['pending', true]);
+    // another unpaid order with the same amount makes it ambiguous
+    const item = await mkItem(s, '삼천원', 3000);
+    await staffOrder(s, 2, [{ id: item, qty: 1 }]);
+    const n4 = await d.sms(3000, '박민수');
+    assert.equal(n4.status, 'pending');
+    assert.ok((await d.notices()).find((n) => n.id === n4.id).reasons.includes('several_candidates'));
+    // a forced mismatch on an intent records a plain payment (no shares) and still closes the intent
+    const n5 = await d.sms(3500, '박민수');
+    assert.equal((await s.post(`/api/staff/deposits/${n5.id}/assign`, { orderId: c.id, intentId: iC.id })).json.error, 'amount_mismatch');
+    assert.equal((await s.post(`/api/staff/deposits/${n5.id}/assign`, { orderId: c.id, intentId: iC.id, force: true })).json.error, 'note_required');
+    const forced = await s.post(`/api/staff/deposits/${n5.id}/assign`, { orderId: c.id, intentId: iC.id, force: true, note: '팁 포함' });
+    assert.deepEqual([forced.status, forced.json.order.payments.at(-1).shares, forced.json.order.payments.at(-1).amount, forced.json.order.shares.paid], [200, null, 3500, 3]); // changed in 3b: shares follow the money held (9,500 / 3,000 = 3), not the ledger's share rows (2)
+    assert.equal((await s.get('/api/staff/state')).json.coverIntents.length, 0);
+  } finally { await d.srv.stop(); }
+});
+
+test('I3/I4 worked example: 4 people x 3,000: A by transfer (intent -> notice -> assign), B 2 shares cash, party grows to 5, C pays the last 2, one leaves -> refund 3,000', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false }); // everything is assigned by hand in this example
+    await coverOn(s);
+    const guest = await guestWithDevice(srv);
+    assert.equal((await guest.post(`/api/t/${tk[0]}/party`, { seat: 1, people: 4 })).status, 200);
+    let c = await coverIn(s, 1);
+    assert.deepEqual([c.total, c.shares], [12000, { total: 4, paid: 0, left: 4, over: 0 }]);
+    // A announces 1 share, sends 3,000 by bank transfer, staff assign the notice to the intent
+    const intent = (await guest.post(`/api/t/${tk[0]}/cover/intents`, { payer: '에이', shares: 1 })).json;
+    assert.deepEqual([intent.amount], [3000]);
+    const notice = await d.sms(3000, '에이');
+    assert.equal(notice.status, 'pending');
+    const cand = (await d.notices()).find((n) => n.id === notice.id).candidates.find((x) => x.intent);
+    assert.deepEqual([cand.recommended, cand.intent.shares, cand.table], [true, 1, 1]);
+    await s.post(`/api/staff/deposits/${notice.id}/assign`, { orderId: cand.id, intentId: cand.intent.id });
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.paidAmount, c.shares, c.balanceDue], [3000, { total: 4, paid: 1, left: 3, over: 0 }, 9000]);
+    // B pays 2 shares in cash
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 2, payer: '비' });
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.paidAmount, c.shares, c.balanceDue, c.paid], [9000, { total: 4, paid: 3, left: 1, over: 0 }, 3000, false]);
+    // a fifth person joins: the cover grows to 15,000, 6,000 is still due for 2 shares
+    await partyOf(s, 1, 5);
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.total, c.shares, c.balanceDue, c.paid], [15000, { total: 5, paid: 3, left: 2, over: 0 }, 6000, false]);
+    assert.deepEqual((await guest.get(`/api/t/${tk[0]}`)).json.cover.shares, { total: 5, paid: 3, left: 2, over: 0 });
+    // C pays the remaining 2 shares by transfer
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'transfer', shares: 2, payer: '씨' });
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.paid, c.paidAmount, c.balanceDue, c.shares, c.refundDue], [true, 15000, 0, { total: 5, paid: 5, left: 0, over: 0 }, 0]);
+    // one person leaves after paying: people 4 -> total 12,000, 3,000 owed back
+    await partyOf(s, 1, 4);
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.total, c.paid, c.overpaid, c.refundDue], [12000, true, 3000, 3000]);
+    const refunds = (await s.get('/api/staff/state')).json.refunds;
+    assert.deepEqual(refunds.map((r) => [r.orderId, r.amount, r.reason, r.doneAt]), [[c.id, 3000, 'edit_lower_total', null]]);
+    // the books
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual(sale.byMethod.transfer, { received: 9000, refunded: 0, net: 9000, count: 2 });
+    assert.deepEqual(sale.byMethod.cash, { received: 6000, refunded: 0, net: 6000, count: 1 });
+    assert.deepEqual([sale.totals.revenue, sale.totals.refundDue, sale.byKind.cover.billed, sale.byKind.cover.received, sale.byKind.food.billed], [15000, 3000, 12000, 15000, 0]);
+    assert.deepEqual([sale.visitors.total, sale.visitors.parties], [4, 1]);
+    // the refund is handed back and the guest's own view is consistent
+    await s.post(`/api/staff/refunds/${refunds[0].id}/done`, { amount: 3000, method: 'cash' });
+    const gv = (await guest.get(`/api/t/${tk[0]}`)).json.cover;
+    assert.deepEqual([gv.people, gv.total, gv.paid, gv.left, gv.shares], [4, 12000, 12000, 0, { total: 4, paid: 4, left: 0, over: 0 }]);
+    assert.deepEqual((await s.get('/api/staff/sales')).json.byMethod.cash, { received: 6000, refunded: 3000, net: 3000, count: 1 });
+  } finally { await d.srv.stop(); }
+});
+
+test('I4 upgrade from Release 2 (308295c): the production schema boots, keeps its data, gains headcount / cover / ledger columns; cover off changes nothing', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-r2-'));
+  fs.mkdirSync(path.join(dir, 'data'));
+  const old = new DatabaseSync(path.join(dir, 'data', 'booth.db'));
+  old.exec(R2_SCHEMA);
+  for (const tbl of ['seat_info', 'cover_intents']) assert.equal(old.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name=?").get(tbl).n, 0, `fixture lacks ${tbl}`);
+  assert.ok(!old.prepare('PRAGMA table_info(orders)').all().some((c) => c.name === 'kind'));
+  assert.ok(!old.prepare('PRAGMA table_info(payments)').all().some((c) => c.name === 'shares'));
+  const tokensOld = [];
+  for (let i = 1; i <= 8; i++) { const tkn = crypto.randomBytes(12).toString('base64url'); tokensOld.push(tkn); old.prepare('INSERT INTO tables(id, token) VALUES(?,?)').run(i, tkn); }
+  old.prepare("INSERT INTO menu_categories(id, name, sort) VALUES(1, '안주', 0)").run();
+  old.prepare("INSERT INTO menu_items(id, name, price, category_id, descr, sort) VALUES('legacy-item', '레거시', 5000, 1, '', 0)").run();
+  old.prepare("INSERT INTO settings(k, v) VALUES('menu_seeded', '1')").run();
+  const ts = Date.now() - 60000;
+  const mk = old.prepare('INSERT INTO orders(table_id, seat, key, status, paid, subtotal, discount, total, created_at, updated_at, paid_by, paid_amount, paid_method, paid_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+  const paidId = mk.run(1, 1, 'key-r2-paid', 'served', 1, 10000, 0, 10000, ts, ts, 'staff', 10000, 'cash', ts).lastInsertRowid;
+  const partId = mk.run(2, 1, 'key-r2-part', 'cooking', 0, 5000, 0, 5000, ts, ts, null, 2000, 'cash', null).lastInsertRowid;
+  for (const id of [paidId, partId]) old.prepare("INSERT INTO order_items(order_id, item_id, name, unit_price, qty) VALUES(?, 'legacy-item', '레거시', 5000, ?)").run(id, id === paidId ? 2 : 1);
+  old.prepare('INSERT INTO payments(order_id, amount, method, at) VALUES(?,?,?,?)').run(paidId, 10000, 'cash', ts);
+  old.prepare('INSERT INTO payments(order_id, amount, method, at) VALUES(?,?,?,?)').run(partId, 2000, 'cash', ts);
+  old.prepare("INSERT INTO audit_log(at, action, target, summary, summary_ko) VALUES(?, 'order_paid', 'order #1', 'old row', '옛 기록')").run(ts);
+  old.close();
+  let srv; let srv2;
+  try {
+    srv = await boot({ dir, tablesCount: 8 });
+    const s = await staffLogin(srv);
+    const db = dbOf(srv);
+    const cols = (tbl) => db.prepare(`PRAGMA table_info(${tbl})`).all().map((c) => c.name);
+    assert.ok(cols('orders').includes('kind') && cols('orders').includes('cover_mode') && ['shares', 'payer', 'notice_id', 'voided_at', 'void_reason'].every((c) => cols('payments').includes(c)) && cols('waitlist').includes('seated_table'));
+    assert.deepEqual(db.prepare('SELECT DISTINCT kind FROM orders').all().map((r) => r.kind), ['food'], 'existing orders are food');
+    db.close();
+    const st = (await s.get('/api/staff/state')).json;
+    assert.deepEqual(st.cover, { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료' }, 'the cover charge ships OFF');
+    assert.deepEqual(st.orders.map((o) => [o.id, o.kind, o.paidAmount, o.balanceDue, o.payments.length]), [[Number(paidId), 'food', 10000, 0, 1], [Number(partId), 'food', 2000, 3000, 1]]);
+    assert.ok(st.tables.every((t) => t.people === null && t.cover === null));
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.byKind.cover.billed, sale.byKind.food.billed, sale.byKind.food.received, sale.totals.revenue, sale.byMethod.cash.received], [0, 15000, 12000, 12000, 12000]);
+    assert.deepEqual(sale.visitors, { total: 0, parties: 0, partiesUnknown: 2, avgPartySize: 0, byHour: [] }, 'two seats have orders but no headcount');
+    assert.ok((await auditOf(s)).some((e) => e.summaryKo === '옛 기록'), 'old audit rows are kept');
+    assert.deepEqual((await stTables(s)).length, 8);
+    assert.deepEqual([st.testTable.number, st.testTable.label, st.testTable.isTest, typeof st.testTable.token, st.testTable.seat], [0, '테스트', true, 'string', 1], 'the test table is created on upgrade');
+    assert.ok(!tokensOld.includes(st.testTable.token) && !st.tables.some((x) => x.number === 0));
+    assert.equal((await auditOf(s)).find((e) => e.summaryKo === '옛 기록').test, false);
+    assert.deepEqual((await tablesOf(s)).map((x) => x.token), tokensOld);
+    // the new features work on the migrated database
+    assert.equal((await coverOn(s)).status, 200);
+    assert.equal((await partyOf(s, 3, 2)).status, 200);
+    const c = await coverIn(s, 3);
+    assert.deepEqual([c.kind, c.total], ['cover', 6000]);
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 1, payer: '가나' })).status, 200);
+    assert.equal((await s.post(`/api/staff/orders/${partId}/paid`, { paid: true, method: 'transfer' })).json.order.paidAmount, 5000, 'an old partly paid order is settled with the balance');
+    await srv.stop({ keep: true });
+    srv2 = await boot({ dir, tablesCount: 8 }); // idempotent second boot
+    const s2 = await staffLogin(srv2);
+    const st2 = (await s2.get('/api/staff/state')).json;
+    assert.equal(st2.orders.filter((o) => o.kind === 'cover').length, 1);
+    assert.deepEqual(st2.orders.find((o) => o.id === Number(partId)).payments.map((p) => p.amount), [2000, 3000]);
+    assert.equal((await s2.get('/api/staff/sales')).json.totals.revenue, 12000 + 3000 + 3000);
+  } finally { if (srv2) await srv2.stop(); else if (srv && srv.child.exitCode === null) await srv.stop(); else fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+// ==================== addendum J: the staff-only guest TEST table (table 0) ====================
+const testTokenOf = async (s) => (await s.get('/api/staff/state')).json.testTable.token;
+const salesNow = async (s) => JSON.stringify((await s.get('/api/staff/sales')).json);
+
+test('J the test table: own token, never in the table list / count / QR page / public payloads, rotatable, works as a guest page', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const st = (await s.get('/api/staff/state')).json;
+    const tt = st.testTable;
+    assert.deepEqual([tt.number, tt.label, tt.isTest, tt.seat, tt.people, tt.memberPreview, tt.showInKitchen, tt.openCalls, tt.orderCount], [0, '테스트', true, 1, null, false, true, 0, 0]);
+    assert.match(tt.token, /^[A-Za-z0-9_-]{16}$/);
+    assert.match(tt.url, new RegExp(`/t/${tt.token}$`));
+    assert.ok(!tk.includes(tt.token) && !st.tables.some((x) => x.number === 0) && st.tableCount === 40);
+    assert.ok(!(await tablesOf(s)).some((x) => x.number === 0 || x.token === tt.token), 'not on the QR page list');
+    const g = await guestWithDevice(srv);
+    const snap = await g.get(`/api/t/${tt.token}`);
+    assert.equal(snap.status, 200);
+    assert.deepEqual([snap.json.table.number, snap.json.table.isTest, snap.json.menu.items.length > 0, snap.json.orderingOpen], [0, true, true, true]);
+    assert.equal((await g.get(`/t/${tt.token}`)).status, 200, 'the guest page opens');
+    // no public payload leaks it
+    for (const p of ['/api/board', '/api/menu', '/api/wait/info', `/api/t/${tk[0]}`]) assert.ok(!(await g.get(p)).text.includes(tt.token), p);
+    assert.ok(!JSON.stringify((await g.get(`/api/t/${tk[0]}`)).json).includes('테스트'));
+    // table count changes never touch it
+    assert.equal((await s.post('/api/staff/tables/count', { count: 3 })).status, 200);
+    assert.equal((await g.get(`/api/t/${tt.token}`)).status, 200);
+    assert.equal((await s.post('/api/staff/tables/count', { count: 40 })).status, 200);
+    assert.equal((await s.get('/api/staff/state')).json.testTable.token, tt.token);
+    // rotation
+    const rot = await s.post('/api/staff/test/rotate', {});
+    assert.equal(rot.status, 200, rot.text);
+    assert.notEqual(rot.json.token, tt.token);
+    assert.equal((await g.get(`/api/t/${tt.token}`)).status, 404, 'the old test QR stops working');
+    assert.equal((await g.get(`/api/t/${rot.json.token}`)).status, 200);
+    assert.equal((await s.get('/api/staff/state')).json.testTable.token, rot.json.token);
+    assert.ok((await auditOf(s)).some((e) => e.action === 'table_rotate' && e.test === true && /테스트/.test(e.summaryKo)));
+    assert.equal((await new Client(srv).post('/api/staff/test/rotate', {})).status, 401);
+  });
+});
+
+test('J test settings: validation and audit', async () => {
+  await withBooth(async ({ s }) => {
+    assert.equal((await s.post('/api/staff/test/settings', {})).json.error, 'nothing_to_update');
+    assert.equal((await s.post('/api/staff/test/settings', { memberPreview: 'yes' })).json.error, 'bad_member_preview');
+    assert.equal((await s.post('/api/staff/test/settings', { showInKitchen: 1 })).json.error, 'bad_show_in_kitchen');
+    const ok = await s.post('/api/staff/test/settings', { memberPreview: true, showInKitchen: false });
+    assert.deepEqual([ok.json.testTable.memberPreview, ok.json.testTable.showInKitchen], [true, false]);
+    assert.deepEqual([(await s.get('/api/staff/state')).json.testTable.memberPreview, (await s.get('/api/staff/state')).json.testTable.showInKitchen], [true, false]);
+    const row = (await auditOf(s)).find((e) => e.action === 'test_settings');
+    assert.deepEqual([row.test, row.summary], [true, 'memberPreview false→true, showInKitchen true→false']);
+  });
+});
+
+test('J test data is invisible to the books: sales, byMethod, byKind, visitors, CSV, day report, totals, refunds, written-off, nag lists', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const real = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${real.id}/paid`, { paid: true, method: 'cash' });
+    await partyOf(s, 2, 3);
+    const base = await salesNow(s);
+    const baseCsv = (await csvOf(srv, s, '/api/staff/sales.csv')).text;
+    const normTables = (x) => JSON.stringify(x.map(({ minutesSeated, ...r }) => r));
+    const baseTables = normTables((await s.get('/api/staff/state')).json.tables);
+    // lots of test activity
+    await coverOn(s);
+    const tt = await testTokenOf(s);
+    const g = await guestWithDevice(srv);
+    assert.equal((await g.post(`/api/t/${tt}/party`, { seat: 1, people: 4 })).status, 200);
+    const o = (await order(g, tt, [{ id: 'odeng', qty: 2 }])).json.order;
+    assert.deepEqual([o.test, o.table], [true, 0]);
+    const o2 = (await staffOrder(s, 0, [{ id: 'cola', qty: 3 }])).json.order;
+    assert.equal(o2.test, true);
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'transfer' });
+    await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'odeng', qty: 1 }] }); // refund entry on a test order
+    const tr = (await s.get('/api/staff/state')).json.refunds.find((r) => r.orderId === o.id);
+    assert.deepEqual([tr.test, tr.table], [true, 0]);
+    await s.post(`/api/staff/refunds/${tr.id}/done`, { amount: tr.amount, method: 'cash' });
+    await s.post(`/api/staff/orders/${o2.id}/status`, { status: 'cancelled' });
+    const cover = (await s.get('/api/staff/state')).json.orders.find((x) => x.table === 0 && x.kind === 'cover');
+    assert.ok(cover && cover.test === true);
+    await s.post(`/api/staff/orders/${cover.id}/paid`, { paid: true, method: 'cash', shares: 2, payer: '가나' });
+    await g.post(`/api/t/${tt}/calls`, { type: '물' });
+    await coverOn(s, { enabled: false });
+    await s.post('/api/staff/tables/0/coupons', { type: 'item', label: '테스트 쿠폰' });
+    assert.equal(await salesNow(s), base, 'sales JSON is byte-identical');
+    assert.equal((await csvOf(srv, s, '/api/staff/sales.csv')).text, baseCsv);
+    const st = (await s.get('/api/staff/state')).json;
+    assert.equal(normTables(st.tables), baseTables, 'real table rows untouched');
+    assert.ok(!st.tables.some((x) => x.number === 0));
+    assert.deepEqual(st.calls.filter((c) => c.table === 0), [], 'test calls are not alerts');
+    assert.ok(!st.coupons.some((c) => c.table === 0));
+    assert.equal(st.testTable.openCalls, 1);
+    assert.ok(st.orders.filter((x) => x.table === 0).every((x) => x.test === true) && st.orders.filter((x) => x.table === 0).length >= 3, 'test orders are listed, tagged');
+    assert.ok(st.orders.filter((x) => x.table > 0).every((x) => x.test === false));
+    // closing the day with only test data is "nothing to close"; with real data the report carries no test figures
+    const rep = await s.post('/api/staff/day/close', { confirm: '마감', force: true });
+    assert.equal(rep.status, 200);
+    const r = (await s.get('/api/staff/day/reports/1')).json;
+    assert.deepEqual([r.totals.orders, r.totals.billed, r.totals.paidAmount, r.byKind.cover.billed, r.visitors.total, r.refunds.length], [1, 8000, 8000, 0, 3, 0]);
+    assert.ok(!(await csvOf(srv, s, '/api/staff/day/reports/1.csv')).text.includes('테스트 쿠폰'));
+    // ...and the close wiped the test table too
+    const after = (await s.get('/api/staff/state')).json;
+    assert.deepEqual([after.orders.length, after.testTable.orderCount, after.testTable.people, after.testTable.openCalls], [0, 0, null, 0]);
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '마감' })).json.error, 'nothing_to_close');
+    // test-only data: nothing to close
+    await staffOrder(s, 0, [{ id: 'cola', qty: 1 }]);
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '마감' })).json.error, 'nothing_to_close');
+    void tk;
+  });
+});
+
+test('J test orders in the kitchen: only with showInKitchen, always flagged, never in the prep totals', async () => {
+  await withBooth(async ({ s }) => {
+    const real = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 2 }], { accept: true })).json.order;
+    const test = (await staffOrder(s, 0, [{ id: 'tteokbokki', qty: 5 }], { accept: true })).json.order;
+    let k = (await s.get('/api/kitchen')).json;
+    assert.deepEqual(k.orders.map((o) => [o.id, o.test]).sort(), [[real.id, false], [test.id, true]].sort());
+    assert.deepEqual(k.items, [{ id: 'tteokbokki', name: '떡볶이', qty: 2 }], 'the prep totals count real orders only');
+    await s.post('/api/staff/test/settings', { showInKitchen: false });
+    k = (await s.get('/api/kitchen')).json;
+    assert.deepEqual(k.orders.map((o) => o.id), [real.id]);
+    await s.post('/api/staff/test/settings', { showInKitchen: true });
+    assert.equal((await s.get('/api/kitchen')).json.orders.length, 2);
+  });
+});
+
+test('J test data never consumes menu stock or reward stock; test coupons are unlimited, table-bound and out of every real count', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const tt = await testTokenOf(s);
+    await s.post('/api/staff/menu/items/tteokbokki', { stockLeft: 5 });
+    const g = await guestWithDevice(srv);
+    for (let i = 0; i < 3; i++) assert.equal((await order(g, tt, [{ id: 'tteokbokki', qty: 5 }])).status, 201, 'more than the stock is fine on the test table');
+    const t1 = (await order(g, tt, [{ id: 'tteokbokki', qty: 5 }])).json.order;
+    await s.post(`/api/staff/orders/${t1.id}/status`, { status: 'cancelled' });
+    const o = (await staffOrder(s, 0, [{ id: 'tteokbokki', qty: 3 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }] });
+    await s.post(`/api/staff/orders/${o.id}/service`, { itemId: 'tteokbokki', qty: 2 });
+    const item = async () => (await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === 'tteokbokki');
+    assert.deepEqual([(await item()).stockLeft, (await item()).soldOut], [5, false], 'stock untouched');
+    assert.equal((await order(new Client(srv), tk[0], [{ id: 'tteokbokki', qty: 5 }])).status, 201);
+    assert.equal((await item()).stockLeft, 0, 'a real order does consume it');
+    // rewards: drink has stock 3; the test seat earns it again and again after each reset
+    const before = (await s.get('/api/staff/state')).json.rewards.find((r) => r.id === 'drink');
+    const coupons = [];
+    for (let i = 0; i < 4; i++) {
+      const fin = await playOnce(g, tt, 'pour', 450);
+      assert.equal(fin.status, 200, fin.text);
+      const r = fin.json.rewards.find((x) => x.rewardId === 'drink');
+      assert.equal(r.result, 'issued', `round ${i}: unlimited on the test table`);
+      coupons.push(r.coupon);
+      assert.equal((await s.post('/api/staff/test/reset', {})).status, 200);
+    }
+    assert.ok(coupons.every((c) => c.table === 0));
+    const after = (await s.get('/api/staff/state')).json.rewards.find((r) => r.id === 'drink');
+    assert.deepEqual([after.issued, after.remaining, after.used], [before.issued, before.remaining, before.used], 'reward stock untouched');
+    // a test coupon is bound to the test seat: a real table cannot use it, redeeming it leaves the real "used" count alone
+    const fin = await playOnce(g, tt, 'cheers', 750);
+    const cp = fin.json.coupons.find((c) => c.rewardId === 'd1000');
+    assert.equal((await order(new Client(srv), tk[0], [{ id: 'cola', qty: 1 }], { couponCode: cp.code })).json.error, 'bad_coupon');
+    assert.equal((await s.post('/api/staff/coupons/redeem', { code: cp.code })).status, 200, 'staff may rehearse a redeem');
+    assert.equal((await s.get('/api/staff/state')).json.rewards.find((r) => r.id === 'd1000').used, 0);
+    assert.equal((await s.get('/api/staff/state')).json.coupons.length, 0, 'not in the staff coupon list');
+    assert.ok(!(await s.get('/api/staff/sales')).json.coupons.some((c) => c.rewardId === 'd1000'), 'not in the sales coupon table');
+    // manual coupon limit is counted separately
+    for (let i = 0; i < 20; i++) assert.equal((await s.post('/api/staff/tables/0/coupons', { type: 'item', label: `t${i}` })).status, 200);
+    assert.equal((await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '실제' })).status, 200, 'test coupons do not use up the real hourly limit');
+  });
+});
+
+test('J test plays never reach the board, the hourly ranking or the hourly award', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const tt = await testTokenOf(s);
+    const g = await guestWithDevice(srv);
+    assert.equal((await playOnce(g, tt, 'pour', 500)).status, 200);
+    assert.equal((await g.post(`/api/t/${tt}/nick`, { nick: '테스터' })).status, 200);
+    const b = (await g.get('/api/board')).json;
+    assert.deepEqual([b.games.pour, b.hour.ranking, b.prevHour.winner], [[], [], null]);
+    assert.ok(!JSON.stringify(b).includes('테스터'));
+    assert.equal((await s.post('/api/staff/award-hour', {})).json.error, 'no_ranking');
+    assert.deepEqual((await s.get('/api/staff/state')).json.hour.ranking, []);
+    // a real play still ranks
+    const g2 = await guestWithDevice(srv);
+    assert.equal((await playOnce(g2, tk[0], 'pour', 300)).status, 200);
+    const b2 = (await g2.get('/api/board')).json;
+    assert.deepEqual([b2.games.pour.map((r) => r.table), b2.hour.ranking.map((r) => r.table)], [[1], [1]]);
+  });
+});
+
+test('J test table is never a deposit candidate; manual assign to a test order is refused; test intents match nothing real', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk, srv } = d;
+    const real = await d.place(tk[0], '김철수'); // 8,000
+    const testOrder = (await staffOrder(s, 0, [{ id: 'tteokbokki', qty: 1 }], { depositor: '김철수' })).json.order; // 8,000 as well
+    const n = await d.sms(8000, '김철수');
+    assert.equal(n.status, 'matched', 'exactly one candidate: the real order');
+    assert.equal((await d.order(real.id)).paid, true);
+    assert.equal((await orderOf(s, testOrder.id)).paid, false);
+    const n2 = await d.sms(8000, '이영희');
+    const notice2 = (await d.notices()).find((x) => x.id === n2.id);
+    assert.deepEqual([notice2.candidateCount, notice2.reasons.includes('no_candidate')], [0, true]);
+    for (const p of ['assign', 'attach']) assert.equal((await s.post(`/api/staff/deposits/${n2.id}/${p}`, { orderId: testOrder.id, force: true, note: 'x' })).status, 404, p);
+    // test intents
+    await coverOn(s);
+    const tt = await testTokenOf(s);
+    await s.post('/api/staff/tables/0/party', { people: 2 });
+    const g = await guestWithDevice(srv);
+    const it = await g.post(`/api/t/${tt}/cover/intents`, { payer: '김테스', shares: 1 });
+    assert.equal(it.status, 201, it.text);
+    assert.equal((await s.get('/api/staff/state')).json.coverIntents.find((x) => x.id === it.json.id).table, 0);
+    const n3 = await d.sms(3000, '김테스');
+    const notice3 = (await d.notices()).find((x) => x.id === n3.id);
+    assert.deepEqual([n3.status, notice3.candidateCount], ['pending', 0], 'a test intent is not a candidate');
+    void srv;
+  } finally { await d.srv.stop(); }
+});
+
+test('J staff may rehearse pay / edit / refund / void on test orders; ledger rows stay test-only and audit rows carry the test marker', async () => {
+  await withBooth(async ({ s }) => {
+    const real = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${real.id}/paid`, { paid: true, method: 'cash' });
+    const base = await salesNow(s);
+    const o = (await staffOrder(s, 0, [{ id: 'tteokbokki', qty: 2 }])).json.order;
+    const paid = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 20000 })).json.order;
+    assert.deepEqual([paid.paid, paid.overpaid, paid.refundDue, paid.test], [true, 4000, 4000, true]);
+    const v = await s.post(`/api/staff/payments/${paid.payments[0].id}/void`, { reason: '연습' });
+    assert.equal(v.status, 200, v.text);
+    const again = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 20000 })).json.order;
+    const rf = (await s.get('/api/staff/state')).json.refunds.find((r) => r.orderId === o.id);
+    assert.equal((await s.post(`/api/staff/refunds/${rf.id}/done`, { amount: 4000 })).status, 200);
+    const e = (await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 3 }] })).json.order;
+    assert.equal(e.total, 24000);
+    void again;
+    assert.equal(await salesNow(s), base, 'none of it reached the books');
+    const rows = await auditOf(s);
+    const testRows = rows.filter((r) => r.test);
+    assert.ok(['order_create_staff', 'order_paid', 'refund_done', 'order_edit', 'payment_void'].every((a) => testRows.some((r) => r.action === a)), testRows.map((r) => r.action).join());
+    assert.ok(testRows.every((r) => r.summaryKo.startsWith('[테스트] ')));
+    const realRows = rows.filter((r) => !r.test && r.action === 'order_paid');
+    assert.equal(realRows.length, 1);
+    assert.ok(!realRows[0].summaryKo.startsWith('[테스트]'));
+  });
+});
+
+test('J test reset wipes only the test table: a snapshot of every real-data table is identical before and after', async () => {
+  const dump = (srv) => {
+    const db = dbOf(srv);
+    const rows = (sql) => db.prepare(sql).all().map((r) => ({ ...r }));
+    const ids = 'SELECT id FROM orders WHERE table_id>0';
+    const snap = {
+      orders: rows('SELECT * FROM orders WHERE table_id>0 ORDER BY id'), order_items: rows(`SELECT * FROM order_items WHERE order_id IN (${ids}) ORDER BY rowid`),
+      payments: rows(`SELECT * FROM payments WHERE order_id IN (${ids}) ORDER BY id`), refunds: rows(`SELECT * FROM refunds WHERE order_id IN (${ids}) ORDER BY id`),
+      coupons: rows('SELECT * FROM coupons WHERE table_id>0 ORDER BY code'), plays: rows('SELECT * FROM plays WHERE table_id>0 ORDER BY id'), nicks: rows('SELECT * FROM nicks WHERE table_id>0 ORDER BY device'),
+      calls: rows('SELECT * FROM calls WHERE table_id>0 ORDER BY id'), cover_intents: rows('SELECT * FROM cover_intents WHERE table_id>0 ORDER BY id'), seat_info: rows('SELECT * FROM seat_info WHERE table_id>0 ORDER BY table_id'),
+      table_clears: rows('SELECT * FROM table_clears WHERE table_id>0 ORDER BY id'), tables: rows('SELECT * FROM tables WHERE id>0 ORDER BY id'),
+      menu_items: rows('SELECT * FROM menu_items ORDER BY id'), rewards: rows('SELECT * FROM rewards ORDER BY id'), deposit_notices: rows('SELECT * FROM deposit_notices ORDER BY id'),
+      waitlist: rows('SELECT * FROM waitlist ORDER BY id'), settings: rows("SELECT * FROM settings WHERE k NOT LIKE 'test_%' ORDER BY k"), audit: rows('SELECT * FROM audit_log WHERE test=0 ORDER BY id'), day_reports: rows('SELECT * FROM day_reports'),
+    };
+    db.close();
+    return snap;
+  };
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    // real data of every kind
+    await coverOn(s);
+    await partyOf(s, 1, 3);
+    const c = await coverIn(s, 1);
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 1, payer: '가나' });
+    const g = await guestWithDevice(srv);
+    await order(g, tk[0], [{ id: 'tteokbokki', qty: 1 }]);
+    await d.place(tk[1], '김철수', 'odeng');
+    await g.post(`/api/t/${tk[0]}/nick`, { nick: '진짜' });
+    await g.post(`/api/t/${tk[0]}/calls`, { type: '물' });
+    await playOnce(g, tk[0], 'pour', 450);
+    await g.post(`/api/t/${tk[0]}/cover/intents`, { payer: '다라', shares: 1 });
+    const co = (await staffOrder(s, 3, [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${co.id}/paid`, { paid: true, amount: 5000 });
+    await d.sms(5555, '아무개');
+    await s.post('/api/staff/tables/4/coupons', { type: 'item', label: '실제 쿠폰' });
+    await s.post('/api/staff/tables/5/clear', {});
+    // test data of every kind
+    const tt = await testTokenOf(s);
+    const gt = await guestWithDevice(srv);
+    await gt.post(`/api/t/${tt}/party`, { seat: 1, people: 3 });
+    await order(gt, tt, [{ id: 'tteokbokki', qty: 2 }]);
+    const to = (await staffOrder(s, 0, [{ id: 'cola', qty: 2 }])).json.order;
+    await s.post(`/api/staff/orders/${to.id}/paid`, { paid: true, amount: 9000 });
+    const tcover = (await s.get('/api/staff/state')).json.orders.find((x) => x.table === 0 && x.kind === 'cover');
+    await s.post(`/api/staff/orders/${tcover.id}/paid`, { paid: true, method: 'cash', shares: 1 });
+    await gt.post(`/api/t/${tt}/nick`, { nick: '테스터' });
+    await gt.post(`/api/t/${tt}/calls`, { type: '물' });
+    await playOnce(gt, tt, 'cheers', 800);
+    await gt.post(`/api/t/${tt}/cover/intents`, { payer: '마바', shares: 1 });
+    await s.post('/api/staff/tables/0/coupons', { type: 'item', label: '테스트 쿠폰' });
+    await s.post('/api/staff/tables/0/clear', { force: true });
+    await order(gt, tt, [{ id: 'odeng', qty: 1 }]);
+    const before = dump(srv);
+    const dbx = dbOf(srv);
+    const count0 = () => ['orders', 'coupons', 'plays', 'nicks', 'calls', 'cover_intents', 'seat_info', 'table_clears'].map((tbl) => dbx.prepare(`SELECT COUNT(*) n FROM ${tbl} WHERE table_id=0`).get().n);
+    assert.ok(count0().every((n) => n > 0) || count0().filter((n) => n > 0).length >= 6, `test data exists: ${count0()}`);
+    const r = await s.post('/api/staff/test/reset', {});
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(count0(), [0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(dbx.prepare('SELECT COUNT(*) n FROM payments WHERE order_id NOT IN (SELECT id FROM orders)').get().n, 0, 'no orphaned ledger rows');
+    assert.equal(dbx.prepare('SELECT COUNT(*) n FROM refunds WHERE order_id NOT IN (SELECT id FROM orders)').get().n, 0);
+    assert.equal(dbx.prepare('SELECT COUNT(*) n FROM order_items WHERE order_id NOT IN (SELECT id FROM orders)').get().n, 0);
+    dbx.close();
+    assert.deepEqual(dump(srv), before, 'every real-data table is identical');
+    const st = (await s.get('/api/staff/state')).json;
+    assert.deepEqual([st.testTable.seat, st.testTable.orderCount, st.testTable.people, st.testTable.openCalls, st.testTable.token], [r.json.seat, 0, null, 0, tt]);
+    assert.deepEqual((await gt.get(`/api/t/${tt}`)).json.orders, [], 'the test guest page starts empty again');
+    assert.ok((await auditOf(s)).some((e) => e.action === 'test_reset' && e.test === true && /테스트 테이블 초기화/.test(e.summaryKo)));
+    assert.equal((await new Client(srv).post('/api/staff/test/reset', {})).status, 401);
+  } finally { await d.srv.stop(); }
+});
+
+test('J memberPreview: the test table poses as a member without calling the club; impossible to trigger from the client; real tables never affected', async () => {
+  const fk = fake;
+  await withBooth(async ({ srv, s, tk }) => {
+    const tt = await testTokenOf(s);
+    const guestAt = async () => guestWithDevice(srv);
+    const hits = () => fk.hits.length;
+    // off by default: the test table behaves like a real one (no club cookie = not a member)
+    let g = await guestAt();
+    let r = await order(g, tt, [{ id: 'tteokbokki', qty: 1 }]);
+    assert.deepEqual([r.json.order.member, r.json.order.memberDiscount], [false, 0]);
+    assert.deepEqual((await g.get(`/api/t/${tt}/member`)).json.member, false);
+    await s.post('/api/staff/test/settings', { memberPreview: true });
+    const h0 = hits();
+    g = await guestAt(); // no club cookie at all
+    const m = (await g.get(`/api/t/${tt}/member`)).json;
+    assert.deepEqual([m.enabled, m.member], [true, true]);
+    r = await order(g, tt, [{ id: 'tteokbokki', qty: 1 }]);
+    assert.deepEqual([r.json.order.member, r.json.order.memberDiscount, r.json.order.total, r.json.order.memberRule && r.json.order.memberRule.mode], [true, 800, 7200, 'percent']);
+    assert.equal(hits(), h0, 'the club backend was not called');
+    const dbm = dbOf(srv);
+    assert.equal(dbm.prepare('SELECT member_id FROM orders WHERE id=?').get(r.json.order.id).member_id, -1000001, 'a fixed fake id that cannot be a real member id');
+    dbm.close();
+    assert.ok((await g.get(`/api/t/${tt}`)).json.memberDiscount.enabled);
+    // real tables: no cookie -> not a member; forged hints from the client change nothing
+    const forged = [{ 'x-test-member': '1', 'x-member-preview': 'true' }, { cookie: 'memberPreview=1; test=1; table=0; booth_t=0' }];
+    for (const hdr of forged) {
+      const gr = await guestAt();
+      const rr = await gr.req('POST', `/api/t/${tk[0]}/orders`, { key: newKey(), items: [{ id: 'cola', qty: 1 }], member: true, memberPreview: true, tableId: 0, test: true }, { ...hdr, cookie: [gr.cookieHeader(), hdr.cookie].filter(Boolean).join('; ') });
+      assert.equal(rr.status, 201, rr.text);
+      assert.deepEqual([rr.json.order.member, rr.json.order.memberDiscount, rr.json.order.table], [false, 0, 1], JSON.stringify(hdr));
+      const mm = await gr.req('GET', `/api/t/${tk[0]}/member?memberPreview=1&test=1&table=0`, undefined, hdr);
+      assert.deepEqual([mm.json.member], [false]);
+    }
+    // the table is the one the SERVER resolved from the token: a real token with preview on is still a real table
+    const g3 = await guestAt();
+    assert.equal((await g3.get(`/api/t/${tk[1]}/member`)).json.member, false);
+    // a real club member at a real table still goes through the club (and gets the discount)
+    const gm = await guestAt(); gm.jar.token = fk.member(8801);
+    const before = hits();
+    const rm = await order(gm, tk[2], [{ id: 'tteokbokki', qty: 1 }]);
+    assert.equal(rm.json.order.memberDiscount, 800);
+    assert.ok(hits() > before, 'real tables still ask the club');
+    // off again: back to normal on the test table
+    await s.post('/api/staff/test/settings', { memberPreview: false });
+    const g4 = await guestAt();
+    assert.deepEqual([(await g4.get(`/api/t/${tt}/member`)).json.member, (await order(g4, tt, [{ id: 'cola', qty: 1 }])).json.order.memberDiscount], [false, 0]);
+  }, { env: { COMS_ME_URL: fk.url + '/api/auth/me' } });
+  // without any club configured the preview still works on the test table only
+  await withBooth(async ({ srv, s, tk }) => {
+    const tt = await testTokenOf(s);
+    await s.post('/api/staff/test/settings', { memberPreview: true });
+    const g = await guestWithDevice(srv);
+    assert.deepEqual([(await g.get(`/api/t/${tt}/member`)).json.member, (await g.get(`/api/t/${tk[0]}/member`)).json.member, (await g.get(`/api/t/${tk[0]}/member`)).json.enabled], [true, false, false]);
+  });
+});
+
+test('J test table: moves to / from real tables are refused (409 test_table), clear and unclear work, order cap holds', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const tt = await testTokenOf(s);
+    const real = (await staffOrder(s, 1, [{ id: 'cola', qty: 1 }])).json.order;
+    const test = (await staffOrder(s, 0, [{ id: 'cola', qty: 1 }])).json.order;
+    for (const [from, to] of [[0, 3], [3, 0], [1, 0], [0, 1]]) {
+      const r = await s.post('/api/staff/tables/move', { from, to });
+      assert.deepEqual([r.status, r.json.error], [409, 'test_table'], `${from}->${to}`);
+    }
+    assert.deepEqual([(await s.post(`/api/staff/orders/${real.id}/move`, { to: 0 })).json.error, (await s.post(`/api/staff/orders/${test.id}/move`, { to: 1 })).json.error], ['test_table', 'test_table']);
+    assert.equal((await s.post(`/api/staff/orders/${test.id}/move`, { to: 0 })).json.error, 'test_table');
+    // clear / unclear
+    const unsettled = await s.post('/api/staff/tables/0/clear', {});
+    assert.deepEqual([unsettled.status, unsettled.json.error], [409, 'unsettled']);
+    const cleared = await s.post('/api/staff/tables/0/clear', { force: true });
+    assert.equal(cleared.status, 200, cleared.text);
+    const g = await guestWithDevice(srv);
+    assert.deepEqual((await g.get(`/api/t/${tt}`)).json.orders, []);
+    assert.equal((await s.post('/api/staff/tables/0/unclear', {})).status, 200);
+    assert.equal((await g.get(`/api/t/${tt}`)).json.orders.length, 1);
+    // the same hard caps as a real seat: 80 staff orders (guests 40)
+    for (let i = 0; i < 79; i++) assert.equal((await staffOrder(s, 0, [{ id: 'cola', qty: 1 }])).status, 201);
+    assert.equal((await staffOrder(s, 0, [{ id: 'cola', qty: 1 }])).json.error, 'too_many_orders');
+    // a reset / day close wipes all of it
+    await s.post('/api/staff/reset', { confirm: '초기화' });
+    assert.equal((await s.get('/api/staff/state')).json.testTable.orderCount, 0);
+    void tk;
+  });
+});
+
+
+// ==================== release 3 review fixes ====================
+test('K1 shares never exceed what is left: staff payment, intent candidates, stale intent assignment (reviewer sequence), auto-confirm', async () => {
+  const d = await depositSetup(); // auto-confirm ON
+  try {
+    const { srv, s, tk } = d;
+    await coverOn(s);
+    await partyOf(s, 5, 3);
+    const c = await coverIn(s, 5);
+    const g = await guestWithDevice(srv);
+    const intent = (await g.post(`/api/t/${tk[4]}/cover/intents`, { payer: 'Park', shares: 3 })).json; // 9,000 announced while 3 shares are left
+    assert.equal(intent.amount, 9000);
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 2 }); // staff take 2 shares: only 1 is left now
+    const over = await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 8 });
+    assert.deepEqual([over.status, over.json.error, over.json.left], [400, 'too_many_shares', 1], 'more than the shares left is refused');
+    assert.equal((await coverIn(s, 5)).paidAmount, 6000);
+    // the auto-confirm path: 9,000 from "Park" must NOT be matched to the stale intent
+    const n = await d.sms(9000, 'Park');
+    assert.equal(n.status, 'pending', JSON.stringify(n));
+    const notice = (await d.notices()).find((x) => x.id === n.id);
+    assert.deepEqual([notice.candidateCount, notice.reasons.includes('no_candidate')], [0, true], 'the stale intent is not a candidate');
+    let after = await coverIn(s, 5);
+    assert.deepEqual([after.paidAmount, after.shares.paid, after.refundDue], [6000, 2, 0], 'nothing was applied unattended');
+    // manual assignment re-checks inside the transaction
+    const stale = await s.post(`/api/staff/deposits/${n.id}/assign`, { orderId: c.id, intentId: intent.id });
+    assert.deepEqual([stale.status, stale.json.error, stale.json.shares, stale.json.intentShares], [409, 'intent_stale', 1, 3]);
+    assert.equal((await s.post(`/api/staff/deposits/${n.id}/assign`, { orderId: c.id, intentId: intent.id, force: true })).json.error, 'note_required');
+    const forced = await s.post(`/api/staff/deposits/${n.id}/assign`, { orderId: c.id, intentId: intent.id, force: true, note: '손님이 9천원 보냄' });
+    assert.equal(forced.status, 200, forced.text);
+    after = forced.json.order;
+    assert.deepEqual([after.shares, after.overpaid, after.refundDue, after.paidAmount], [{ total: 3, paid: 3, left: 0, over: 0 }, 6000, 6000, 15000], 'shares are capped at what was left, the excess is a plain overpayment');
+    assert.deepEqual(after.payments.slice(-2).map((p) => [p.amount, p.shares, p.payer]), [[3000, 1, 'Park'], [6000, null, null]]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.refunds.map((r) => [r.orderId, r.amount]), [[c.id, 6000]]);
+    // voiding one of the two rows of that notice keeps the notice matched until the last one is voided
+    await s.post(`/api/staff/payments/${after.payments.at(-1).id}/void`, { reason: '초과분 취소' });
+    assert.equal((await d.notices()).find((x) => x.id === n.id).status, 'matched');
+    await s.post(`/api/staff/payments/${after.payments.at(-2).id}/void`, { reason: '전부 취소' });
+    assert.equal((await d.notices()).find((x) => x.id === n.id).status, 'pending');
+    // an intent whose AMOUNT exceeds the balance is not a candidate either
+    await partyOf(s, 6, 3);
+    const c6 = await coverIn(s, 6);
+    const g6 = await guestWithDevice(srv);
+    const i6 = (await g6.post(`/api/t/${tk[5]}/cover/intents`, { payer: 'Lee', shares: 1 })).json;
+    await s.post(`/api/staff/orders/${c6.id}/paid`, { paid: true, method: 'cash', amount: 7000 }); // balance 2,000 < 3,000
+    const n6 = await d.sms(3000, 'Lee');
+    assert.equal(n6.status, 'pending');
+    assert.deepEqual((await d.notices()).find((x) => x.id === n6.id).candidates.filter((x) => x.intent), [], 'the intent no longer fits the balance');
+    assert.equal((await s.post(`/api/staff/deposits/${n6.id}/assign`, { orderId: c6.id, intentId: i6.id })).json.error, 'intent_stale');
+  } finally { await d.srv.stop(); }
+});
+
+test('K1 two phones tap the same share payment at once: one applies, the other is refused', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const s2 = await staffLogin(srv);
+    await coverOn(s); await partyOf(s, 1, 3);
+    const c = await coverIn(s, 1);
+    const res = await Promise.all([s, s2].map((x) => x.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 3 })));
+    assert.deepEqual(res.map((r) => r.status).sort(), [200, 400]);
+    const o = await coverIn(s, 1);
+    assert.deepEqual([o.paidAmount, o.shares.paid, o.overpaid], [9000, 3, 0]);
+  });
+});
+
+test('K2 intent rows are bounded: 6 creates per device per minute, 30 rows per seat (closed ones count), old closed rows purged after an hour, test table too', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await coverOn(s); await partyOf(s, 1, 30);
+    const tkn = tk[0];
+    const g = await guestWithDevice(srv);
+    const mk = (cli) => cli.post(`/api/t/${tkn}/cover/intents`, { payer: '가나', shares: 1 });
+    const made = [];
+    for (let i = 0; i < 6; i++) { const r = await mk(g); assert.equal(r.status, 201); made.push(r.json.id); await g.post(`/api/t/${tkn}/cover/intents/${r.json.id}/cancel`, {}); } // create + cancel loop
+    const seventh = await mk(g);
+    assert.deepEqual([seventh.status, seventh.json.error], [429, 'too_many_intents'], 'the per-device rate');
+    const db = dbOf(srv);
+    const rows = (tbl = '1') => db.prepare('SELECT COUNT(*) n FROM cover_intents WHERE table_id=?').get(Number(tbl)).n;
+    // many devices keep creating and cancelling: the seat never holds more than 30 rows
+    let refused = 0;
+    for (let i = 0; i < 40; i++) {
+      const gi = await guestWithDevice(srv);
+      const r = await mk(gi);
+      if (r.status === 201) await gi.post(`/api/t/${tkn}/cover/intents/${r.json.id}/cancel`, {}); else { refused++; assert.deepEqual([r.status, r.json.error], [429, 'too_many_intents']); }
+    }
+    assert.equal(rows(), 30);
+    assert.ok(refused >= 16);
+    // after an hour the closed rows are purged lazily on the next create (and by the sweep)
+    db.prepare('UPDATE cover_intents SET created_at=created_at-?').run(61 * 60000);
+    const fresh = await guestWithDevice(srv);
+    assert.equal((await mk(fresh)).status, 201);
+    assert.equal(rows(), 1, 'cancelled / expired rows are gone');
+    // paid intents stay with their payment
+    db.prepare("UPDATE cover_intents SET status='paid', created_at=created_at-?").run(2 * 3600000);
+    assert.equal((await mk(await guestWithDevice(srv))).status, 201);
+    assert.equal(rows(), 2);
+    // the test table has the same bound
+    const tt = await testTokenOf(s);
+    await s.post('/api/staff/tables/0/party', { people: 30 });
+    const gt = await guestWithDevice(srv);
+    for (let i = 0; i < 6; i++) assert.equal((await gt.post(`/api/t/${tt}/cover/intents`, { payer: '가나', shares: 1 })).status, 201);
+    assert.equal((await gt.post(`/api/t/${tt}/cover/intents`, { payer: '가나', shares: 1 })).status, 429);
+    db.close();
+  });
+});
+
+test('K2 the other tables added in this release are bounded too (one seat_info row per seat, void rows are not extra rows, test data per seat)', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await coverOn(s);
+    const db = dbOf(srv);
+    const n = (sql, ...a) => db.prepare(sql).get(...a).n;
+    for (let i = 0; i < 20; i++) await partyOf(s, 1, 1 + (i % 30));
+    assert.equal(n('SELECT COUNT(*) n FROM seat_info WHERE table_id=1'), 1, 'seat_info: one row per seat however often the headcount changes');
+    const g = await guestWithDevice(srv);
+    for (let i = 0; i < 5; i++) assert.equal((await g.post(`/api/t/${tk[0]}/party`, { seat: 1, people: 3 })).status, i === 0 ? 409 : 409);
+    assert.equal(n('SELECT COUNT(*) n FROM seat_info WHERE table_id=1'), 1);
+    const c = await coverIn(s, 1);
+    const before = n('SELECT COUNT(*) n FROM payments');
+    const p = (await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', amount: 1000 })).json.order.payments[0];
+    await s.post(`/api/staff/payments/${p.id}/void`, { reason: 'x' });
+    assert.equal(n('SELECT COUNT(*) n FROM payments'), before + 1, 'a void marks the row, it adds none');
+    // test table: the per-seat caps (orders 80 staff, nicks 30, calls 50) bound everything a stranger with the token can create
+    const tt = await testTokenOf(s);
+    const gt = await guestWithDevice(srv);
+    for (let i = 0; i < 60; i++) await gt.post(`/api/t/${tt}/calls`, { type: ['물', '수저', '치워주세요', '기타'][i % 4] });
+    assert.ok(n('SELECT COUNT(*) n FROM calls WHERE table_id=0') <= 50, 'calls per seat <= 50');
+    assert.equal((await gt.post(`/api/t/${tt}/party`, { seat: 1, people: 2 })).status, 200);
+    for (let i = 0; i < 5; i++) await gt.post(`/api/t/${tt}/party`, { seat: 1, people: 2 });
+    assert.equal(n('SELECT COUNT(*) n FROM seat_info WHERE table_id=0'), 1);
+    assert.ok(n("SELECT COUNT(*) n FROM audit_log WHERE test=1") <= 500, 'test audit rows are capped');
+    db.close();
+  });
+});
+
+test('K3 headcount ownership (setBy / setAt) and the seat binding: a stale page cannot set people on the new seating', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = await guestWithDevice(srv); const stale = await guestWithDevice(srv);
+    const snap = (await g.get(`/api/t/${tk[0]}`)).json;
+    assert.deepEqual([snap.party.seat, snap.table.seat, snap.party.setBy, snap.party.setAt], [1, 1, null, null]);
+    assert.equal((await g.post(`/api/t/${tk[0]}/party`, { people: 3 })).json.error, 'bad_seat', 'the seat from the snapshot is required');
+    assert.equal((await g.post(`/api/t/${tk[0]}/party`, { people: 3, seat: '1' })).json.error, 'bad_seat');
+    // the previous party's page is still open while staff clear the table for the next party
+    await s.post('/api/staff/tables/1/clear', {});
+    const r = await stale.post(`/api/t/${tk[0]}/party`, { people: 5, seat: 1 });
+    assert.deepEqual([r.status, r.json.error, r.json.seat], [409, 'seat_changed', 2]);
+    assert.equal((await tableIn(s, 1)).people, null, 'nothing was set on the new seating');
+    const ok = await g.post(`/api/t/${tk[0]}/party`, { people: 3, seat: 2 });
+    assert.deepEqual([ok.status, ok.json.party.setBy, typeof ok.json.party.setAt], [200, 'guest', 'number']);
+    const t1 = await tableIn(s, 1);
+    assert.deepEqual([t1.people, t1.partySetBy, typeof t1.partySetAt], [3, 'guest', 'number']);
+    await partyOf(s, 1, 4);
+    assert.equal((await tableIn(s, 1)).partySetBy, 'staff', 'a staff change takes over the ownership');
+    assert.equal((await g.get(`/api/t/${tk[0]}`)).json.party.setBy, 'staff');
+    // waitlist
+    const w = (await new Client(srv).post('/api/wait', { nick: '대기', size: 2 })).json;
+    await s.post(`/api/staff/wait/${w.id}/seat`, { table: 2 });
+    assert.deepEqual([(await tableIn(s, 2)).people, (await tableIn(s, 2)).partySetBy], [2, 'waitlist']);
+    assert.ok((await auditOf(s)).some((e) => e.action === 'party_set' && /손님/.test(e.summaryKo) || /입력\(손님\)/.test(e.summaryKo)));
+  });
+});
+
+test('K4 clear -> guest sets people -> unclear -> clear: the next seat starts with people null; unclear discards the abandoned seat rows', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = await guestWithDevice(srv);
+    await partyOf(s, 1, 2);
+    assert.equal((await s.post('/api/staff/tables/1/clear', {})).json.seat, 2);
+    assert.equal((await g.post(`/api/t/${tk[0]}/party`, { people: 5, seat: 2 })).status, 200);
+    const un = await s.post('/api/staff/tables/1/unclear', {});
+    assert.deepEqual([un.status, un.json.error, un.json.reason, un.json.used], [409, 'cannot_undo', 'seat_in_use', { party: 1 }], 'a headcount on the new seat is activity');
+    assert.equal((await s.post('/api/staff/tables/1/clear', {})).json.seat, 3);
+    const t = await tableIn(s, 1);
+    assert.deepEqual([t.seat, t.people], [3, null], 'the next seating starts without a headcount');
+    assert.equal((await s.get('/api/staff/sales')).json.visitors.total, 2 + 5, 'both parties are real visitors, nothing phantom is added');
+    // leftover rows of a seat that saw no activity are discarded by unclear
+    await s.post('/api/staff/tables/2/clear', {});
+    const db = dbOf(srv);
+    db.prepare("INSERT INTO seat_info(table_id, seat, people, seated_at, updated_at) VALUES(2, 2, NULL, 1, 1)").run();
+    db.prepare("INSERT INTO cover_intents(table_id, seat, device, payer, shares, amount, created_at, status) VALUES(2, 2, 'x', 'p', 1, 3000, ?, 'cancelled')").run(Date.now());
+    assert.equal((await s.post('/api/staff/tables/2/unclear', {})).status, 200);
+    assert.deepEqual([db.prepare('SELECT COUNT(*) n FROM seat_info WHERE table_id=2 AND seat=2').get().n, db.prepare('SELECT COUNT(*) n FROM cover_intents WHERE table_id=2 AND seat=2').get().n], [0, 0]);
+    await s.post('/api/staff/tables/2/clear', {});
+    assert.equal((await tableIn(s, 2)).people, null);
+    db.close();
+  });
+});
+
+test('K5 requireBeforeOrder with askGuest off: guests can always answer (never stuck without staff)', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    assert.equal((await coverOn(s, { requireBeforeOrder: true, askGuest: false })).status, 200, 'the combination is allowed');
+    const g = await guestWithDevice(srv);
+    const p = (await g.get(`/api/t/${tk[0]}`)).json.party;
+    assert.deepEqual([p.askGuest, p.required, p.canSet], [false, true, true]);
+    const blocked = await order(g, tk[0], [{ id: 'cola', qty: 1 }]);
+    assert.deepEqual([blocked.status, blocked.json.error], [409, 'party_required']);
+    assert.equal((await g.post(`/api/t/${tk[0]}/party`, { people: 2, seat: 1 })).status, 200, 'the guest unblocks themselves');
+    assert.equal((await order(g, tk[0], [{ id: 'cola', qty: 1 }])).status, 201);
+    // without the requirement a switched-off question stays off
+    await s.post('/api/staff/cover/settings', { requireBeforeOrder: false });
+    const p2 = (await g.get(`/api/t/${tk[1]}`)).json.party;
+    assert.deepEqual([p2.required, p2.canSet], [false, false]);
+    assert.equal((await g.post(`/api/t/${tk[1]}/party`, { people: 2, seat: 1 })).json.error, 'party_not_asked');
+    // cover disabled: the requirement does not apply either
+    await s.post('/api/staff/cover/settings', { enabled: false, requireBeforeOrder: true });
+    assert.equal((await order(g, tk[1], [{ id: 'cola', qty: 1 }])).status, 201);
+  });
+});
+
+test('K6 recommended considers every candidate kind: the one name-equal candidate only; an order and an intent with the same name -> none and several_candidates', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
+    await coverOn(s); await partyOf(s, 1, 4);
+    const g = await guestWithDevice(srv);
+    await g.post(`/api/t/${tk[0]}/cover/intents`, { payer: 'Yoon', shares: 2 }); // 6,000
+    const n1 = await d.sms(6000, 'Yoon');
+    let notice = (await d.notices()).find((x) => x.id === n1.id);
+    assert.deepEqual(notice.candidates.map((x) => [!!x.intent, x.recommended]).sort(), [[true, true]].sort(), 'only the intent matches the name and amount');
+    // a real food order of 6,000 with the same depositor name: now two name-equal candidates
+    await d.place(tk[1], 'Yoon', 'fries');
+    notice = (await d.notices()).find((x) => x.id === n1.id);
+    assert.equal(notice.candidates.length, 2);
+    assert.ok(notice.candidates.every((x) => x.recommended === false), 'recommend none');
+    assert.ok(notice.reasons.includes('several_candidates'));
+    // a notice with another name: no candidate is recommended
+    const n2 = await d.sms(6000, '다른이');
+    assert.ok((await d.notices()).find((x) => x.id === n2.id).candidates.every((x) => !x.recommended));
+    // a single name-equal ORDER is recommended too
+    const only = await d.sms(8000, 'Kim');
+    await d.place(tk[2], 'Kim');
+    assert.deepEqual((await d.notices()).find((x) => x.id === only.id).candidates.map((x) => [x.table, x.recommended]), [[3, true]]);
+  } finally { await d.srv.stop(); }
+});
+
+test('K8 dryRun on the staff party call previews the cover order (total, refundDue / balanceDue, shares) and writes nothing', async () => {
+  await withBooth(async ({ s }) => {
+    await coverOn(s); await partyOf(s, 1, 4);
+    const c = await coverIn(s, 1);
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash' }); // 12,000 paid
+    const snap = async () => JSON.stringify([(await s.get('/api/staff/state')).json, (await s.get('/api/staff/audit?limit=200')).json.entries.map((e) => e.id), (await s.get('/api/staff/sales')).json]);
+    const before = await snap();
+    const down = await partyOf(s, 1, 3, { dryRun: true });
+    assert.equal(down.status, 200, down.text);
+    assert.equal(down.json.dryRun, true);
+    assert.deepEqual([down.json.party.people, down.json.coverOrder.total, down.json.coverOrder.refundDue, down.json.coverOrder.overpaid, down.json.coverOrder.shares], [3, 9000, 3000, 3000, { total: 3, paid: 3, left: 0, over: 0 }]);
+    const up = await partyOf(s, 1, 6, { dryRun: true });
+    assert.deepEqual([up.json.coverOrder.total, up.json.coverOrder.balanceDue, up.json.coverOrder.paid, up.json.coverOrder.refundDue], [18000, 6000, false, 0]);
+    assert.equal(await snap(), before, 'state, audit and sales are byte-identical');
+    assert.equal((await partyOf(s, 1, 99, { dryRun: true })).json.error, 'bad_people', 'the same validation');
+    const real = await partyOf(s, 1, 3);
+    assert.deepEqual([real.json.coverOrder.total, real.json.coverOrder.refundDue], [down.json.coverOrder.total, down.json.coverOrder.refundDue]);
+  });
+});
+
+test('K9 deposit pipeline status: lastNoticeAt / lastMatchedAt in the staff state and GET /api/staff/deposit-hook', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const hook = async () => (await s.get('/api/staff/deposit-hook')).json;
+    assert.deepEqual([(await hook()).lastNoticeAt, (await hook()).lastMatchedAt, (await s.get('/api/staff/state')).json.deposit.lastNoticeAt], [null, null, null]);
+    const t0 = Date.now();
+    await d.sms(1234, '아무개');
+    const h1 = await hook();
+    assert.ok(h1.lastNoticeAt >= t0 && h1.lastMatchedAt === null);
+    assert.equal((await s.get('/api/staff/state')).json.deposit.lastNoticeAt, h1.lastNoticeAt);
+    await d.place(tk[0], '김철수'); // 8,000
+    const m = await d.sms(8000, '김철수');
+    assert.equal(m.status, 'matched');
+    const h2 = await hook();
+    assert.ok(h2.lastMatchedAt >= t0 && h2.lastNoticeAt >= h1.lastNoticeAt);
+    assert.equal((await s.get('/api/staff/deposits')).json.lastMatchedAt, h2.lastMatchedAt);
+    assert.ok(h2.url && h2.secret, 'the old fields are still there');
+  } finally { await d.srv.stop(); }
+});
+
+test('K10 kitchen orders carry paid / balanceDue; staff SSE hints payment and payment_void for every path (dry runs and rollbacks emit nothing)', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    const sse = await openSse(srv, '/api/staff/events', { cookie: s.cookieHeader() });
+    try {
+      const events = (buf, name) => [...buf.matchAll(new RegExp(`event: ${name}\\ndata: (.*)\\n`, 'g'))].map((m) => JSON.parse(m[1]));
+      const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }], { accept: true })).json.order; // 8,000, cooking
+      let k = (await s.get('/api/kitchen')).json.orders.find((x) => x.id === o.id);
+      assert.deepEqual([k.paid, k.balanceDue], [false, 8000]);
+      assert.deepEqual(Object.keys(k).filter((x) => /paid|balance|amount|total/i.test(x)).sort(), ['balanceDue', 'paid'], 'nothing else about money is exposed');
+      // a dry run emits nothing; the real call emits one hint
+      await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 3000, dryRun: true });
+      await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 3000 });
+      let buf = await sse.until((b) => events(b, 'payment').length >= 1);
+      assert.deepEqual(events(buf, 'payment'), [{ orderId: o.id, table: 1, amount: 3000, method: 'cash', auto: false, kind: 'food', test: false }]);
+      k = (await s.get('/api/kitchen')).json.orders.find((x) => x.id === o.id);
+      assert.deepEqual([k.paid, k.balanceDue], [false, 5000]);
+      // a refused call (rolled back) emits nothing
+      await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, shares: 1 });
+      // auto-confirmed deposit
+      const n = await d.sms(5000, '박미정');
+      assert.equal(n.status, 'pending'); // no depositor on the order: stays manual
+      await d.place(tk[1], '박미정', 'tteokbokki'); // 8,000: no match for 5,000
+      const o2 = (await d.place(tk[2], '이름셋', 'cola')); // 2,000
+      const auto = await d.sms(2000, '이름셋');
+      assert.equal(auto.status, 'matched');
+      buf = await sse.until((b) => events(b, 'payment').length >= 2);
+      assert.deepEqual(events(buf, 'payment')[1], { orderId: o2.id, table: 3, amount: 2000, method: 'transfer', auto: true, kind: 'food', test: false });
+      // cover share + void + test table flag
+      await coverOn(s); await partyOf(s, 4, 2);
+      const c = await coverIn(s, 4);
+      const sp = (await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'transfer', shares: 1, payer: '가나' })).json.order;
+      buf = await sse.until((b) => events(b, 'payment').length >= 3);
+      assert.deepEqual(events(buf, 'payment')[2], { orderId: c.id, table: 4, amount: 3000, method: 'transfer', auto: false, kind: 'cover', shares: 1, test: false });
+      await s.post(`/api/staff/payments/${sp.payments[0].id}/void`, { reason: '실수' });
+      buf = await sse.until((b) => events(b, 'payment_void').length >= 1);
+      assert.deepEqual(events(buf, 'payment_void'), [{ orderId: c.id, table: 4, paymentId: sp.payments[0].id, amount: 3000, method: 'transfer', kind: 'cover', test: false }]);
+      const to = (await staffOrder(s, 0, [{ id: 'cola', qty: 1 }])).json.order;
+      await s.post(`/api/staff/orders/${to.id}/paid`, { paid: true, method: 'cash' });
+      buf = await sse.until((b) => events(b, 'payment').length >= 4);
+      assert.equal(events(buf, 'payment')[3].test, true);
+      // manual assignment (two rows when capped) emits one hint per row
+      assert.equal(events(buf, 'payment').length, 4, 'exactly one hint per recorded payment, none for the dry run or the refused call');
+    } finally { sse.close(); }
+  } finally { await d.srv.stop(); }
+});
+
+test('K11 small fixes: test order lines do not pin menu items, real refunds are listed first, real audit rows survive a test flood, waived covers show no intents, payment ids are never reused', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const it = await mkItem(s, '테스트전용', 1000);
+    await staffOrder(s, 0, [{ id: it, qty: 1 }]);
+    assert.equal((await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === it).inUse, false);
+    assert.equal((await s.post(`/api/staff/menu/items/${it}/delete`, {})).status, 200, 'an item used only on the test table can be deleted');
+    // many open TEST refunds cannot push a real one out of the 200 window
+    const real = (await staffOrder(s, 1, [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${real.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${real.id}/status`, { status: 'cancelled' });
+    const db = dbOf(srv);
+    const tid = Number(db.prepare("INSERT INTO orders(table_id,seat,key,status,subtotal,total,created_at,updated_at,paid_amount) VALUES(0,1,'bulk-test-order','cooking',1000,1000,?,?,1000)").run(Date.now(), Date.now()).lastInsertRowid);
+    const ins = db.prepare('INSERT INTO refunds(order_id,amount,reason,created_at) VALUES(?,?,?,?)');
+    db.exec('BEGIN'); for (let i = 0; i < 250; i++) ins.run(tid, 10, 'overpaid', Date.now() + i); db.exec('COMMIT');
+    const refunds = (await s.get('/api/staff/state')).json.refunds;
+    assert.equal(refunds.length, 200);
+    assert.equal(refunds[0].orderId, real.id, 'the real open refund comes first');
+    // audit: 600 test rows cannot evict real rows
+    const realRows = db.prepare('SELECT COUNT(*) n FROM audit_log WHERE test=0').get().n;
+    for (let i = 0; i < 600; i++) await s.post('/api/staff/test/settings', { showInKitchen: i % 2 === 0 });
+    assert.ok(db.prepare('SELECT COUNT(*) n FROM audit_log WHERE test=1').get().n <= 500);
+    assert.ok(db.prepare('SELECT COUNT(*) n FROM audit_log WHERE test=0').get().n >= realRows, 'real rows are still there');
+    // coverIntents hides intents of a waived cover
+    await coverOn(s); await partyOf(s, 2, 3);
+    const g = await guestWithDevice(srv);
+    await g.post(`/api/t/${tk[1]}/cover/intents`, { payer: '가나', shares: 1 });
+    assert.equal((await s.get('/api/staff/state')).json.coverIntents.filter((x) => x.table === 2).length, 1);
+    await s.post('/api/staff/tables/2/cover/waive', { reason: '임원' });
+    assert.equal((await s.get('/api/staff/state')).json.coverIntents.filter((x) => x.table === 2).length, 0);
+    await s.post('/api/staff/tables/2/cover/restore', {});
+    // payment ids are never reused after reset / day close
+    await partyOf(s, 3, 2);
+    const c3 = await coverIn(s, 3);
+    const p1 = (await s.post(`/api/staff/orders/${c3.id}/paid`, { paid: true, method: 'cash', shares: 1 })).json.order.payments[0].id;
+    await s.post('/api/staff/reset', { confirm: '초기화' });
+    await partyOf(s, 3, 2);
+    const c3b = await coverIn(s, 3);
+    const p2 = (await s.post(`/api/staff/orders/${c3b.id}/paid`, { paid: true, method: 'cash', shares: 1 })).json.order.payments[0].id;
+    assert.ok(p2 > p1, `payment ids keep counting (${p1} -> ${p2})`);
+    db.close();
+  });
+});
+
+// =====================================================================================================
+// release 3b: paid flag = function of money (restart safety), guessed amounts never one-tap, shares follow money, cover visible after the setting is off
+// =====================================================================================================
+test('R3b-1 a void on a cancelled / waived paid order never turns into money after a restart (twice): sales identical, no refund appears', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-r3b1-'));
+  const servers = [];
+  try {
+    let srv = await boot({ dir }); servers.push(srv);
+    let s = await staffLogin(srv);
+    // food: 8,000 paid in cash, cancelled, payment voided
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash' });
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/status`, { status: 'cancelled' })).status, 200);
+    const pid = (await orderOf(s, o.id)).payments[0].id;
+    assert.equal((await s.post(`/api/staff/payments/${pid}/void`, { reason: '잘못 입력' })).status, 200);
+    // cover: 3 people x 3,000 paid by transfer, waived, payment voided
+    await coverOn(s); await partyOf(s, 2, 3);
+    const c = await coverIn(s, 2);
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'transfer' });
+    assert.equal((await s.post('/api/staff/tables/2/cover/waive', { reason: '무료 손님' })).status, 200);
+    const cpid = (await orderOf(s, c.id)).payments[0].id;
+    assert.equal((await s.post(`/api/staff/payments/${cpid}/void`, { reason: '잘못 입력' })).status, 200);
+    const snap = async (x) => JSON.stringify([(await x.get('/api/staff/sales')).json, (await x.get('/api/staff/state')).json.refunds, (await x.get('/api/staff/state')).json.orders.map((q) => [q.id, q.paid, q.paidAmount, q.refundDue])]);
+    const before = await snap(s);
+    const flags = (await s.get('/api/staff/state')).json.orders.filter((q) => [o.id, c.id].includes(q.id));
+    assert.deepEqual(flags.map((q) => [q.paid, q.paidAmount, q.refundDue]), [[false, 0, 0], [false, 0, 0]], 'the paid flag follows the money: nothing held, not paid');
+    for (let i = 0; i < 2; i++) {
+      await srv.stop({ keep: true });
+      srv = await boot({ dir }); servers.push(srv); s = await staffLogin(srv);
+      assert.equal(await snap(s), before, `restart #${i + 1}: sales, refunds and orders are byte-identical`);
+      assert.deepEqual((await s.get('/api/staff/state')).json.refunds, []);
+    }
+  } finally { for (const x of servers) if (x.child.exitCode === null) await x.stop({ keep: true }); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R3b-1b a cancelled order whose refund was handed back is not "paid" any more, and a restart keeps it so', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-r3b1b-'));
+  const servers = [];
+  try {
+    let srv = await boot({ dir }); servers.push(srv);
+    let s = await staffLogin(srv);
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash' });
+    await s.post(`/api/staff/orders/${o.id}/status`, { status: 'cancelled' });
+    const rf = (await s.get('/api/staff/state')).json.refunds[0];
+    await s.post(`/api/staff/refunds/${rf.id}/done`, { amount: rf.amount, method: 'cash' });
+    const snap = async (x) => JSON.stringify([(await x.get('/api/staff/sales')).json, (await x.get('/api/staff/state')).json.refunds]);
+    const before = await snap(s);
+    await srv.stop({ keep: true });
+    const db = dbOf(srv); assert.equal(db.prepare('SELECT paid FROM orders WHERE id=?').get(o.id).paid, 0, 'refund done on a cancelled order clears the flag'); db.close();
+    srv = await boot({ dir }); servers.push(srv); s = await staffLogin(srv);
+    assert.equal(await snap(s), before);
+  } finally { for (const x of servers) if (x.child.exitCode === null) await x.stop({ keep: true }); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R3b-2 a guessed amount is never recommended / one-tap / assigned silently; same-amount candidates on other tables kill the recommendation', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
+    await coverOn(s); await partyOf(s, 5, 2);
+    const g = await guestWithDevice(srv);
+    const intent = (await g.post(`/api/t/${tk[4]}/cover/intents`, { payer: '박지민', shares: 1 })).json;
+    const cover = await coverIn(s, 5);
+    // the reviewer's sequence: 300 won sent with the display name "박지민 3,000"
+    const r = await d.notice('[Web발신]\n입금 300\n잔액 123,456\n박지민 3,000');
+    const n = (await d.notices()).find((x) => x.id === r.id);
+    assert.deepEqual([n.amountGuessed, n.amount, n.reasons.includes('multiple_amounts')], [true, 3000, true]);
+    assert.deepEqual([n.oneTap, n.candidates.some((x) => x.recommended)], [false, false], 'a guessed amount is never recommended');
+    const asg = (body) => s.post(`/api/staff/deposits/${n.id}/assign`, { orderId: cover.id, intentId: intent.id, ...body });
+    assert.equal((await asg({})).json.error, 'amount_guessed');
+    assert.equal((await asg({ force: true })).json.error, 'amount_guessed', 'force without a note');
+    assert.equal((await asg({ force: true, note: '직접 확인' })).json.error, 'bad_amount', 'the staff-typed amount is required');
+    assert.equal((await asg({ force: true, note: '직접 확인', amount: 0 })).json.error, 'bad_amount');
+    assert.equal((await orderOf(s, cover.id)).paidAmount, 0, 'nothing was recorded by the refused calls');
+    const done = await asg({ force: true, note: '직접 확인', amount: 300 });
+    assert.equal(done.status, 200, done.text);
+    assert.deepEqual([done.json.order.paidAmount, done.json.order.payments.at(-1).amount, done.json.order.payments.at(-1).shares], [300, 300, null], 'the amount staff typed is recorded, never the guessed 3,000');
+    // a strict notice: recommended + oneTap on one table; a same-amount candidate on ANOTHER table removes both
+    await partyOf(s, 6, 1); // its whole cover is 3,000 and nameless
+    const g2 = await guestWithDevice(srv);
+    await partyOf(s, 7, 2);
+    const i2 = (await g2.post(`/api/t/${tk[6]}/cover/intents`, { payer: '김철수', shares: 1 })).json;
+    const n2r = await d.notice('입금 3,000\n김철수');
+    let n2 = (await d.notices()).find((x) => x.id === n2r.id);
+    assert.equal(n2r.status, 'pending');
+    assert.deepEqual([n2.amountGuessed, n2.oneTap, n2.candidates.filter((x) => x.recommended).length, n2.reasons.includes('several_candidates')], [false, false, 0, true], 'table 6 also owes exactly 3,000 -> no recommendation');
+    // table 6 gets a plain 3,000 paid by hand: no such candidate any more -> the intent on table 7 is the one recommended
+    await s.post(`/api/staff/orders/${(await coverIn(s, 6)).id}/paid`, { paid: true, method: 'cash' });
+    n2 = (await d.notices()).find((x) => x.id === n2r.id);
+    assert.deepEqual([n2.oneTap, n2.candidates.filter((x) => x.recommended).map((x) => x.intent && x.intent.id)], [true, [i2.id]]);
+  } finally { await d.srv.stop(); }
+});
+
+test('R3b-3 shares follow the money held: lower -> refund done -> raise, and waive -> refund done -> restore keep the shares still due payable', async () => {
+  await withBooth(async ({ s }) => {
+    await coverOn(s);
+    const refundOf = async (id) => (await s.get('/api/staff/state')).json.refunds.find((r) => r.orderId === id && !r.doneAt);
+    // R1: 4 shares paid (12,000), lowered to 2 (refund 6,000), refund handed back, raised to 4
+    await partyOf(s, 1, 4);
+    let c = await coverIn(s, 1);
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 4 })).status, 200);
+    await partyOf(s, 1, 2);
+    const rf = await refundOf(c.id);
+    assert.equal(rf.amount, 6000);
+    await s.post(`/api/staff/refunds/${rf.id}/done`, { amount: 6000, method: 'cash' });
+    await partyOf(s, 1, 4);
+    c = await coverIn(s, 1);
+    assert.deepEqual([c.total, c.balanceDue, c.paid, c.shares], [12000, 6000, false, { total: 4, paid: 2, left: 2, over: 0 }], 'two shares are still due');
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 3 })).json.error, 'too_many_shares');
+    const last = await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 2 });
+    assert.deepEqual([last.status, last.json.order.paid, last.json.order.shares], [200, true, { total: 4, paid: 4, left: 0, over: 0 }]);
+    // R2: 3 shares paid, waived, refund done, restored
+    await partyOf(s, 2, 3);
+    c = await coverIn(s, 2);
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 3 });
+    await s.post('/api/staff/tables/2/cover/waive', { reason: '무료' });
+    const rf2 = await refundOf(c.id);
+    assert.equal(rf2.amount, 9000);
+    await s.post(`/api/staff/refunds/${rf2.id}/done`, { amount: 9000, method: 'cash' });
+    const back = (await s.post('/api/staff/tables/2/cover/restore', {})).json.order;
+    assert.deepEqual([back.balanceDue, back.paid, back.shares], [9000, false, { total: 3, paid: 0, left: 3, over: 0 }]);
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 3 })).status, 200);
+  });
+});
+
+test('R3b-4 the guest cover object stays visible while a live cover order exists, even after the cover setting is switched off', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await coverOn(s); await partyOf(s, 1, 4);
+    const guest = await guestWithDevice(srv);
+    await s.post('/api/staff/cover/settings', { enabled: false });
+    const cv = (await guest.get(`/api/t/${tk[0]}`)).json.cover;
+    assert.deepEqual([cv.enabled, cv.settingEnabled, cv.total, cv.left], [true, false, 12000, 12000], 'a live cover order is shown although new seats no longer get one');
+    const other = (await (await guestWithDevice(srv)).get(`/api/t/${tk[2]}`)).json.cover;
+    assert.deepEqual([other.enabled, other.settingEnabled, other.total], [false, false, 0], 'a seat without a cover order follows the setting');
+    assert.equal((await s.get('/api/staff/state')).json.tables.find((t) => t.number === 1).cover.waived, false, 'staff tables[].cover is independent of the setting');
+  });
+});
+
+test('R3b-5 small fixes: invisible characters leave the parsed name; an intent that no longer fits is closed; a void on an old seat is written off; test intents are tagged', async () => {
+  const { parseDeposit } = require('./db');
+  const p = parseDeposit('입금 3,000원\n홍‮길동');
+  assert.deepEqual([p.depositor, p.reasons.includes('name_shape'), p.autoEligible], ['홍길동', true, false], 'display name is clean, auto-confirm still refuses it');
+  await withBooth(async ({ srv, s, tk }) => {
+    await coverOn(s); await partyOf(s, 1, 4);
+    const g = await guestWithDevice(srv);
+    assert.equal((await g.post(`/api/t/${tk[0]}/cover/intents`, { payer: '가나', shares: 2 })).status, 201);
+    await partyOf(s, 1, 1);
+    assert.deepEqual([(await s.get('/api/staff/state')).json.coverIntents.length, (await g.get(`/api/t/${tk[0]}`)).json.cover.myIntents.length], [0, 0], 'headcount dropped below the intent: closed');
+    // void on a cleared seat
+    const o = (await staffOrder(s, 2, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash' });
+    await s.post(`/api/staff/orders/${o.id}/status`, { status: 'served' });
+    const pid = (await orderOf(s, o.id)).payments[0].id;
+    assert.equal((await s.post('/api/staff/tables/2/clear', {})).status, 200);
+    assert.equal((await s.post(`/api/staff/payments/${pid}/void`, { reason: '잘못 입력' })).status, 200);
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.totals.unpaidRevenue, sale.totals.writtenOff], [3000, 8000], 'an unpaid order on an old seat is 미수금 (8,000); the 3,000 is table 1\'s own open cover');
+    // test table intent carries test: true
+    await s.post('/api/staff/tables/0/party', { people: 2 });
+    const tg = await guestWithDevice(srv);
+    assert.equal((await tg.post(`/api/t/${await testTokenOf(s)}/cover/intents`, { payer: '김테스', shares: 1 })).status, 201);
+    assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents.map((i) => [i.table, i.test]), [[0, true]]);
+    assert.equal(typeof (await s.get('/api/staff/state')).json.testTable.coverOrderId, 'number');
+  });
 });

@@ -34,6 +34,21 @@
   SC.$ = function (sel, root) { return (root || document).querySelector(sel); };
 
   // ---------- formatting ----------
+  // Untrusted text (SMS names, payer names, raw SMS) for display: strip bidi / zero-width / control characters, collapse
+  // whitespace, cut to max chars with an ellipsis. Always render the result with textContent (h()).
+  var UNSAFE = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2028\u2029\u2066-\u2069\uFEFF]/g;
+  SC.safeText = function (s, max) {
+    var t = String(s == null ? '' : s).replace(UNSAFE, ' ').replace(/\s+/g, ' ').trim();
+    var a = Array.from(t);
+    return max && a.length > max ? a.slice(0, max).join('') + '…' : t;
+  };
+  // raw SMS for a <pre>: keep line breaks, strip bidi / zero-width / other control characters
+  SC.cleanRaw = function (s) { return String(s == null ? '' : s).replace(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2028\u2029\u2066-\u2069\uFEFF]/g, ' '); };
+  // untrusted name inside a bordered chip so it can never read as one of the app's own sentences
+  SC.nameChip = function (s, max) {
+    var t = SC.safeText(s, max == null ? 12 : max);
+    return h('bdi', { class: 'name-chip' }, t || '이름 없음');
+  };
   SC.won = function (n) { return Number(n || 0).toLocaleString('ko-KR') + '원'; };
   SC.agoText = function (ts, now) {
     var s = Math.max(0, Math.floor(((now || Date.now()) - ts) / 1000));
@@ -180,6 +195,7 @@
     kitchen: [[659, 0.13], [0, 0.05], [988, 0.24]],                                   // two rising, lower
     called: [[880, 0.2], [0, 0.06], [1175, 0.4]],
     deposit: [[1568, 0.09], [0, 0.05], [1568, 0.09], [0, 0.05], [2093, 0.3]],        // bank deposit needs staff
+    paid: [[784, 0.09, 's'], [988, 0.09, 's'], [1319, 0.28, 's']],                  // soft rising arpeggio: money confirmed
     tick: [[1760, 0.05, 's']],                                                         // quiet: auto-matched
   };
   var lastHint = 0;
@@ -214,6 +230,15 @@
     flashTimer = setTimeout(function () { root.classList.remove('sc-flash'); }, 1600);
   };
   SC.attention = function (kind) { A.beep(kind); SC.flash(); };
+  // Rehearsal orders from the test guest table: sound on by default so a rehearsal feels real (localStorage, guarded).
+  SC.testSound = function (v) {
+    try {
+      if (v === undefined) return localStorage.getItem('sc_testsound') !== '0';
+      localStorage.setItem('sc_testsound', v ? '1' : '0');
+    } catch (e) { /* storage blocked */ }
+    return v === undefined ? true : !!v;
+  };
+  SC.isTestOrder = function (o) { return !!(o && (o.test || o.table === 0)); };
   SC.setTitle = function (count, base) { document.title = (count > 0 ? '(' + count + ') ' : '') + base; };
 
   // Sound toggle button (top bar): 알림 켜기 -> 알림 켜짐 -> 알림 꺼짐

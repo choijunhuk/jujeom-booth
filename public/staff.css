@@ -488,3 +488,80 @@ body.xl-scale .tag { font-size: .95rem; }
 .sheet-head .btn { flex: none; white-space: nowrap; }
 .stack { display: grid; gap: 8px; }
 .pick .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); } .pick .btn[aria-pressed="true"] small { color: var(--accent-ink); }
+/* headcount + cover charge */
+.quick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.quick-grid .btn { white-space: normal; min-height: 56px; font-weight: 800; }
+.csec { display: grid; gap: 10px; }
+.sub-title { margin: 6px 0 0; font-size: .95rem; color: var(--muted); font-weight: 900; }
+.sprog { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sprog .y2k-progress { display: inline-flex; gap: 3px; }
+.sprog .y2k-progress > i { display: block; width: 18px; height: 18px; background: #2a231f; border: 2px solid var(--line); }
+.sprog .y2k-progress > i.on { background: var(--success); border-color: var(--success); }
+.pays { display: grid; gap: 6px; }
+.pay-row { padding: 8px 10px; }
+.tcard .people { font-weight: 800; color: var(--text); }
+.tcard .people.none { color: var(--muted); }
+.cover-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 10px; margin-bottom: 10px; border: 2px solid var(--info); border-radius: 12px; background: rgba(108, 184, 255, .1); }
+.cover-strip .chip { min-height: 44px; }
+.intents { margin-bottom: 14px; display: grid; gap: 8px; }
+.tsum .row-card { border: 0; padding: 0; }
+
+/* guest test table */
+.hub-mini { display: inline-flex; align-items: center; min-height: 36px; padding: 0 8px; margin-left: -6px; border-radius: 8px; border: 2px solid var(--line); color: var(--muted); font-weight: 800; font-size: .8rem; text-decoration: none; }
+.hub-mini:hover { color: var(--text); border-color: var(--accent); }
+.hub-row-mini { min-height: 44px; justify-items: start; }
+.tag.tst { color: #1a0503; background: #ff9ad0; border-color: #ff9ad0; }
+.tno .n.tst { font-size: 22px; line-height: 1.2; }
+.ocard.is-test { border-style: dashed; }
+.test-url { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.test-url code { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; padding: 8px 10px; background: var(--bg); border: 2px solid var(--line); border-radius: 10px; font-size: .85rem; }
+.test-url .btn { flex: 0 0 auto; }
+
+/* payment alerts */
+.pw-wrap { position: sticky; top: calc(var(--toph, 65px) + var(--nagh, 0px)); z-index: 39; display: grid; gap: 8px; padding: 0 12px; }
+.pw-wrap:empty, .pw-wrap:not(:has(*)) { display: none; }
+.pw-dep, .pw-ok { display: grid; gap: 8px; }
+.pw-dep:empty, .pw-ok:empty { display: none; }
+.pw-wrap { margin-top: 8px; }
+.pw-banner { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 14px 16px; border-radius: 14px; border: 3px solid #000; box-shadow: 4px 4px 0 #000; }
+.pw-banner.dep { background: var(--accent); color: var(--accent-ink); }
+.pw-banner.dep.rec { background: #ffd166; }
+.pw-banner .pw-txt { display: grid; gap: 2px; flex: 1 1 14em; min-width: 0; }
+.pw-banner b { font-size: 1.2rem; line-height: 1.3; overflow-wrap: anywhere; }
+.pw-banner .pw-sub { font-weight: 700; font-size: .85rem; }
+.pw-btns { display: flex; gap: 8px; flex: 0 0 auto; }
+.pw-banner.dep .btn-primary { background: #1a1204; border-color: #000; color: #fff; min-height: 52px; }
+.pw-banner.dep .btn { border-color: #000; }
+.pw-banner.ok { background: var(--success); color: #04230f; position: relative; padding-right: 48px; }
+.pw-x { position: absolute; right: 8px; top: 8px; width: 36px; height: 36px; border: 2px solid #04230f; border-radius: 10px; background: transparent; color: #04230f; font-size: 1.4rem; font-weight: 900; }
+.pw-more { padding: 10px 12px; border-radius: 12px; border: 2px dashed var(--accent); background: transparent; color: var(--accent); font-weight: 800; }
+.recent-pays { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.recent-title { color: var(--muted); font-size: .9rem; }
+.recent-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.recent-chip { gap: 8px; min-height: 44px; align-items: center; }
+.pipe { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
+.pipe li { display: grid; gap: 1px; padding: 8px 12px; border-radius: 10px; border: 2px solid var(--line); }
+.pipe li.ok { border-color: var(--success); }
+.pipe li.warn { border-color: var(--accent); }
+.pipe li.ok b::before { content: "✓ "; color: var(--success); }
+.pipe li.warn b::before { content: "! "; color: var(--accent); }
+@media (max-width: 899px) { .pw-banner b { font-size: 1.05rem; } .pw-btns { width: 100%; } .pw-btns .btn { flex: 1; } }
+.pw-wrap { max-height: 38vh; overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 899px) {
+  .pw-banner { padding: 10px 12px; gap: 8px; }
+  .pw-banner b { font-size: 1rem; }
+  .pw-banner.dep .btn-primary { min-height: 46px; font-size: 1rem; }
+  .pw-banner.dep .btn { min-height: 46px; }
+  .pw-banner.ok { padding-right: 46px; }
+}
+.pipe li.none { border-color: var(--line); color: var(--muted); }
+.pipe li.none b { color: var(--muted); }
+
+/* untrusted names (SMS / payer) are always shown inside a chip so they cannot read as the app's own sentence */
+.name-chip { display: inline-block; max-width: 14em; vertical-align: bottom; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 .45em; margin: 0 .1em; border: 2px solid currentColor; border-radius: 6px; background: rgba(255, 255, 255, .55); font-weight: 800; unicode-bidi: isolate; }
+.ocard.dep.pick { outline: 3px solid var(--accent); outline-offset: 3px; }
+.dlg .warnline { font-weight: 800; color: var(--danger); }
+.dlg .guess { margin: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-weight: 700; }
+.dlg .guess s { font-size: 1.1rem; color: var(--danger); text-decoration-thickness: 3px; }
+.dlg .guess span { font-size: .85rem; color: var(--muted); }
+.dlg .err { margin: 0; min-height: 1.2em; color: var(--danger); font-weight: 700; }

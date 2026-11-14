@@ -3,7 +3,7 @@
   'use strict';
   var SC = window.SC, h = SC.h, A = SC.audio;
 
-  var NAMES = { order: '주문음', call: '호출음', wait: '대기음', kitchen: '주방음' };
+  var NAMES = { order: '주문음', call: '호출음', wait: '대기음', kitchen: '주방음', deposit: '입금 문자음', paid: '입금 확인음' };
 
   function row(title, sub, control) {
     return h('div', { class: 'al-row' }, h('div', { class: 'al-txt' }, h('b', null, title), sub ? h('span', { class: 'muted' }, sub) : null), control);
@@ -24,7 +24,7 @@
       var vols = h('div', { class: 'al-seg', role: 'group', 'aria-label': '볼륨' }, SC.VOL_LABELS.map(function (l, i) {
         return h('button', { class: 'btn', type: 'button', 'aria-pressed': SC.prefs.get('vol') === i ? 'true' : 'false', onclick: function () { A.setVol(i); A.beep(kinds[0]); build(); } }, l);
       }));
-      var tests = h('div', { class: 'al-seg' }, kinds.map(function (k) {
+      var tests = h('div', { class: 'al-seg' }, kinds.concat(['deposit', 'paid']).map(function (k) {
         return h('button', { class: 'btn', type: 'button', onclick: function () { if (!A.unlocked) A.unlock(); A.beep(k); SC.flash(); } }, NAMES[k] + ' 테스트');
       }));
       var notifOn = SC.prefs.get('notify') && !notifWhy && Notification.permission === 'granted';
@@ -37,6 +37,9 @@
           SC.notif.enable().then(function (ok) { if (!ok) SC.toast(SC.notif.reason() || '알림 권한이 허용되지 않았어요.', 'error'); build(); });
         }, !!notifWhy)),
         notifOn ? h('div', { class: 'al-seg' }, h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { SC.notif.show('알림 테스트', '이렇게 표시돼요', 'test', true); } }, '화면 알림 테스트')) : null,
+        row('입금 문자 도착 알림', '은행 입금 문자가 오면 소리와 화면 알림 (배너는 항상 떠요)', toggle(!!SC.prefs.get('alertDeposit'), function () { SC.prefs.set('alertDeposit', !SC.prefs.get('alertDeposit')); build(); })),
+        row('입금 확인 알림', '주문이 입금 확인되면 초록 알림과 소리 (자동 · 다른 기기 포함)', toggle(!!SC.prefs.get('alertPaid'), function () { SC.prefs.set('alertPaid', !SC.prefs.get('alertPaid')); build(); })),
+        kinds.indexOf('kitchen') >= 0 ? row('입금 확인된 주문만 보기', '켜면 입금이 확인된 주문만 조리 목록에 보여요 (기본: 꺼짐)', toggle(!!SC.prefs.get('kPaidOnly'), function () { SC.prefs.set('kPaidOnly', !SC.prefs.get('kPaidOnly')); build(); if (SC.onPrefsChanged) SC.onPrefsChanged(); })) : null,
         row('화면 켜 두기', wakeWhy || '이 화면이 보이는 동안 화면이 꺼지지 않게 해요', toggle(SC.prefs.get('wake') && !wakeWhy, function () {
           SC.prefs.set('wake', !SC.prefs.get('wake')); SC.wake.sync(); build();
         }, !!wakeWhy)),

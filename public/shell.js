@@ -10,10 +10,18 @@
     { id: 'qr', label: 'QR 인쇄', href: '/staff/qr', hint: '테이블 QR 카드 인쇄 · 저장' },
     { id: 'board', label: '전광판', href: '/board', hint: '게임 랭킹 화면', blank: true },
     { id: 'wait', label: '대기 화면', href: '/wait', hint: '입구 대기 등록 화면', blank: true },
+    { id: 'test', label: '손님 화면 테스트', href: '/staff#test', hint: '실제 매출에 섞이지 않는 연습용 손님 화면', blank: true, test: true },
   ];
+  // Test guest URL: set by the staff page from state.testTable.url. Until it is known (kitchen / QR pages) the entry opens the staff 테스트 panel.
+  SC.testUrl = null;
+  SC.setTestUrl = function (u) {
+    SC.testUrl = u ? (/^https?:\/\//.test(u) ? u : location.origin + u) : null;
+    document.querySelectorAll('a[data-test-link]').forEach(function (a) { a.href = SC.testUrl || BASE + '/staff#test'; });
+  };
   function linkEl(l, cur, cls, withHint) {
     var lbl = h('span', { class: 'lbl' }, l.label);
-    var a = h('a', { class: cls, href: BASE + l.href }, lbl);
+    var a = h('a', { class: cls, href: l.test && SC.testUrl ? SC.testUrl : BASE + l.href }, lbl);
+    if (l.test) a.setAttribute('data-test-link', '1');
     if (l.blank) { a.target = '_blank'; a.rel = 'noopener'; lbl.appendChild(h('span', { class: 'ext', 'aria-hidden': 'true' }, ' ↗')); lbl.appendChild(h('span', { class: 'vh' }, ' (새 창)')); }
     if (withHint) a.appendChild(h('span', { class: 'hint' }, l.hint));
     if (l.id === cur) a.setAttribute('aria-current', 'page');
@@ -27,11 +35,12 @@
   // opts: { page: 'staff'|'kitchen'|'qr', label: '스태프', kinds: ['order',...], onLogout: fn }
   SC.shell = function (opts) {
     var conn = SC.connIndicator();
-    var nav = h('nav', { class: 'hub', 'aria-label': '바로가기' }, LINKS.map(function (l) { return linkEl(l, opts.page, 'hub-link'); }));
+    function testCfg(cls) { return h('a', { class: cls, href: BASE + '/staff#test', 'aria-label': '손님 화면 테스트 설정' }, '설정'); }
+    var nav = h('nav', { class: 'hub', 'aria-label': '바로가기' }, LINKS.reduce(function (acc, l) { acc.push(linkEl(l, opts.page, 'hub-link')); if (l.test) acc.push(testCfg('hub-mini')); return acc; }, []));
     var sheet = h('dialog', { class: 'dlg hub-sheet', 'aria-label': '바로가기' });
     sheet.appendChild(h('div', { class: 'dlg-body' },
       h('h2', { class: 'dlg-title' }, '바로가기'),
-      h('nav', { class: 'hub-list', 'aria-label': '바로가기 (메뉴)' }, LINKS.map(function (l) { return linkEl(l, opts.page, 'hub-row', true); })),
+      h('nav', { class: 'hub-list', 'aria-label': '바로가기 (메뉴)' }, LINKS.reduce(function (acc, l) { acc.push(linkEl(l, opts.page, 'hub-row', true)); if (l.test) acc.push(testCfg('hub-row hub-row-mini')); return acc; }, [])),
       h('div', { class: 'dlg-actions' }, h('button', { class: 'btn', type: 'button', onclick: function () { sheet.close(); } }, '닫기'))));
     sheet.addEventListener('click', function (e) { if (e.target === sheet) sheet.close(); });
     document.body.appendChild(sheet);

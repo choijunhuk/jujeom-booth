@@ -16,13 +16,16 @@
   <header id="hd" class="y2k-title gtitle">
     <i class="y2k-ico" aria-hidden="true"></i>
     <h1 id="tno" class="y2k-title-t">COMHERE.exe</h1>
+    <span id="tm" class="tmode" hidden>테스트 모드</span>
     <button id="mute" class="gmute" data-a="mute" aria-label="알림음 끄기" aria-pressed="false"><svg class="y2k-i" aria-hidden="true"><use href="__BASE__/static/brand/icons.svg#i-bell"/></svg></button>
     <span class="y2k-title-btns" aria-hidden="true"><span class="y2k-tb">_</span><span class="y2k-tb">&#9633;</span><span class="y2k-tb">&times;</span></span>
   </header>
-  <div class="y2k-menubar" id="mbar"><span id="mb" class="y2k-badge" hidden></span><span id="conn" class="conn" hidden>재연결 중…</span><span id="mbt" class="mbt">C:\COMHERE\</span></div>
+  <div class="y2k-menubar" id="mbar"><span id="mb" class="y2k-badge" hidden></span><span id="pty" class="pty" hidden></span><span id="conn" class="conn" hidden>재연결 중…</span><span id="mbt" class="mbt">C:\COMHERE\</span></div>
+  <div id="tstrip" class="tstrip" role="note" hidden>연습용 화면이에요. 여기서 한 주문은 실제 매출에 들어가지 않아요.</div>
   <div id="banner" class="gbanner" role="status" hidden></div>
   <button id="notice" class="y2k-marquee gnotice" data-a="notice" hidden></button>
   <main id="main" class="y2k-body gmain"><section id="panel" aria-live="polite"><div class="y2k-term"><span class="y2k-cursor">접속 중… ATDT 01410</span></div></section></main>
+  <div id="stat" class="y2k-status gstat" hidden><span id="st1"></span><span id="st2"></span></div>
 </div>
 <button id="cartbar" class="y2k-btn y2k-btn--primary cartbar" data-a="cart" hidden></button>
 <nav id="tabs" class="y2k-taskbar gtask" aria-label="메뉴 탭">
