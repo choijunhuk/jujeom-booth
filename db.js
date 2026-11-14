@@ -1700,7 +1700,6 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   // Trust follows money. The headcount counts for coupons fully only when STAFF set / confirmed it or it came from the waitlist (headcountTrusted). A guest-entered headcount counts as
   // min(people, shares really PAID on a live per-person cover order), never below 1; per-table / waived / no cover / nothing paid = 1. Evaluated at issue time from current values.
   const livePersonCover = (tid, seat) => { const o = coverOrderOf(tid, seat); return o && o.status !== 'cancelled' && o.cover_mode === 'per_person' ? o : null; };
-  const perPersonCover = (tid, seat) => !!livePersonCover(tid, seat);
   const headcountTrusted = (tid, seat) => { const r = seatRow(tid, seat); return !!r && r.people != null && (r.set_by === 'staff' || r.set_by === 'waitlist'); };
   const headcountCounted = (tid, seat) => {
     const r = seatRow(tid, seat);
@@ -1738,7 +1737,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const seatCouponView = (tid, seat) => ({ headcountTrusted: headcountTrusted(tid, seat), headcountCounted: headcountCounted(tid, seat), couponLimits: all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => { const l = seatLimitOf(r, tid, seat); return { rewardId: r.id, limit: l.limit, limitSource: l.source }; }) });
   function rewardsView(tableId, seat, device) {
     if (tableId == null) return listRewards(); // staff: every reward incl. inactive, with live counts
-    const trusted = headcountTrusted(tableId, seat); const counted = headcountCounted(tableId, seat); const unpaid = unpaidCoverShares(tableId, seat);
+    const trusted = headcountTrusted(tableId, seat); const counted = headcountCounted(tableId, seat); const unpaid = unpaidCoverShares(tableId, seat); const people = seatRow(tableId, seat)?.people ?? 0;
     return all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => {
       const sl = seatLimitOf(r, tableId, seat); const why = blockedBy(r, tableId, seat, device);
       return {
@@ -1748,7 +1747,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         deviceIssued: deviceIssuedOf(r.id, device), deviceLimit: tableId === 0 ? 0 : r.per_device, canEarn: !why, ...(why ? { blockedBy: why } : {}),
         seatCap: sl.source === 'people' ? r.per_seat_cap : null,
         headcountTrusted: trusted, headcountCounted: counted,
-        moreWithHeadcount: sl.source === 'people' && r.per_seat_cap > counted && !trusted && unpaid > 0 && !blockedBy(r, tableId, seat, device, true), // paying more cover shares raises the limit (a live per-person cover with unpaid shares)
+        moreWithHeadcount: sl.source === 'people' && r.per_seat_cap > counted && !trusted && unpaid > 0 && people > counted && !blockedBy(r, tableId, seat, device, true), // paying the unpaid cover shares would raise the limit (a party of 1 is already at the floor of 1)
         moreWithStaffConfirm: sl.source === 'people' && r.per_seat_cap > 1 && !trusted && unpaid === 0 && !blockedBy(r, tableId, seat, device, true), // only staff confirming the headcount would raise the limit
       };
     });

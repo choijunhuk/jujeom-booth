@@ -7856,6 +7856,16 @@ test('L1 per-seat "people" limit counts only a TRUSTED headcount: guest-entered 
   }, { env: KENV });
 });
 
+test('L7 the pay-more hint is honest: a party of 1 with an unpaid cover is already at the limit of 1, so no hint; a party of 2 gets it', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const P = await kReward(s, { label: '인원', perSeat: undefined, stock: 100 });
+    await coverOn(s); // per person
+    const hint = async (n, people) => { const g = await guestWithDevice(srv); const seat = (await kSnap(g, tk[n - 1])).table.seat; assert.equal((await g.post(`/api/t/${tk[n - 1]}/party`, { people, seat })).status, 200); const x = (await kSnap(g, tk[n - 1])).rewards.find((r) => r.id === P.id); return [x.seatLimit, x.moreWithHeadcount]; };
+    assert.deepEqual(await hint(1, 1), [1, false]);
+    assert.deepEqual(await hint(2, 2), [1, true]);
+  }, { env: KENV });
+});
+
 test('L2 maybe_already_handled and duplicate are sticky: a blocked notice never becomes one-tap later (reviewer: table cleared, a new order with the same name and amount)', async () => {
   const d = await depositSetup();
   try {
