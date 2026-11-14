@@ -3,31 +3,39 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#14110f">
-<title>주점 부스</title>
-<link rel="icon" href="data:,">
+<meta name="theme-color" content="#008080">
+<title>COMHERE</title>
+<link rel="icon" href="__BASE__/static/brand/coms-logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="__BASE__/static/brand/brand.css">
 <link rel="stylesheet" href="__BASE__/static/guest.css">
 <script src="__BASE__/static/base.js"></script>
 <script src="__BASE__/static/notify.js"></script>
 </head>
-<body>
-<header id="hd">
-  <h1 id="tno" class="tno">&nbsp;</h1>
-  <div class="hside"><button id="mute" class="mute" data-a="mute" aria-label="알림음 끄기" aria-pressed="false">&#128276;</button><div class="hr"><span id="mb" class="mbadge" hidden></span><span id="conn" class="conn" hidden><i></i>재연결 중</span></div></div>
-</header>
-<div id="banner" class="banner" role="status" hidden></div>
-<main id="main"><section id="panel" aria-live="polite"><p class="empty">불러오는 중…</p></section></main>
-<button id="cartbar" class="cartbar" data-a="cart" hidden></button>
-<nav id="tabs" class="tabs" aria-label="메뉴 탭">
-  <button data-a="tab" data-v="menu" aria-label="메뉴"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14M5 9h14M5 14h9M5 19h6"/></svg><span>메뉴</span></button>
-  <button data-a="tab" data-v="orders" aria-label="주문현황"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/></svg><span>주문현황</span><b class="bdg" id="b-orders" hidden></b></button>
-  <button data-a="tab" data-v="game" aria-label="게임"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8l1 6a5 5 0 0 1-3 4v6H10v-6a5 5 0 0 1-3-4z"/></svg><span>게임</span></button>
-  <button data-a="tab" data-v="coupon" aria-label="쿠폰"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8a2 2 0 0 0 0 4v0a2 2 0 0 1 0 4v1h18v-1a2 2 0 0 1 0-4v0a2 2 0 0 0 0-4V7H3zM14 7v10"/></svg><span>쿠폰</span><b class="bdg" id="b-coupon" hidden></b></button>
+<body class="y2k-desktop">
+<div id="app" class="y2k-window gwin">
+  <header id="hd" class="y2k-title gtitle">
+    <i class="y2k-ico" aria-hidden="true"></i>
+    <h1 id="tno" class="y2k-title-t">COMHERE.exe</h1>
+    <button id="mute" class="gmute" data-a="mute" aria-label="알림음 끄기" aria-pressed="false"><svg class="y2k-i" aria-hidden="true"><use href="__BASE__/static/brand/icons.svg#i-bell"/></svg></button>
+    <span class="y2k-title-btns" aria-hidden="true"><span class="y2k-tb">_</span><span class="y2k-tb">&#9633;</span><span class="y2k-tb">&times;</span></span>
+  </header>
+  <div class="y2k-menubar" id="mbar"><span id="mb" class="y2k-badge" hidden></span><span id="conn" class="conn" hidden>재연결 중…</span><span id="mbt" class="mbt">C:\COMHERE\</span></div>
+  <div id="banner" class="gbanner" role="status" hidden></div>
+  <button id="notice" class="y2k-marquee gnotice" data-a="notice" hidden></button>
+  <main id="main" class="y2k-body gmain"><section id="panel" aria-live="polite"><div class="y2k-term"><span class="y2k-cursor">접속 중… ATDT 01410</span></div></section></main>
+</div>
+<button id="cartbar" class="y2k-btn y2k-btn--primary cartbar" data-a="cart" hidden></button>
+<nav id="tabs" class="y2k-taskbar gtask" aria-label="메뉴 탭">
+  <button class="y2k-btn y2k-start" data-a="start" aria-label="시작: 테이블 정보"><i class="y2k-ico" aria-hidden="true"></i><span>시작</span></button>
+  <button class="y2k-btn" data-a="tab" data-v="menu" aria-label="메뉴"><svg class="y2k-i" aria-hidden="true"><use href="__BASE__/static/brand/icons.svg#i-folder"/></svg><span>메뉴</span></button>
+  <button class="y2k-btn" data-a="tab" data-v="orders" aria-label="주문현황"><svg class="y2k-i" aria-hidden="true"><use href="__BASE__/static/brand/icons.svg#i-floppy"/></svg><span>주문현황</span><b class="y2k-badge y2k-badge--hot bdg" id="b-orders" hidden></b></button>
+  <button class="y2k-btn" data-a="tab" data-v="game" aria-label="게임"><svg class="y2k-i" aria-hidden="true"><use href="__BASE__/static/brand/icons.svg#i-bug"/></svg><span>게임</span></button>
+  <button class="y2k-btn" data-a="tab" data-v="coupon" aria-label="쿠폰"><svg class="y2k-i" aria-hidden="true"><use href="__BASE__/static/brand/icons.svg#i-ticket"/></svg><span>쿠폰</span><b class="y2k-badge y2k-badge--hot bdg" id="b-coupon" hidden></b></button>
 </nav>
 <div id="sheet-root"></div>
 <div id="game-root"></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
-<noscript><p style="padding:24px;color:#f5efe6">이 페이지는 자바스크립트가 필요해요.</p></noscript>
+<noscript><p style="padding:24px;color:#fff">이 페이지는 자바스크립트가 필요해요.</p></noscript>
 <script src="__BASE__/static/guest.js"></script>
 </body>
 </html>

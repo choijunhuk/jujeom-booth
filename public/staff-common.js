@@ -185,10 +185,7 @@
   var lastHint = 0;
   A.beep = function (kind) {
     if (!prefs.sound) return false;
-    if (!A.ctx || !A.unlocked) {
-      if (Date.now() - lastHint > 20000) { lastHint = Date.now(); SC.toast('소리가 꺼져 있어요. 화면을 한 번 눌러 주세요.', 'error', 6000); }
-      return false;
-    }
+    if (!A.ctx || !A.unlocked) return false; // the unlock strip (SC.audioStrip) is the single prompt for this
     try {
       if (A.ctx.state === 'suspended') A.ctx.resume();
       var t = A.ctx.currentTime + 0.02, peak = VOLS[prefs.vol] != null ? VOLS[prefs.vol] : VOLS[1];
@@ -367,7 +364,7 @@
     if (btn.disabled) return Promise.resolve();
     btn.disabled = true; btn.classList.add('busy');
     return Promise.resolve().then(fn).then(function (r) { if (okMsg) SC.toast(okMsg, 'ok'); return r; },
-      function (e) { SC.toast(e.message, 'error'); })
+      function (e) { SC.toast(SC.errText ? SC.errText(e) : e.message, 'error'); })
       .then(function (r) { btn.disabled = false; btn.classList.remove('busy'); return r; });
   };
 })();

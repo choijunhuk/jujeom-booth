@@ -97,7 +97,7 @@
     try { var c = JSON.parse(lsGet(cartKey()) || 'null'); if (c && c.items) cart = { items: c.items, note: c.note || '', coupon: c.coupon || '' }; } catch (e) {}
   }
   function fatal(title, msg) {
-    document.body.innerHTML = '<div class="fatal"><h2>' + esc(title) + '</h2><p>' + esc(msg) + '</p></div>';
+    document.body.innerHTML = '<div class="y2k-window" style="margin:16px 8px"><div class="y2k-title"><i class="y2k-ico"></i><span class="y2k-title-t">COMHERE.exe</span></div><div class="y2k-body fatal"><h2>' + esc(title) + '</h2><p>' + esc(msg) + '</p></div></div>';
   }
 
   /* ---------- sheets ---------- */
@@ -106,7 +106,7 @@
     closeSheet(true);
     sheetKind = kind; sheetOpener = document.activeElement;
     var root = $('#sheet-root');
-    root.innerHTML = '<div class="sheet-bk" data-a="bk"><div class="sheet" role="dialog" aria-modal="true" aria-label="' + esc(kind) + '" tabindex="-1"><button class="sx" data-a="sclose" aria-label="닫기">&times;</button>' + html + '</div></div>';
+    root.innerHTML = '<div class="sheet-bk" data-a="bk"><div class="sheet" role="dialog" aria-modal="true" aria-label="' + esc(kind) + '" tabindex="-1"><div class="y2k-title"><i class="y2k-ico" aria-hidden="true"></i><span class="y2k-title-t">' + esc(kind) + '</span><button class="sx" data-a="sclose" aria-label="닫기">&times;</button></div><div class="sbody">' + html + '</div></div></div>';
     root.firstChild._onClose = onClose;
     var sh = $('.sheet', root); sh.focus();
     return sh;
@@ -126,7 +126,9 @@
     if (!prev) { loadCart(); loadPend(); if (pend) netFailed = true; }
     else if (prev.table.seat !== d.table.seat) {
       lsSet('jb:cart:' + TOKEN + ':' + prev.table.seat, null); lsSet('jb:pend:' + TOKEN + ':' + prev.table.seat, null);
-      if (clearedSeat === prev.table.seat) clearedSeat = null; else onCleared(true);
+      if (d.table.seat < prev.table.seat) {   // staff undid a clear: the old seat is back
+        cart = { items: {}, note: '', coupon: '' }; pend = null; loadCart(); loadPend(); closeSheet(true); closeGame(); toast('직원이 테이블을 이전 상태로 되돌렸어요');
+      } else if (clearedSeat === prev.table.seat) clearedSeat = null; else onCleared(true);
     }
     else detectChanges(prev, d);
     if (S.menu.categories.indexOf(cat) < 0) cat = '전체';
@@ -149,10 +151,14 @@
         else if (o.status === 'served') alertUser('served', '주문하신 메뉴가 나갔어요 (' + o.id + '번 주문)', 'order-' + o.id + '-served');
         else if (o.status === 'cancelled' && !selfCancel[o.id]) alertUser('warn', o.id + '번 주문이 취소됐어요', 'order-' + o.id + '-cancelled');
       }
+      if (o.status !== 'cancelled' && (q.total !== o.total || itemsSig(q) !== itemsSig(o))) alertUser('info', '직원이 주문을 수정했어요 (' + o.id + '번 주문, 금액 ' + won(o.total) + ')', 'order-' + o.id + '-edit');
       if (!q.paid && o.paid && o.status !== 'cancelled') alertUser('info', '입금이 확인됐어요 (' + o.id + '번 주문)', 'order-' + o.id + '-paid');
     });
+    var dm = {}; d.orders.forEach(function (o) { dm[o.id] = 1; });
+    p.orders.forEach(function (o) { if (!dm[o.id] && o.status !== 'cancelled') alertUser('info', o.id + '번 주문이 이 테이블에서 빠졌어요 (직원이 옮겼을 수 있어요)', 'order-' + o.id + '-gone'); });
+    d.orders.forEach(function (o) { if (!pm[o.id]) alertUser('info', '주문 목록이 바뀌었어요 (' + o.id + '번 주문)', 'order-' + o.id + '-new'); });
     d.coupons.forEach(function (c) {
-      if (!have[c.code] && c.status === 'issued') alertUser('coupon', c.source === 'hour' ? '1등 상품 쿠폰이 도착했어요' : '쿠폰이 도착했어요', 'coupon-' + c.code);
+      if (!have[c.code] && c.status === 'issued') alertUser('coupon', c.source === 'hour' ? '1등 상품 쿠폰이 도착했어요' : c.source === 'staff' ? '직원이 쿠폰을 보냈어요' : '쿠폰이 도착했어요', 'coupon-' + c.code);
     });
     if (p.orderingOpen && !d.orderingOpen) alertUser('warn', '주문이 마감됐어요', 'ordering');
     if (!p.orderingOpen && d.orderingOpen) alertUser('info', '주문을 다시 받아요!', 'ordering');
@@ -172,6 +178,10 @@
       if (!m[id]) { gone.push(pm[id] ? pm[id].name : '메뉴'); delete cart.items[id]; ch = true; }
       else if (pm[id] && pm[id].price !== m[id].price) repriced = true;
     });
+    Object.keys(cart.items).forEach(function (id) {
+      var mx = maxQty(m[id]);
+      if (cart.items[id] > mx) { if (mx > 0) cart.items[id] = mx; else delete cart.items[id]; ch = true; toast(m[id].name + ' 재고가 ' + mx + '개뿐이라 수량을 줄였어요'); }
+    });
     if (gone.length) toast('메뉴에서 사라진 항목을 장바구니에서 뺐어요: ' + gone.join(', '));
     else if (repriced) toast('장바구니 메뉴의 가격이 바뀌었어요. 금액을 확인해 주세요');
     if (cart.coupon) {
@@ -180,6 +190,9 @@
     }
     if (ch) saveCart();
   }
+  function dueOf(o) { return o.balanceDue != null ? o.balanceDue : o.total; }
+  function itemsSig(o) { return JSON.stringify((o.items || []).map(function (i) { return [i.id, i.qty, i.unitPrice, !!i.service]; })); }
+  function maxQty(it) { return it && it.stockLeft != null ? Math.max(0, Math.min(20, it.stockLeft)) : 20; }
   function lines() {
     var m = menuMap();
     return Object.keys(cart.items).map(function (id) { return { id: id, it: m[id], qty: cart.items[id], soldOut: !!m[id].soldOut }; });
@@ -199,7 +212,7 @@
     lastMemberCheck = Date.now();
     return api('/member').then(function (r) {
       if (!r.ok) return;
-      var was = isMember(); M = r.data; if (!was && isMember() && !manual) toast('COMS 회원 할인이 적용돼요');
+      var was = isMember(), had = !!M; M = r.data; if (had && !was && isMember() && !manual) toast('COMS 회원 할인이 적용돼요');
       if (manual) toast(isMember() ? 'COMS 회원으로 확인됐어요' : '아직 로그인이 확인되지 않았어요. 로그인 후 다시 확인해 주세요');
       render();
     }, function () { if (manual) toast('네트워크 오류예요. 다시 눌러 주세요.'); });
@@ -212,6 +225,8 @@
     return { n: n, sub: sub, raw: raw, sup: sup, mem: mem, disc: disc, total: Math.max(0, sub - mem - disc) };
   }
   function setQty(id, q) {
+    var it = S && menuMap()[id], mx = maxQty(it);
+    if (q > mx) { if (it && it.stockLeft != null) toast(it.name + '은(는) ' + it.stockLeft + '개만 남았어요'); q = mx; }
     q = Math.max(0, Math.min(20, q));
     if (q) cart.items[id] = q; else delete cart.items[id];
     dropPend(); saveCart(); render();
@@ -220,14 +235,23 @@
   /* ---------- render ---------- */
   function render() {
     if (!S) return;
-    $('#tno').innerHTML = '<b>' + S.table.number + '</b>번 테이블';
+    $('#tno').textContent = 'COMHERE.exe — ' + S.table.number + '번 테이블';
+    document.title = 'COMHERE · ' + S.table.number + '번 테이블';
+    var nt = $('#notice'), nn = S.notice && S.notice.text ? S.notice : null, nsig = nn ? nn.level + '|' + nn.text : '';
+    nt.hidden = !nn;
+    if (nn && nt.dataset.sig !== nsig) {
+      nt.dataset.sig = nsig; nt.className = 'y2k-marquee gnotice' + (nn.level === 'warn' ? ' warn' : '');
+      nt.innerHTML = (nn.level === 'warn' ? '<svg class="y2k-i" aria-hidden="true"><use href="' + ICO + '#i-warning"/></svg>' : '') + '<span>' + esc(nn.text) + '</span>';
+      nt.setAttribute('aria-label', '공지: ' + nn.text);
+    }
+    $('#mbt').textContent = 'C:\\COMHERE\\' + ({ menu: 'MENU', orders: 'ORDERS', game: 'GAMES', coupon: 'COUPON' }[tab] || '');
     $('#conn').hidden = conn;
-    var mu = $('#mute'); mu.textContent = muted ? '\uD83D\uDD15' : '\uD83D\uDD14'; mu.setAttribute('aria-label', muted ? '알림음 켜기' : '알림음 끄기'); mu.setAttribute('aria-pressed', String(muted));
-    var mb = $('#mb'); mb.hidden = !isMember(); if (isMember()) mb.textContent = 'COMS 회원 · ' + ruleText();
+    var mu = $('#mute'); mu.setAttribute('aria-label', muted ? '알림음 켜기' : '알림음 끄기'); mu.setAttribute('aria-pressed', String(muted));
+    var mb = $('#mb'); mb.hidden = !isMember(); if (isMember()) mb.textContent = 'COMS 회원 ' + ruleText();
     var bn = $('#banner');
     bn.hidden = S.orderingOpen;
-    if (!S.orderingOpen) bn.textContent = '지금은 주문을 받지 않아요. 게임은 계속 즐길 수 있어요!';
-    Array.prototype.forEach.call(document.querySelectorAll('#tabs button'), function (b) { if (b.dataset.v === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    if (!S.orderingOpen) bn.textContent = '주문 접수가 닫혔습니다. 게임은 계속 즐길 수 있어요!';
+    Array.prototype.forEach.call(document.querySelectorAll('#tabs button[data-v]'), function (b) { if (b.dataset.v === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     var act = S.orders.filter(function (o) { return o.status === 'pending' || o.status === 'cooking'; }).length;
     var cp = S.coupons.filter(function (c) { return c.status === 'issued'; }).length;
     var bo = $('#b-orders'), bc = $('#b-coupon');
@@ -236,11 +260,12 @@
     p.innerHTML = tab === 'menu' ? htmlMenu() : tab === 'orders' ? htmlOrders() : tab === 'game' ? htmlGame() : htmlCoupons();
     var t = totals(), cb = $('#cartbar');
     cb.hidden = !(tab === 'menu' && t.n > 0);
-    if (!cb.hidden) cb.innerHTML = '<span>장바구니 ' + t.n + '개</span><span>' + won(t.total) + ' 보기</span>';
+    if (!cb.hidden) cb.innerHTML = '<span>장바구니 ' + t.n + '개</span><span>' + won(t.total) + ' &gt;&gt;</span>';
     if (sheetKind === '장바구니') renderCart();
     if (sheetKind === '송금 안내') refreshPay();
   }
 
+  var ICO = BASE + '/static/brand/icons.svg';
   var badPhoto = {};
   document.addEventListener('error', function (e) {   // img load failure: fall back to the text-only row (error does not bubble, so capture)
     var t = e.target; if (!t || t.tagName !== 'IMG' || !t.classList.contains('mph')) return;
@@ -250,22 +275,23 @@
   }, true);
   function openPhoto(id) {
     var i = menuMap()[id]; if (!i) return;
-    var act = i.soldOut ? '<span class="so-tag">품절</span>' : '<button class="btn pri big" data-a="padd" data-v="' + esc(id) + '">장바구니에 담기</button>';
+    var act = i.soldOut ? '<span class="so-tag">품절</span>' : '<button class="y2k-btn big" data-a="padd" data-v="' + esc(id) + '">장바구니에 담기</button>';
     openSheet('메뉴 사진', '<h2>' + esc(i.name) + '</h2>' + (i.photo && !badPhoto[i.photo] ? '<div class="bigph"><img class="mph" src="' + esc(BASE + i.photo) + '" alt="' + esc(i.name) + '" decoding="async"></div>' : '') +
       '<div class="pr" style="font-size:22px;margin:10px 0 4px">' + won(i.price) + '</div>' + (i.desc ? '<p class="note" style="margin:0 0 14px">' + esc(i.desc) + '</p>' : '') + act);
   }
   function htmlMenu() {
     var cats = ['전체'].concat(S.menu.categories);
-    var h = '<div class="chips" role="group" aria-label="카테고리">' + cats.map(function (c) { return '<button class="chip" data-a="cat" data-v="' + esc(c) + '" aria-pressed="' + (c === cat) + '">' + esc(c) + '</button>'; }).join('') + '</div>';
+    var h = '<div class="addr" aria-hidden="true"><svg class="y2k-i"><use href="' + ICO + '#i-folder"/></svg>C:\\COMHERE\\메뉴\\' + esc(cat === '전체' ? '' : cat) + '</div>' +
+      '<div class="y2k-tabs chips" role="group" aria-label="카테고리">' + cats.map(function (c) { return '<button class="y2k-tab" data-a="cat" data-v="' + esc(c) + '" aria-pressed="' + (c === cat) + '">' + esc(c) + '</button>'; }).join('') + '</div>';
     var items = S.menu.items.filter(function (i) { return cat === '전체' || i.cat === cat; });
-    if (!items.length) return h + '<p class="empty">메뉴가 없어요</p>';
-    return h + '<ul>' + items.map(function (i) {
+    if (!items.length) return h + '<div class="mlist"><p class="empty">메뉴가 없습니다.</p></div>';
+    return h + '<ul class="mlist">' + items.map(function (i) {
       var q = cart.items[i.id] || 0, act;
       if (i.soldOut) act = '<span class="so-tag">품절</span>';
-      else if (!q) act = '<button class="btn pri add" data-a="add" data-v="' + esc(i.id) + '" aria-label="' + esc(i.name) + ' 담기">담기</button>';
+      else if (!q) act = '<button class="y2k-btn add" data-a="add" data-v="' + esc(i.id) + '" aria-label="' + esc(i.name) + ' 담기"><svg class="y2k-i" aria-hidden="true"><use href="' + ICO + '#i-cart"/></svg>담기</button>';
       else act = '<div class="step"><button data-a="dec" data-v="' + esc(i.id) + '" aria-label="' + esc(i.name) + ' 하나 빼기">&minus;</button><output>' + q + '</output><button data-a="inc" data-v="' + esc(i.id) + '" aria-label="' + esc(i.name) + ' 하나 더">+</button></div>';
-      var ph = i.photo && !badPhoto[i.photo] ? '<button class="ph" data-a="photo" data-v="' + esc(i.id) + '" aria-label="' + esc(i.name) + ' 사진 크게 보기"><img class="mph" src="' + esc(BASE + i.photo) + '" alt="' + esc(i.name) + '" loading="lazy" decoding="async" width="96" height="72"></button>' : '';
-      return '<li class="it' + (i.soldOut ? ' so' : '') + (ph ? ' hasph' : '') + '">' + ph + '<div class="inf"><b>' + esc(i.name) + '</b>' + (i.desc ? '<p>' + esc(i.desc) + '</p>' : '') + '<span class="pr">' + won(i.price) + '</span></div>' + act + '</li>';
+      var ph = i.photo && !badPhoto[i.photo] ? '<button class="ph" data-a="photo" data-v="' + esc(i.id) + '" aria-label="' + esc(i.name) + ' 사진 크게 보기"><img class="mph" src="' + esc(BASE + i.photo) + '" alt="' + esc(i.name) + '" loading="lazy" decoding="async" width="72" height="54"></button>' : '';
+      return '<li class="it' + (i.soldOut ? ' so' : '') + (ph ? ' hasph' : '') + '">' + ph + '<div class="inf"><b>' + esc(i.name) + '</b>' + (i.desc ? '<p>' + esc(i.desc) + '</p>' : '') + '<span class="pr">' + won(i.price) + '</span>' + (i.stockLeft != null && i.stockLeft > 0 && !i.soldOut ? ' <span class="left">' + i.stockLeft + '개 남음</span>' : '') + '</div>' + act + '</li>';
     }).join('') + '</ul>';
   }
 
@@ -277,57 +303,63 @@
   function htmlOrders() {
     var live = S.orders.filter(function (o) { return o.status !== 'cancelled'; });
     var total = 0, unpaid = 0;
-    live.forEach(function (o) { total += o.total; if (!o.paid) unpaid += o.total; });
-    var h = '<div class="card sumcard"><div><div style="color:var(--muted)">테이블 합계</div><div class="big">' + won(total) + '</div></div><div style="text-align:right"><div style="color:var(--muted)">아직 안 낸 금액</div><b>' + won(unpaid) + '</b></div></div>';
+    live.forEach(function (o) { total += o.total; if (!o.paid) unpaid += dueOf(o); });
+    var h = '';
     if (notifSupported()) {
-      h += BoothNotify.permission() === 'denied' ? '<div class="card nrow"><span>알림 받기<small>브라우저에서 알림이 차단돼 있어요</small></span></div>'
-        : '<div class="card nrow"><span>알림 받기<small>화면이 꺼져 있어도 알려 드려요</small></span><button class="sw" role="switch" aria-checked="' + notifOn() + '" aria-label="알림 받기" data-a="notif"><i></i></button></div>';
+      h += BoothNotify.permission() === 'denied' ? '<div class="nrow"><span>알림 받기<small>브라우저에서 알림이 차단돼 있어요</small></span></div>'
+        : '<div class="nrow"><span>알림 받기<small>화면이 꺼져 있어도 알려 드려요</small></span><button class="sw" role="switch" aria-checked="' + notifOn() + '" aria-label="알림 받기" data-a="notif"><i></i></button></div>';
     }
-    h += '<div class="sec">직원 호출</div><div class="calls">' + S.callTypes.map(function (t) {
+    h += '<div class="toolbar" role="group" aria-label="직원 호출"><b>호출</b>' + S.callTypes.map(function (t) {
       var open = S.calls.some(function (c) { return c.type === t; }), cd = (callCd[t] || 0) > Date.now();
-      return '<button class="btn" data-a="call" data-v="' + esc(t) + '"' + (open || cd ? ' disabled' : '') + '>' + esc(t) + (open ? ' (요청됨)' : '') + '</button>';
+      return '<button class="y2k-btn" data-a="call" data-v="' + esc(t) + '"' + (open || cd ? ' disabled' : '') + '>' + esc(t) + (open ? ' (요청됨)' : '') + '</button>';
     }).join('') + '</div>';
-    h += '<div class="sec">주문 내역</div>';
-    if (!S.orders.length) return h + '<p class="empty">아직 주문이 없어요.<br>메뉴 탭에서 주문해 보세요!</p>';
+    h += '<section class="y2k-term gterm" aria-label="주문 게시판"><div class="hi">COMHERE 주문 게시판 &lt;' + S.table.number + '번 테이블&gt;</div><div class="tsum"><span>합계</span><span class="big">' + won(total) + '</span></div><div class="meta">미입금 ' + won(unpaid) + '</div><hr>';
+    if (!S.orders.length) return h + '<p>주문 내역이 없습니다.</p><p class="y2k-cursor">(C)ontinue</p><button class="y2k-btn big" style="margin-top:10px" data-a="tab" data-v="menu">메뉴 보러 가기</button></section>';
+    h += '<div class="th"><span>번호</span><span>메뉴</span><span>상태</span></div><hr>';
     return h + S.orders.map(function (o) {
       var cx = o.status === 'cancelled', idx = STEPS.indexOf(o.status);
-      var trk = cx ? '<span class="badge bad">취소됨</span>' : '<ol class="trk" aria-label="진행 상태">' + STEP_L.map(function (l, i) { return '<li class="' + (i < idx ? 'done' : i === idx ? 'cur' : '') + '">' + l + '</li>'; }).join('') + '</ol>';
-      var pay = cx ? '' : o.paid ? '<span class="badge ok">입금 확인</span>' : o.total === 0 ? '<span class="badge ok">결제 불필요</span>' : '<span class="badge warn">미입금</span>';
+      var first = o.items[0] ? o.items[0].name + (o.items.length > 1 ? ' 외 ' + (o.items.length - 1) : '') : '';
+      var stTxt = cx ? '취소됨' : STEP_L[idx];
+      var prog = cx ? '' : '<div class="y2k-progress" role="img" aria-label="진행 상태: ' + stTxt + ' (' + (idx + 1) + '/3)">' + [0, 1, 2].map(function (k) { return '<i' + (k <= idx ? ' class="on"' : '') + '></i>'; }).join('') + '</div><div class="plabels" aria-hidden="true">' + STEP_L.map(function (l, k) { return '<span' + (k === idx ? ' class="cur"' : '') + '>' + (k === idx ? '&#9650; ' : '') + l + '</span>'; }).join('') + '</div>';
+      var pay = cx ? '' : o.paid ? '<span class="tag ok">입금확인</span>' : o.total === 0 ? '<span class="tag ok">결제불필요</span>' : (o.paidAmount > 0 && dueOf(o) > 0) ? '<span class="tag warn">일부 입금</span>' : '<span class="tag warn">미입금</span>';
       var acts = '';
-      if (!cx && !o.paid && o.total > 0) acts += '<button class="btn sm" data-a="pay" data-v="' + o.id + '">송금 안내</button>';
-      if (o.status === 'pending' && !o.paid) acts += '<button class="btn sm danger" data-a="cancel" data-v="' + o.id + '">' + (cancelArm[o.id] ? '정말 취소할게요' : '주문 취소') + '</button>';
-      return '<article class="card ord' + (cx ? ' cx' : '') + '"><header><b>#' + o.id + ' <small style="color:var(--muted);font-weight:600">' + hhmm(o.createdAt) + '</small></b><span>' + (cx ? trk : pay) + '</span></header>' + (cx ? '' : trk) +
-        '<ul>' + o.items.map(function (i) { return '<li><span>' + esc(i.name) + ' x ' + i.qty + '</span><span>' + won(i.unitPrice * i.qty) + '</span></li>'; }).join('') + '</ul>' +
+      if (!cx && !o.paid && dueOf(o) > 0) acts += '<button class="y2k-btn sm" data-a="pay" data-v="' + o.id + '">송금 안내</button>';
+      if (o.status === 'pending' && !o.paid) acts += '<button class="y2k-btn y2k-btn--danger danger sm" data-a="cancel" data-v="' + o.id + '">' + (cancelArm[o.id] ? '정말 취소할게요' : '주문 취소') + '</button>';
+      return '<article class="trow' + (cx ? ' cx' : '') + '"><div class="tr1"><span class="hi">#' + o.id + '</span><span class="mn">' + esc(first) + '</span><span class="st">' + stTxt + '</span></div>' + prog +
+        '<div class="meta">' + hhmm(o.createdAt) + ' ' + pay + '</div>' +
+        '<ul class="lines">' + o.items.map(function (i) { return '<li><span>' + esc(i.name) + ' x ' + i.qty + '</span><span>' + (i.service ? '<span class="tag ok">서비스</span>' : won(i.unitPrice * i.qty)) + '</span></li>'; }).join('') + '</ul>' +
         breakdown(o) +
         '<div class="tt"><span>' + (breakdown(o) ? '결제 금액' : '합계') + '</span><span class="' + (cx ? 'del' : '') + '">' + won(o.total) + '</span></div>' +
-        (o.note ? '<div class="nt">요청: ' + esc(o.note) + '</div>' : '') + (!cx && !o.paid ? '<div class="nt">입금자명: ' + (o.depositor ? esc(o.depositor) : '없음') + ' · <button class="lnk" data-a="dep" data-v="' + o.id + '">' + (o.depositor ? '수정' : '입력') + '</button></div>' : '') + (acts ? '<div class="acts">' + acts + '</div>' : '') + '</article>';
-    }).join('');
+        (!cx && !o.paid && o.paidAmount > 0 ? '<div class="sum"><span>받은 금액</span><span>' + won(o.paidAmount) + '</span></div><div class="sum"><b>남은 금액</b><b>' + won(dueOf(o)) + '</b></div>' : '') +
+        (o.refundDue > 0 ? '<div class="meta"><span class="tag bad">환불 예정</span> ' + won(o.refundDue) + ' · 직원에게 문의해 주세요</div>' : '') +
+        (o.note ? '<div class="meta">요청: ' + esc(o.note) + '</div>' : '') + (!cx && !o.paid ? '<div class="meta">입금자명: ' + (o.depositor ? esc(o.depositor) : '없음') + ' · <button class="y2k-btn sm dep" data-a="dep" data-v="' + o.id + '">' + (o.depositor ? '수정' : '입력') + '</button></div>' : '') + (acts ? '<div class="acts">' + acts + '</div>' : '') + '</article>';
+    }).join('') + '<p class="y2k-cursor" style="margin-top:6px">&gt;</p></section>';
   }
 
   function htmlGame() {
-    var h = '<div class="nickrow"><span>' + (S.nick ? '닉네임 <b>' + esc(S.nick) + '</b>' : '게임 전에 닉네임을 정해요') + '</span><button class="btn sm" data-a="nick">' + (S.nick ? '변경' : '정하기') + '</button></div>';
-    var desc = { pour: '화면을 꾹 눌러 잔을 채우고 빨간 선에서 손을 떼요. 5잔, 넘치면 0점!', cheers: '두 잔이 부딪히는 순간 탭! 10번 건배, 가짜 감속에 속지 마세요.' };
-    ['pour', 'cheers'].forEach(function (g) {
+    var h = '<div class="nickrow"><span class="nlab" id="nlab">닉네임</span><div class="y2k-field nickval" role="textbox" aria-readonly="true" aria-labelledby="nlab">' + (S.nick ? esc(S.nick) : '<span class="ph0">아직 없어요</span>') + '</div><button class="y2k-btn sm" data-a="nick">' + (S.nick ? '변경' : '정하기') + '</button></div>';
+    h += '<div class="ggrid">';
+    gameIds().forEach(function (g) {
       var info = S.games[g]; if (!info) return;
       var best = lsGet('jb:best:' + g);
-      h += '<article class="card gc"><h3>' + esc(info.label) + '</h3><p>' + desc[g] + ' (최대 ' + info.maxScore + '점' + (best ? ', 내 최고 ' + best + '점' : '') + ')</p>';
+      h += '<article class="y2k-window gc"><div class="y2k-title"><svg class="y2k-i y2k-i--2x" aria-hidden="true"><use href="' + ICO + '#' + (GICO[g] || 'i-floppy') + '"/></svg><h3 class="y2k-title-t" style="font-size:16px">' + esc(info.label) + '.exe</h3></div><div class="y2k-body"><p>' + (GDESC[g] || '') + ' (최대 ' + info.maxScore + '점' + (best ? ', 내 최고 ' + best + '점' : '') + ')</p>';
       var rws = S.rewards.filter(function (r) { return r.game === g; }).sort(function (a, b) { return a.threshold - b.threshold; });
-      if (!rws.length) h += '<div class="rw"><span>재미로 한 판!</span><small>이 게임은 지금 보상이 없어요</small></div>';
+      if (!rws.length) h += '<div class="rw"><span>재미로 한 판!</span><small>지금은 보상이 없어요</small></div>';
       rws.forEach(function (r) {
         var st = r.got ? '<span class="badge ok">이미 받았어요</span>' : r.soldOut ? '<span class="badge bad">소진</span>' : '<span class="badge warn">받을 수 있어요</span>';
         h += '<div class="rw"><span><b>' + esc(r.label) + '</b> <small>' + r.threshold + '점 이상</small></span>' + st + '</div>';
       });
-      h += '<button class="btn pri big" data-a="play" data-v="' + g + '"' + (gameBusy ? ' disabled' : '') + '>플레이</button></article>';
+      h += '<button class="y2k-btn big" style="margin-top:6px" data-a="play" data-v="' + g + '"' + (gameBusy ? ' disabled' : '') + '>&#9654; 실행</button></div></article>';
     });
-    return h;
+    return h + '</div>';
   }
 
   function couponCard(c) {
     var used = c.status === 'used';
-    return '<article class="cp' + (used ? ' used' : '') + '"><div class="lb">' + esc(c.label) + '</div><div class="code" aria-label="쿠폰 코드 ' + esc(c.code.split('').join(' ')) + '">' + esc(c.code) + '</div><div class="hint">' + (used ? '사용 완료' : c.type === 'item' ? '직원에게 이 화면을 보여 주세요' : '주문할 때 장바구니에서 선택하세요') + '</div></article>';
+    return '<article class="y2k-window cp' + (used ? ' used' : '') + '"><div class="y2k-title"><svg class="y2k-i" aria-hidden="true"><use href="' + ICO + '#i-ticket"/></svg><span class="y2k-title-t">COUPON.dat</span></div><div class="y2k-body"><div class="lb">' + esc(c.label) + '</div><div class="code" aria-label="쿠폰 코드 ' + esc(c.code.split('').join(' ')) + '">' + esc(c.code) + '</div><div class="hint">' + (used ? '<span class="stamp">사용 완료</span>' : c.type === 'item' ? '직원에게 이 화면을 보여 주세요' : '주문할 때 장바구니에서 선택하세요') + '</div></div></article>';
   }
   function htmlCoupons() {
-    if (!S.coupons.length) return '<p class="empty">아직 받은 쿠폰이 없어요.<br>게임에서 점수를 넘기면 쿠폰이 나와요!</p><button class="btn pri big" data-a="tab" data-v="game">게임하러 가기</button>';
+    if (!S.coupons.length) return '<div class="y2k-term"><p>쿠폰이 없습니다.</p><p>게임에서 점수를 넘기면 쿠폰이 나와요!</p><p class="y2k-cursor">(C)ontinue</p></div><button class="y2k-btn big" style="margin-top:10px" data-a="tab" data-v="game">게임하러 가기</button>';
     var cs = S.coupons.slice().sort(function (a, b) { return (a.status === 'used') - (b.status === 'used') || b.createdAt - a.createdAt; });
     return cs.map(couponCard).join('');
   }
@@ -339,10 +371,10 @@
       '<label class="fld">쿠폰<select id="cc"></select></label><div class="cmp" id="ccmp" hidden></div>' +
       '<label class="fld"><span id="cdpl">입금자명</span><input id="cdp" maxlength="10" autocomplete="name" enterkeyhint="done" placeholder="예: 홍길동"></label><p class="note" style="margin:4px 0 0">보내는 분 이름과 같아야 입금이 자동 확인돼요</p>' +
       '<label class="fld">요청사항 (선택)<input id="cn" maxlength="100" placeholder="예: 덜 맵게" autocomplete="off"></label>' +
-      '<p class="note" id="cmin" hidden></p><div class="memrow" id="cnm" hidden><span id="cnmt"></span><span class="mr-btns"><a class="btn sm" href="/" target="_blank" rel="noopener noreferrer">COMS 로그인</a><button class="btn sm" data-a="mrecheck">다시 확인</button></span></div>' +
+      '<p class="note" id="cmin" hidden></p><div class="memrow" id="cnm" hidden><span id="cnmt"></span><span class="mr-btns"><a class="y2k-btn sm" href="/" target="_blank" rel="noopener noreferrer">COMS 로그인</a><button class="y2k-btn sm" data-a="mrecheck">다시 확인</button></span></div>' +
       '<div class="sum"><span>상품 금액</span><span id="cs"></span></div><div class="sum" id="cmr"><span>COMS 회원 할인</span><span id="cm"></span></div><div class="sum" id="cdr"><span>쿠폰 할인</span><span id="cd"></span></div>' +
       '<div class="sum tot"><span>결제 금액</span><span id="ct"></span></div>' +
-      '<button class="btn pri big" id="csub" data-a="submit"></button><p class="err" id="cerr" role="alert"></p>');
+      '<button class="y2k-btn y2k-btn--primary big" id="csub" data-a="submit"></button><p class="err" id="cerr" role="alert"></p>');
     var cd = $('#cdp', sh); cd.value = lsGet('jb:dep') || '';
     cd.addEventListener('input', function () { lsSet('jb:dep', cd.value.trim()); dropPend(); });
     var cn = $('#cn', sh); cn.value = cart.note;
@@ -419,13 +451,19 @@
       if (r.status >= 500) { netFailed = true; render(); cerr(msg + ' 다시 시도를 눌러 주세요 (중복 주문은 되지 않아요).'); if (sheetKind !== '장바구니') toast(msg); return; }
       dropPend();   // definitive 4xx answer: the next attempt is a new request
       if (e === 'price_changed') { priceChanged(d); return; }
-      if (e === 'sold_out') {
+      if (e === 'insufficient_stock') {
+        var its = d.items && d.items.length ? d.items : [{ id: d.id, name: '', left: d.left }];
+        its.forEach(function (i) { if (i.left > 0) cart.items[i.id] = Math.min(cart.items[i.id] || i.left, i.left); else delete cart.items[i.id]; }); saveCart();
+        var mm = menuMap();
+        msg = its.map(function (i) { var n = i.name || (mm[i.id] && mm[i.id].name) || '메뉴'; return i.left > 0 ? n + ' ' + i.left + '개만 남았어요' : n + ' 품절'; }).join(', ') + '. 장바구니를 맞췄어요. 확인 후 다시 주문해 주세요.';
+        api('').then(function (s) { if (s.ok) applyState(s.data); }, function () {});
+      } else if (e === 'sold_out') {
         (d.ids || []).forEach(function (id) { delete cart.items[id]; }); saveCart();
         msg = (d.names && d.names.length ? d.names.join(', ') : '일부 메뉴') + ' 품절! 장바구니에서 뺐어요. 확인 후 다시 주문해 주세요.';
         api('').then(function (s) { if (s.ok) applyState(s.data); }, function () {});
       } else if (e === 'closed') { S.orderingOpen = false; }
       else if (e === 'too_many_orders') msg = '이 테이블의 주문 횟수 한도에 도달했어요. 스태프에게 말씀해 주세요.';
-      else if (e === 'coupon_used' || e === 'bad_coupon' || e === 'coupon_not_discount') { cart.coupon = ''; saveCart(); }
+      else if (e === 'coupon_used' || e === 'coupon_void' || e === 'bad_coupon' || e === 'coupon_not_discount') { cart.coupon = ''; saveCart(); }
       else if (e === 'unknown_item') { (d.ids || []).forEach(function (id) { delete cart.items[id]; }); saveCart(); }
       render(); if (sheetKind === '장바구니') cerr(msg); else toast(msg);
     }, function () {
@@ -440,7 +478,7 @@
       '<h2>가격이 바뀌었어요</h2><p class="note" style="margin:-6px 0 10px">메뉴 가격이나 할인이 달라져서 주문을 보내지 않았어요. 금액을 확인해 주세요.</p>' +
       '<div class="sum"><span>이전 금액</span><span class="del">' + won(d.expectedTotal) + '</span></div>' +
       '<div class="sum tot"><span>현재 금액</span><span>' + won(d.total) + '</span></div>' +
-      '<button class="btn pri big" data-a="pconfirm">' + won(d.total) + '으로 주문하기</button><button class="btn big" style="margin-top:10px" data-a="sclose">장바구니로 돌아가기</button>',
+      '<button class="y2k-btn y2k-btn--primary big" data-a="pconfirm">' + won(d.total) + '으로 주문하기</button><button class="y2k-btn big" style="margin-top:10px" data-a="sclose">장바구니로 돌아가기</button>',
       function () { openCart(); });
     api('').then(function (r) { if (r.ok) applyState(r.data); }, function () {}); checkMember(false);
   }
@@ -467,24 +505,26 @@
   }
   function kakaoOk(u) { try { var x = new URL(u); return x.protocol === 'https:' && x.hostname === 'qr.kakaopay.com' && !x.username && !x.password && !x.port; } catch (e) { return false; } }
   function depRow(o) {
-    return '<div class="memrow"><span>' + (o.depositor ? '입금자명: <b style="color:var(--text)">' + esc(o.depositor) + '</b>' : '입금자명을 입력하면 입금 확인이 빨라요') + '</span><button class="btn sm" data-a="dep" data-v="' + o.id + '">' + (o.depositor ? '수정' : '입력') + '</button></div>';
+    return '<div class="memrow"><span>' + (o.depositor ? '입금자명: <b style="color:var(--text)">' + esc(o.depositor) + '</b>' : '입금자명을 입력하면 입금 확인이 빨라요') + '</span><button class="y2k-btn sm" data-a="dep" data-v="' + o.id + '">' + (o.depositor ? '수정' : '입력') + '</button></div>';
   }
   function payInner(o, fresh) {
     var p = S.pay || {};
-    if (o.status === 'cancelled') return '<h2>취소된 주문이에요</h2><p class="note">#' + o.id + ' 주문은 취소됐어요.</p><button class="btn big" style="margin-top:14px" data-a="sclose">확인</button>';
-    if (o.paid) return '<h2>입금이 확인됐어요</h2><div class="amt">' + won(o.total) + '</div><p class="note" style="text-align:center">' + (o.paidBy === 'auto' ? '입금이 자동으로 확인됐어요.' : '직원이 입금을 확인했어요.') + ' #' + o.id + ' 주문 준비를 시작해요.</p><button class="btn pri big" style="margin-top:14px" data-a="sclose">확인</button>';
+    if (o.status === 'cancelled') return '<h2>취소된 주문이에요</h2><p class="note">#' + o.id + ' 주문은 취소됐어요.</p><button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>';
+    if (o.paid) return '<h2>입금이 확인됐어요</h2><div class="amt">' + won(o.total) + '</div>' + (o.refundDue > 0 ? '<p class="note" style="text-align:center"><span class="tag bad">환불 예정</span> ' + won(o.refundDue) + ' · 직원에게 문의해 주세요</p>' : '') + '<p class="note" style="text-align:center">' + (o.paidBy === 'auto' ? '입금이 자동으로 확인됐어요.' : '직원이 입금을 확인했어요.') + ' #' + o.id + ' 주문 준비를 시작해요.</p><button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>';
     var h = '<h2>' + (fresh ? '주문이 접수됐어요!' : '송금 안내') + '</h2><p class="note" style="margin:-6px 0 10px">#' + o.id + ' 주문 ' + (fresh ? '· 직원이 확인하면 조리를 시작해요' : '') + '</p>';
-    if (o.total <= 0) return h + '<div class="acct">쿠폰으로 전액 할인돼서 보낼 금액이 없어요.</div><button class="btn big" style="margin-top:14px" data-a="sclose">확인</button>';
-    h += breakdown(o) + (breakdown(o) ? '<div class="note" style="text-align:center;margin:8px 0 0">결제 금액</div>' : '') + '<div class="amt">' + won(o.total) + '</div>';
+    var due = dueOf(o);
+    if (due <= 0) return h + (o.refundDue > 0 ? '<div class="acct">보낼 금액이 없어요. 환불 예정 ' + won(o.refundDue) + ' · 직원에게 문의해 주세요.</div>' : '<div class="acct">쿠폰으로 전액 할인돼서 보낼 금액이 없어요.</div>') + '<button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>';
+    var part = o.paidAmount > 0 && due > 0;
+    h += breakdown(o) + (part ? '<div class="sum"><span>받은 금액</span><span>' + won(o.paidAmount) + '</span></div>' : '') + '<div class="note" style="text-align:center;margin:8px 0 0">' + (part ? '남은 금액' : breakdown(o) ? '결제 금액' : '보낼 금액') + '</div><div class="amt">' + won(due) + '</div>';
     if (p.account) {
       h += '<div class="acct"><div class="bank">' + esc(p.bank) + ' · 예금주 ' + esc(p.holder) + '</div><div class="no">' + esc(p.account) + '</div></div>';
-      if (p.tossEnabled && MOBILE) h += '<a class="btn pri big pl" data-a="toss" data-v="' + o.id + '" href="' + esc(tossHref(p, o.total)) + '">토스로 보내기</a>';
-      if (p.kakaoPayUrl && kakaoOk(p.kakaoPayUrl)) h += '<a class="btn big pl kk" data-a="kakao" href="' + esc(p.kakaoPayUrl) + '" target="_blank" rel="noopener noreferrer">카카오페이로 보내기</a><p class="note" style="margin:4px 0 0">금액 ' + won(o.total) + '을 직접 입력해 주세요</p>';
-      h += '<div class="two"><button class="btn" data-a="copy" data-v="' + o.id + '" data-k="acct">계좌번호 복사</button><button class="btn" data-a="copy" data-v="' + o.id + '" data-k="amt">금액 복사</button></div><p class="note nextstep" id="paynext" hidden></p>';
+      if (p.tossEnabled && MOBILE) h += '<a class="y2k-btn y2k-btn--primary big pl" data-a="toss" data-v="' + o.id + '" href="' + esc(tossHref(p, due)) + '">토스로 보내기</a>';
+      if (p.kakaoPayUrl && kakaoOk(p.kakaoPayUrl)) h += '<a class="y2k-btn big pl kk" data-a="kakao" href="' + esc(p.kakaoPayUrl) + '" target="_blank" rel="noopener noreferrer">카카오페이로 보내기</a><p class="note" style="margin:4px 0 0">금액 ' + won(due) + '을 직접 입력해 주세요</p>';
+      h += '<div class="two"><button class="y2k-btn" data-a="copy" data-v="' + o.id + '" data-k="acct">계좌번호 복사</button><button class="y2k-btn" data-a="copy" data-v="' + o.id + '" data-k="amt">금액 복사</button></div><p class="note nextstep" id="paynext" hidden></p>';
     } else h += '<div class="acct">계좌 정보는 직원에게 문의해 주세요.</div>';
     h += depRow(o) + '<p class="note">송금 후 직원이 입금을 확인하면 주문현황에 "입금 확인"으로 바뀌어요.</p>';
-    if (fresh && notifSupported() && BoothNotify.permission() === 'default' && lsGet('jb:notif') !== '1') h += '<div class="memrow" id="notifOffer"><span>음식이 나오면 알려 드릴까요?</span><button class="btn sm" data-a="notif">알림 받기</button></div>';
-    return h + '<button class="btn big" style="margin-top:14px" data-a="sclose">확인</button>';
+    if (fresh && notifSupported() && BoothNotify.permission() === 'default' && lsGet('jb:notif') !== '1') h += '<div class="memrow" id="notifOffer"><span>음식이 나오면 알려 드릴까요?</span><button class="y2k-btn sm" data-a="notif">알림 받기</button></div>';
+    return h + '<button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>';
   }
   function openPay(o, fresh) {
     payId = o.id; payFresh = !!fresh; lastPayWasPaid = !!o.paid;
@@ -499,7 +539,7 @@
   }
   function openDep(o) {
     var back = sheetKind === '송금 안내' || sheetKind === '토스 앱이 열리지 않으면';
-    var sh = openSheet('입금자명', '<h2>입금자명</h2><p class="note" style="margin:-6px 0 4px">보내는 분 이름과 같아야 입금이 자동 확인돼요. (1~10자)</p><form id="df"><input class="inp" id="di" maxlength="10" autocomplete="name" enterkeyhint="done" aria-label="입금자명"><p class="err" id="de" role="alert"></p><button class="btn pri big" type="submit">저장</button></form>',
+    var sh = openSheet('입금자명', '<h2>입금자명</h2><p class="note" style="margin:-6px 0 4px">보내는 분 이름과 같아야 입금이 자동 확인돼요. (1~10자)</p><form id="df"><input class="inp" id="di" maxlength="10" autocomplete="name" enterkeyhint="done" aria-label="입금자명"><p class="err" id="de" role="alert"></p><button class="y2k-btn big" type="submit">저장</button></form>',
       function () { if (back) openPay(S.orders.filter(function (x) { return x.id === o.id; })[0] || o, false); });
     var di = $('#di', sh); di.value = o.depositor || lsGet('jb:dep') || ''; di.focus();
     $('#df', sh).addEventListener('submit', function (e) {
@@ -515,13 +555,13 @@
   function tossFallback() {
     var o = S.orders.filter(function (x) { return x.id === payId; })[0]; if (!o || o.paid) return;
     var p = S.pay || {};
-    openSheet('토스 앱이 열리지 않으면', '<h2>토스 앱이 열리지 않으면</h2><p class="note" style="margin:-6px 0 10px">아래 정보를 복사해서 은행 앱에서 직접 보내 주세요.</p><div class="acct"><div class="bank">' + esc(p.bank) + ' · 예금주 ' + esc(p.holder) + '</div><div class="no">' + esc(p.account) + '</div></div><div class="two"><button class="btn pri" data-a="copy" data-v="' + o.id + '" data-k="acct">계좌번호 복사</button><button class="btn" data-a="copy" data-v="' + o.id + '" data-k="amt">금액 복사</button></div><p class="note nextstep" id="paynext" hidden></p><button class="btn big" style="margin-top:14px" data-a="sclose">닫기</button>',
+    openSheet('토스 앱이 열리지 않으면', '<h2>토스 앱이 열리지 않으면</h2><p class="note" style="margin:-6px 0 10px">아래 정보를 복사해서 은행 앱에서 직접 보내 주세요.</p><div class="acct"><div class="bank">' + esc(p.bank) + ' · 예금주 ' + esc(p.holder) + '</div><div class="no">' + esc(p.account) + '</div></div><div class="two"><button class="y2k-btn" data-a="copy" data-v="' + o.id + '" data-k="acct">계좌번호 복사</button><button class="y2k-btn" data-a="copy" data-v="' + o.id + '" data-k="amt">금액 복사</button></div><p class="note nextstep" id="paynext" hidden></p><button class="y2k-btn big" style="margin-top:14px" data-a="sclose">닫기</button>',
       function () { openPay(S.orders.filter(function (x) { return x.id === o.id; })[0] || o, false); });
   }
   function askNick(cb) {
     var sh = openSheet('닉네임',
       '<h2>닉네임을 정해요</h2><p class="note" style="margin:-6px 0 4px">전광판 랭킹에 표시돼요. (1~10자)</p>' +
-      '<form id="nf"><input class="inp" id="ni" maxlength="10" autocomplete="off" enterkeyhint="done" placeholder="예: 맥주왕" aria-label="닉네임"><p class="err" id="ne" role="alert"></p><button class="btn pri big" type="submit">저장</button></form>');
+      '<form id="nf"><input class="inp" id="ni" maxlength="10" autocomplete="off" enterkeyhint="done" placeholder="예: 맥주왕" aria-label="닉네임"><p class="err" id="ne" role="alert"></p><button class="y2k-btn big" type="submit">저장</button></form>');
     var ni = $('#ni', sh); ni.value = S.nick || ''; ni.focus();
     $('#nf', sh).addEventListener('submit', function (e) {
       e.preventDefault();
@@ -534,7 +574,10 @@
   }
 
   /* ---------- games ---------- */
-  var MODS = { pour: 'PourGame', cheers: 'CheersGame' };
+  var MODS = { pour: 'PourGame', cheers: 'CheersGame', bug: 'BugGame', typing: 'TypingGame' };
+  var GDESC = { pour: '화면을 꾹 눌러 잔을 채우고, 빨간 선에서 손을 떼요. 5잔, 넘치면 0점!', cheers: '두 잔이 부딪히는 순간 탭! 10번 건배, 가짜 감속에 속지 마세요.', bug: '코드 속에 숨은 버그를 터치해서 잡아요. 기능(✨)은 건드리면 감점! 콤보를 이어 가요.', typing: '화면에 뜨는 명령어를 빨리 정확하게 입력해요. 상대 해커보다 먼저!' };
+  var GICO = { pour: 'i-mug', cheers: 'i-clink', bug: 'i-bug', typing: 'i-keyboard' };
+  function gameIds() { var order = ['pour', 'cheers', 'bug', 'typing'], ks = Object.keys(S.games || {}); return order.filter(function (k) { return ks.indexOf(k) >= 0; }).concat(ks.filter(function (k) { return order.indexOf(k) < 0 && MODS[k]; })); }
   function loadMod(id) {
     if (window[MODS[id]]) return Promise.resolve();
     return new Promise(function (res, rej) {
@@ -569,7 +612,7 @@
   }
   function openGame(id, play, t0) {
     var root = $('#game-root');
-    root.innerHTML = '<div class="gscr" role="dialog" aria-modal="true" aria-label="' + esc(S.games[id].label) + '"><div class="ghd"><button class="x" data-a="gexit" aria-label="게임 나가기">&times;</button><span class="gt">' + esc(S.games[id].label) + '</span></div><div class="ghost" id="ghost"></div></div>';
+    root.innerHTML = '<div class="gscr" role="dialog" aria-modal="true" aria-label="' + esc(S.games[id].label) + '"><div class="gwindow"><div class="y2k-title"><svg class="y2k-i y2k-i--2x" aria-hidden="true"><use href="' + ICO + '#' + (GICO[id] || 'i-floppy') + '"/></svg><span class="y2k-title-t">' + esc(S.games[id].label) + '.exe</span><button class="x" data-a="gexit" aria-label="게임 나가기">&times;</button></div><div class="ghost" id="ghost"></div></div></div>';
     document.body.style.overflow = 'hidden'; gamePlaying = true;
     var mod = window[MODS[id]], my = ++gameSeq;
     var h = mod.mount($('#ghost'), {
@@ -589,7 +632,7 @@
     o.innerHTML = html; return o;
   }
   function finishPlay(id, play, score, t0, my) {
-    overlay('<div class="spin" role="status"></div><div class="msg">점수를 집계하고 있어요…</div>');
+    overlay('<div class="spin y2k-progress" role="status" aria-label="집계 중"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="msg">점수를 집계하고 있어요…</div>');
     var min = (S.games[id] && S.games[id].minDurationMs) || 0;
     var wait = Math.max(0, min + 600 - (performance.now() - t0));   // never finish earlier than the server minimum
     setTimeout(function () { if (my === gameSeq) sendFinish(id, play, score, my); }, wait);
@@ -600,11 +643,11 @@
       if (r.ok) return showResult(id, score, r.data);
       if (r.data.error === 'already_finished') { closeGame(); toast('이미 기록된 판이에요. 쿠폰 탭을 확인해 보세요'); poll(); return; }
       if (r.data.error === 'no_play') { closeGame(); toast('자리가 바뀌어 이번 판은 기록되지 않았어요'); return; }
-      overlay('<div class="msg">' + esc(r.data.message || '점수를 저장하지 못했어요') + '</div><div class="row"><button class="btn pri" data-a="gagain" data-v="' + id + '">다시 도전</button><button class="btn" data-a="gexit">닫기</button></div>');
+      overlay('<div class="msg">' + esc(r.data.message || '점수를 저장하지 못했어요') + '</div><div class="row"><button class="y2k-btn" data-a="gagain" data-v="' + id + '">다시 도전</button><button class="y2k-btn" data-a="gexit">닫기</button></div>');
     }, function () {
       if (my !== gameSeq || !$('#ghost')) return;
-      overlay('<div class="msg">네트워크가 불안정해요</div><p class="note">점수는 그대로예요. 다시 시도해 주세요.</p><div class="row"><button class="btn pri" id="rt">다시 시도</button><button class="btn" data-a="gexit">닫기</button></div>');
-      $('#rt').onclick = function () { overlay('<div class="spin"></div>'); sendFinish(id, play, score, my); };
+      overlay('<div class="msg">네트워크가 불안정해요</div><p class="note">점수는 그대로예요. 다시 시도해 주세요.</p><div class="row"><button class="y2k-btn" id="rt">다시 시도</button><button class="y2k-btn" data-a="gexit">닫기</button></div>');
+      $('#rt').onclick = function () { overlay('<div class="spin y2k-progress" role="status"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>'); sendFinish(id, play, score, my); };
     });
   }
   function showResult(id, score, d) {
@@ -622,7 +665,7 @@
       if (r.result === 'already_got') h += '<p class="note">' + esc(r.label) + '은(는) 이미 받았어요</p>';
       else if (r.result === 'sold_out') h += '<p class="note">' + esc(r.label) + ' 재고가 모두 소진됐어요</p>';
     });
-    h += '<div class="row"><button class="btn pri" data-a="gagain" data-v="' + id + '">다시 도전</button>' + (issued.length ? '<button class="btn" data-a="gcoupon">쿠폰 보기</button>' : '<button class="btn" data-a="gexit">닫기</button>') + '</div>';
+    h += '<div class="row"><button class="y2k-btn" data-a="gagain" data-v="' + id + '">다시 도전</button>' + (issued.length ? '<button class="y2k-btn" data-a="gcoupon">쿠폰 보기</button>' : '<button class="y2k-btn" data-a="gexit">닫기</button>') + '</div>';
     var o = overlay(h);
     if (issued.length && o && !REDUCED) {
       var cf = document.createElement('div'); cf.className = 'conf'; var cols = ['#ffb020', '#ff6e3d', '#4cd08a', '#f5efe6', '#ff5a4d'];
@@ -649,9 +692,9 @@
       case 'copy': {
         var co = S.orders.filter(function (x) { return x.id === Number(v); })[0], isAcct = b.dataset.k === 'acct';
         if (!co) break;
-        copyText(isAcct ? digits((S.pay || {}).account) : String(co.total)).then(function (ok) {
+        copyText(isAcct ? digits((S.pay || {}).account) : String(dueOf(co))).then(function (ok) {
           toast(ok ? (isAcct ? '계좌번호를 복사했어요' : '금액을 복사했어요') : '복사하지 못했어요. 길게 눌러 직접 복사해 주세요');
-          var nx = $('#paynext'); if (ok && isAcct && nx) { nx.textContent = '은행 앱에서 붙여넣고 ' + won(co.total) + '을 보내 주세요'; nx.hidden = false; }
+          var nx = $('#paynext'); if (ok && isAcct && nx) { nx.textContent = '은행 앱에서 붙여넣고 ' + won(dueOf(co)) + '을 보내 주세요'; nx.hidden = false; }
         }); break;
       }
       case 'toss': setTimeout(function () { if (!document.hidden) tossFallback(); }, 1500); break;   // link navigates by itself; still visible = app not installed
@@ -675,6 +718,8 @@
       case 'reload': location.reload(); break;
       case 'photo': openPhoto(v); break;
       case 'padd': setQty(v, (cart.items[v] || 0) + 1); closeSheet(); toast('장바구니에 담았어요'); break;
+      case 'start': openSheet('시작', '<div class="y2k-lockup glogo"><i class="y2k-ico" aria-hidden="true"></i><span class="y2k-chrome-text">COMHERE</span></div><div class="y2k-term" style="margin-top:8px"><div class="hi">COMHERE.exe</div><div>' + S.table.number + '번 테이블</div><div>주문 접수: ' + (S.orderingOpen ? '열림' : '닫힘') + '</div><div class="dim">1999 밤샘 코딩 아지트</div></div><p class="note" style="margin-top:10px">메뉴에서 담고, 주문현황에서 송금하고, 게임으로 쿠폰을 받아 보세요. 쿠폰 코드는 직원에게 보여 주면 돼요.</p><button class="y2k-btn big" style="margin-top:10px" data-a="sclose">확인</button>'); break;
+      case 'notice': if (S.notice && S.notice.text) openSheet('공지', '<p style="font-size:18px;line-height:1.5;white-space:pre-wrap">' + esc(S.notice.text) + '</p><button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>'); break;
       case 'mute': muted = !muted; lsSet('jb:mute', muted ? '1' : '0'); render(); if (!muted) chime('info'); break;
       case 'notif': toggleNotif(); break;
       case 'mrecheck': checkMember(true); break;
@@ -724,10 +769,10 @@
   function boot() {
     api('').then(function (r) {
       if (r.status === 404) return fatal('QR 코드를 다시 찍어 주세요', '이 테이블 주소를 찾을 수 없어요. 테이블에 붙은 QR을 다시 찍어 주세요.');
-      if (!r.ok) { $('#panel').innerHTML = '<p class="empty">' + esc(r.data.message || '불러오지 못했어요') + '</p><button class="btn pri big" data-a="reload">다시 불러오기</button>'; return; }
+      if (!r.ok) { $('#panel').innerHTML = '<p class="empty">' + esc(r.data.message || '불러오지 못했어요') + '</p><button class="y2k-btn big" data-a="reload">다시 불러오기</button>'; return; }
       applyState(r.data); connect(); checkMember(false); resumePend();
     }, function () {
-      $('#panel').innerHTML = '<p class="empty">연결할 수 없어요.<br>와이파이나 데이터를 확인해 주세요.</p><button class="btn pri big" data-a="reload">다시 불러오기</button>';
+      $('#panel').innerHTML = '<p class="empty">연결할 수 없어요.<br>와이파이나 데이터를 확인해 주세요.</p><button class="y2k-btn big" data-a="reload">다시 불러오기</button>';
     });
   }
   boot();

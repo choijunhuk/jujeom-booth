@@ -12,19 +12,41 @@
   function q() { return '?secret=' + encodeURIComponent(entry.secret); }
   var LBL = { live: '실시간', poll: '5초마다 갱신', off: '연결 끊김', wait: '연결 중' };
 
+  // staff notice strip (server payload only), shown above every state of the page
+  var ICON = BASE_ICON();
+  function BASE_ICON() { return SC.BASE + '/static/brand/icons.svg'; }
+  var noticeEl = h('div', { class: 'wnotice', role: 'status', hidden: true });
+  main.parentNode.insertBefore(noticeEl, main);
+  function setNotice(n) {
+    if (!n || !n.text) { noticeEl.hidden = true; noticeEl.replaceChildren(); return; }
+    var ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg'), use = document.createElementNS(ns, 'use');
+    svg.setAttribute('class', 'y2k-i'); svg.setAttribute('aria-hidden', 'true');
+    use.setAttribute('href', ICON + (n.level === 'warn' ? '#i-warning' : '#i-info')); svg.appendChild(use);
+    noticeEl.dataset.level = n.level === 'warn' ? 'warn' : 'info';
+    noticeEl.replaceChildren(svg, h('span', null, n.text));
+    noticeEl.hidden = false;
+  }
   function stopLive() { clearInterval(infoTimer); if (live) { live.close(); live = null; } clearInterval(vibTimer); calledEl.hidden = true; connEl.hidden = true; }
+
+  // Win98-style window used for every state of this page
+  function win(title, kids, cls) {
+    return h('section', { class: 'y2k-window ' + (cls || '') },
+      h('div', { class: 'y2k-title' }, h('span', { class: 'y2k-ico', 'aria-hidden': 'true', style: 'width:16px;height:18px;color:#fff' }), h('h2', { class: 'y2k-title-t', style: 'margin:0;font:inherit' }, title),
+        h('span', { class: 'y2k-title-btns', 'aria-hidden': 'true' }, h('span', { class: 'y2k-tb' }, '_'), h('span', { class: 'y2k-tb' }, '×'))),
+      h('div', { class: 'y2k-body w-body' }, kids));
+  }
 
   // ---------- form ----------
   function showForm(msg) {
     stopLive(); entry = null; prevStatus = null;
-    document.title = '대기 등록 · 주점 부스';
-    var nick = h('input', { class: 'field', type: 'text', maxlength: '10', autocomplete: 'nickname', required: true, 'aria-label': '대기 이름', placeholder: '예: 맥주왕 (최대 10자)' });
-    var out = h('output', { 'aria-live': 'polite' }, String(size), h('small', null, '명'));
+    document.title = '대기 등록 · COMHERE';
+    var nick = h('input', { class: 'y2k-field', type: 'text', maxlength: '10', autocomplete: 'nickname', required: true, 'aria-label': '대기 이름', placeholder: '예: 맥주왕 (최대 10자)' });
+    var out = h('output', { class: 'lcd-sm', 'aria-live': 'polite' }, String(size), h('small', null, '명'));
     var err = h('p', { class: 'err', role: 'alert' }, msg || '');
     function setSize(n) { size = Math.max(1, Math.min(10, n)); out.firstChild.textContent = String(size); minus.disabled = size <= 1; plus.disabled = size >= 10; }
-    var minus = h('button', { class: 'btn', type: 'button', 'aria-label': '인원 줄이기', onclick: function () { setSize(size - 1); } }, '−');
-    var plus = h('button', { class: 'btn', type: 'button', 'aria-label': '인원 늘리기', onclick: function () { setSize(size + 1); } }, '+');
-    var go = h('button', { class: 'btn btn-primary btn-block', type: 'submit' }, '대기 등록');
+    var minus = h('button', { class: 'y2k-btn', type: 'button', 'aria-label': '인원 줄이기', onclick: function () { setSize(size - 1); } }, '−');
+    var plus = h('button', { class: 'y2k-btn', type: 'button', 'aria-label': '인원 늘리기', onclick: function () { setSize(size + 1); } }, '+');
+    var go = h('button', { class: 'y2k-btn y2k-btn--primary', type: 'submit' }, '대기 등록');
     var form = h('form', { class: 'w-form', onsubmit: function (e) {
       e.preventDefault();
       var name = nick.value.trim();
@@ -42,9 +64,10 @@
       err, go,
       h('p', { class: 'hint' }, '전화번호는 받지 않아요. 자리가 나면 이 화면이 바뀌고 진동으로 알려 드려요. 화면을 켜 두거나, 이 페이지를 닫지 말아 주세요.'));
     var notice = h('p', { class: 'w-sub', role: 'status', 'aria-live': 'polite' }, '대기를 등록하면 순번을 알려 드려요.');
-    main.replaceChildren(h('h1', { class: 'w-h' }, '자리가 날 때까지', h('br'), '여기서 기다려 주세요'), notice, form);
+    main.replaceChildren(win('대기 등록 - COMHERE.exe', [h('h1', { class: 'w-h' }, '자리가 날 때까지', h('br'), '여기서 기다려 주세요'), notice, form]));
     setSize(size);
     function applyInfo(i) {
+      setNotice(i.notice);
       form.hidden = !i.open;
       notice.className = i.open ? 'w-sub' : 'err';
       notice.textContent = i.open ? '현재 ' + (i.waitingTotal || 0) + '팀 대기 중' : '지금은 대기 접수를 받지 않아요';
@@ -58,7 +81,7 @@
   var T = {};
   function buildTicket() {
     T.pos = h('div', { class: 'pos' }); T.ahead = h('div', { class: 'ahead' }); T.who = h('div', { class: 'who' }); T.total = h('div', { class: 'k' });
-    var cancel = h('button', { class: 'btn btn-danger btn-block', type: 'button', onclick: function () {
+    var cancel = h('button', { class: 'y2k-btn y2k-btn--danger', type: 'button', onclick: function () {
       SC.confirm({ title: '대기를 취소할까요?', message: '취소하면 순번이 사라져요.', ok: '대기 취소', cancel: '계속 기다리기', danger: true }).then(function (ok) {
         if (!ok) return;
         SC.act(cancel, function () { return SC.api('/api/wait/' + entry.id + '/cancel', { body: { secret: entry.secret }, noAuthRedirect: true }).then(null, function (e) { if (e.status !== 404) throw e; }).then(function () { end('cancelled'); }); });
@@ -67,10 +90,11 @@
     T.cancel = cancel;
     main.replaceChildren(
       SC.audioStrip(),
-      h('div', { class: 'ticket' }, h('div', { class: 'k' }, '내 순번'), T.pos, T.ahead, h('div', { class: 'perf' }), T.who, T.total),
-      h('p', { class: 'hint' }, '순서가 되면 이 화면이 "입장하세요"로 바뀌어요. 다른 앱을 쓰다 와도 괜찮지만 이 페이지는 닫지 말아 주세요.'),
-      alertControls(),
-      cancel);
+      win('내 순번 - COMHERE.exe', [
+        h('div', { class: 'ticket' }, h('div', { class: 'k' }, '내 순번'), h('div', { class: 'lcd' }, T.pos), T.ahead, h('div', { class: 'perf' }), T.who, T.total),
+        h('p', { class: 'hint' }, '순서가 되면 이 화면이 "입장하세요"로 바뀌어요. 다른 앱을 쓰다 와도 괜찮지만 이 페이지는 닫지 말아 주세요.'),
+        alertControls(),
+        cancel]));
   }
 
   // Optional helpers for the guest: notification on call, keep screen on. Permission is requested only on tap.
@@ -79,13 +103,13 @@
     function draw() {
       var nWhy = SC.notif.reason(), wWhy = SC.wake.reason();
       var nOn = SC.prefs.get('notify') && !nWhy && Notification.permission === 'granted';
-      var nb = h('button', { class: 'btn btn-block', type: 'button', 'aria-pressed': nOn ? 'true' : 'false', onclick: function () {
+      var nb = h('button', { class: 'y2k-btn', type: 'button', 'aria-pressed': nOn ? 'true' : 'false', onclick: function () {
         if (nOn) { SC.prefs.set('notify', false); draw(); return; }
         SC.notif.enable().then(function (ok) { if (!ok) SC.toast(SC.notif.reason() || '알림이 허용되지 않았어요.', 'error'); draw(); });
       } }, nOn ? '✓ 순서가 되면 알림 받기 (켜짐)' : '순서가 되면 알림 받기');
       if (nWhy) nb.disabled = true;
       var wOn = SC.prefs.get('wake') && !wWhy;
-      var wb = h('button', { class: 'btn btn-block', type: 'button', 'aria-pressed': wOn ? 'true' : 'false', onclick: function () {
+      var wb = h('button', { class: 'y2k-btn', type: 'button', 'aria-pressed': wOn ? 'true' : 'false', onclick: function () {
         SC.prefs.set('wake', !wOn); SC.wake.sync(); draw();
       } }, wOn ? '✓ 화면 켜 두기 (켜짐)' : '화면 켜 두기');
       if (wWhy) wb.disabled = true;
@@ -98,23 +122,40 @@
   function render(d) {
     if (d.status === 'seated' || d.status === 'cancelled') { end(d.status); return; }
     if (!T.pos || !main.contains(T.pos)) buildTicket();
-    var called = d.status === 'called';
+    var called = d.status === 'called', noshow = d.status === 'noshow';
+    setNotice(d.notice);
     if (called) {
       if (prevStatus !== 'called') { showCalled(d); notifyCalled(); }
+    } else if (noshow) {
+      clearInterval(vibTimer); // stop the chime; the ticket stays
+      if (prevStatus !== 'noshow') showNoshow(d);
     } else { calledEl.hidden = true; clearInterval(vibTimer); }
     prevStatus = d.status;
     T.pos.replaceChildren(String(d.position != null ? d.position : '-'), h('small', null, '번째'));
     T.ahead.textContent = d.ahead != null ? (d.ahead === 0 ? '다음이 내 차례예요!' : '내 앞에 ' + d.ahead + '팀') : '';
     T.who.textContent = d.nick + ' · ' + d.size + '명';
     T.total.textContent = d.waitingTotal != null ? '현재 대기 ' + d.waitingTotal + '팀' : '';
-    document.title = called ? '입장하세요! · 주점 부스' : (d.position ? '(' + d.position + '번째) 대기 · 주점 부스' : '대기 · 주점 부스');
+    document.title = noshow ? '호출 시간이 지났어요 · COMHERE' : called ? '입장하세요! · COMHERE' : (d.position ? '(' + d.position + '번째) 대기 · COMHERE' : '대기 · COMHERE');
   }
   function showCalled(d) {
-    calledEl.replaceChildren(
-      h('h1', { id: 'called-h' }, '입장하세요'),
-      h('p', null, d.nick + ' · ' + d.size + '명'),
-      h('p', null, '입구 스태프에게 이 화면을 보여 주세요'),
-      h('button', { class: 'btn', type: 'button', onclick: function () { calledEl.hidden = true; clearInterval(vibTimer); try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) { /* ignore */ } } }, '확인했어요'));
+    SC.fill(calledEl, h('section', { class: 'y2k-window called-win', role: 'alertdialog', 'aria-labelledby': 'called-h' },
+      h('div', { class: 'y2k-title called-title' }, h('span', { class: 'y2k-ico', 'aria-hidden': 'true', style: 'width:16px;height:18px;color:#fff' }), h('span', { class: 'y2k-title-t' }, 'COMHERE.exe - 호출')),
+      h('div', { class: 'y2k-body called-body' },
+        h('h1', { id: 'called-h', class: 'called-h' }, '입장하세요'),
+        h('p', { class: 'called-who' }, d.nick + ' · ' + d.size + '명'),
+        h('p', { class: 'called-note' }, '입구 스태프에게 이 화면을 보여 주세요'),
+        h('button', { class: 'y2k-btn y2k-btn--primary', type: 'button', onclick: function () { calledEl.hidden = true; clearInterval(vibTimer); try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) { /* ignore */ } } }, '확인했어요'))));
+    calledEl.hidden = false;
+  }
+  function showNoshow(d) {
+    SC.fill(calledEl, h('section', { class: 'y2k-window called-win', role: 'alertdialog', 'aria-labelledby': 'called-h' },
+      h('div', { class: 'y2k-title' }, h('span', { class: 'y2k-ico', 'aria-hidden': 'true', style: 'width:16px;height:18px;color:#fff' }), h('span', { class: 'y2k-title-t' }, 'COMHERE.exe - 호출 시간 지남')),
+      h('div', { class: 'y2k-body called-body' },
+        h('h1', { id: 'called-h', class: 'called-h noshow-h' }, '호출 시간이 지났어요'),
+        h('p', { class: 'called-who' }, d.nick + ' · ' + d.size + '명'),
+        h('p', { class: 'called-note' }, '입구 스태프에게 말씀해 주세요'),
+        d.canRecall ? h('p', { class: 'called-note' }, '스태프가 한 번 더 불러 드릴 수 있어요. 순번(대기표)은 그대로 남아 있어요.') : h('p', { class: 'called-note' }, '대기표는 그대로 남아 있어요.'),
+        h('button', { class: 'y2k-btn y2k-btn--primary', type: 'button', onclick: function () { calledEl.hidden = true; } }, '확인했어요'))));
     calledEl.hidden = false;
   }
   // Chime (+ vibration) every 4 s for up to 2 minutes, or until the guest taps 확인.
@@ -132,16 +173,16 @@
   }
   function end(kind) {
     stopLive(); save(null); entry = null; T = {}; SC.wake.sync();
-    document.title = '주점 부스';
-    main.replaceChildren(h('div', { class: 'end' },
+    document.title = 'COMHERE';
+    main.replaceChildren(win(kind === 'seated' ? '입장 - COMHERE.exe' : '대기 취소 - COMHERE.exe', h('div', { class: 'end' },
       h('h1', { class: 'w-h' }, kind === 'seated' ? '즐거운 시간 보내세요!' : '대기가 취소됐어요'),
       h('p', { class: 'w-sub' }, kind === 'seated' ? '입장해 주셔서 고마워요. 테이블 QR을 찍으면 주문과 게임을 할 수 있어요.' : '다시 기다리고 싶다면 새로 등록해 주세요.'),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: function () { showForm(); } }, '새로 대기 등록')));
+      h('button', { class: 'y2k-btn y2k-btn--primary', type: 'button', onclick: function () { showForm(); } }, '새로 대기 등록'))));
   }
 
   function start() {
     prevStatus = null; T = {}; SC.wake.sync();
-    main.replaceChildren(h('p', { class: 'w-sub' }, '순번을 불러오는 중…'));
+    main.replaceChildren(win('순번 불러오는 중 - COMHERE.exe', h('p', { class: 'w-sub' }, '순번을 불러오는 중…')));
     live = SC.live({
       sse: '/api/wait/' + entry.id + '/events' + q(), poll: '/api/wait/' + entry.id + q(),
       onState: render,

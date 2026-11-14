@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "gradient-text",
+        "value": "*",
+        "files": [
+          "public/brand/brand.css"
+        ],
+        "createdAt": "2026-11-13T18:32:35.189Z",
+        "reason": "assistant decided: .y2k-chrome-text is the COMHERE logo wordmark only (chrome lettering is the Y2K brand mark); used once in the start dialog lockup, never on headings, body text or metrics"
+      }
+    ]
+  }
+}

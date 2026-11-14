@@ -1,15 +1,12 @@
-/* Public scoreboard. Live via SSE (polling fallback). All text via textContent. */
+/* COMHERE scoreboard. Live via SSE (polling fallback). All text via textContent. */
 (function () {
   'use strict';
   var SC = window.SC, h = SC.h, $ = SC.$;
   var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
   var state = null;
-  var TITLE = (new URLSearchParams(location.search).get('title') || '').slice(0, 24) || '주점 부스';
   var nf = function (n) { return Number(n || 0).toLocaleString('ko-KR'); };
 
-  $('#title').textContent = TITLE;
-  $('#title').appendChild(h('span', null, ' · 게임 랭킹'));
-  document.title = '전광판 · ' + TITLE;
+  document.title = '전광판 · COMHERE';
 
   // ---------- FLIP list ----------
   function FlipList(el, mk, fill) { this.el = el; this.mk = mk; this.fill = fill; this.rows = new Map(); }
@@ -34,41 +31,33 @@
       if (f != null && Math.abs(f - now) > 1) {
         r.el.style.transition = 'none'; r.el.style.transform = 'translateY(' + (f - now) + 'px)';
         void r.el.offsetWidth;
-        r.el.style.transition = 'transform .75s cubic-bezier(.2,.8,.2,1)'; r.el.style.transform = '';
+        r.el.style.transition = 'transform .75s steps(8)'; r.el.style.transform = '';
       }
     });
   };
 
-  // hour list rows: rank, "N번", nick, score
-  function hourRow() { return h('li', { class: 'rk' }, h('span', { class: 'pos' }), h('span', { class: 'tb' }), h('span', { class: 'nk' }), h('span', { class: 'sc' })); }
-  function fillHour(el, r) {
+  // row: rank | table | nickname | score
+  function rowEl() { return h('li', { class: 'rk' }, h('span', { class: 'pos' }), h('span', { class: 'tb' }), h('span', { class: 'nk' }), h('span', { class: 'sc' })); }
+  function fillRow(el, r) {
     el.dataset.r = r.rank;
     el.children[0].textContent = r.rank;
     el.children[1].textContent = r.table + '번';
     el.children[2].textContent = r.nick || '';
-    el.children[3].textContent = nf(r.score) + '점';
+    el.children[3].textContent = nf(r.score);
     return r.score;
   }
-  var hourList = new FlipList($('#hour-list'), hourRow, fillHour);
-
-  function gameRow() { return h('li', { class: 'rk' }, h('span', { class: 'pos' }), h('span', { class: 'who2' }, h('span', { class: 'tb' }), h('span', { class: 'nk' })), h('span', { class: 'sc' })); }
-  function fillGame(el, r, i) {
-    el.dataset.r = i + 1;
-    el.children[0].textContent = i + 1;
-    el.children[1].children[0].textContent = r.table + '번';
-    el.children[1].children[1].textContent = r.nick || '';
-    el.children[2].textContent = nf(r.score) + '점';
-    return r.score;
-  }
-  var gamePanels = {}; // id -> {panel, title, list}
+  var hourList = new FlipList($('#hour-list'), rowEl, fillRow);
+  var gamePanels = {};
   function ensureGame(id, label) {
     var g = gamePanels[id];
     if (!g) {
-      var title = h('span'), ol = h('ol', { class: 'rklist' });
-      g = gamePanels[id] = { el: h('section', { class: 'panel', 'aria-label': label }, h('h2', { class: 'p-title' }, title, h('b', null, 'BEST')), ol), title: title, list: new FlipList(ol, gameRow, fillGame), empty: h('li', { class: 'rk', style: 'justify-content:center;grid-template-columns:1fr;color:var(--muted);font-weight:800;height:4.4rem' }, '첫 도전자를 기다려요') };
+      var gname = h('span', { class: 'gname' }), ol = h('ol', { class: 'rklist' });
+      var top = h('span', { class: 'top10' }, 'TOP 10');
+      g = gamePanels[id] = { el: h('section', { class: 'game', 'aria-label': label }, h('h2', null, top, gname), ol), gname: gname, top: top, list: new FlipList(ol, rowEl, fillRow), empty: h('li', { class: 'none' }, '첫 도전자를 기다려요') };
       $('#games').appendChild(g.el);
     }
-    g.title.textContent = label;
+    g.gname.textContent = label;
+    g.top.textContent = 'TOP ' + (document.getElementById('games').classList.contains('grid4') ? 5 : 10);
     return g;
   }
 
@@ -79,15 +68,15 @@
     var swapped = leadKey !== null && leadKey !== key;
     leadKey = key;
     if (!top) {
-      lead.replaceChildren(h('p', { class: 'nobody' }, '아직 도전자가 없어요', h('br'), h('span', null, '지금 1등이 되어 보세요!')));
+      SC.fill(lead, h('p', { class: 'nobody' }, '아직 도전자가 없어요', h('br'), h('span', null, '지금 1등이 되어 보세요!')));
     } else {
-      lead.replaceChildren(h('div', { class: 'lead' + (swapped && !reduce ? ' swap' : '') },
+      SC.fill(lead, h('div', { class: 'lead' + (swapped && !reduce ? ' swap' : '') },
         h('div', { class: 'no', text: top.table }),
-        h('div', { class: 'who' }, h('span', { class: 'tb' }, '번 테이블'), top.nick ? h('span', { class: 'nk' }, top.nick) : null, h('span', { class: 'pt' }, h('b', null, nf(top.score)), ' 점'))));
+        h('div', { class: 'who' }, h('span', { class: 'tb' }, '번 테이블'), top.nick ? h('span', { class: 'nk' }, top.nick) : null, h('span', { class: 'pt' }, h('b', null, nf(top.score)), '점'))));
     }
     var pz = $('#prize');
-    pz.hidden = !(hourly && hourly.label);
-    if (!pz.hidden) pz.replaceChildren('이 시간 1등 테이블 상품 · ', h('b', null, hourly.label));
+    pz.hidden = !(hourly && hourly.label && hourly.enabled !== false);
+    if (!pz.hidden) SC.fill(pz, '이 시간 1등 테이블 상품 · ', hourly.label);
   }
 
   function render() {
@@ -95,21 +84,27 @@
     if (!d) return;
     var rank = (d.hour && d.hour.ranking) || [];
     renderLead(rank[0] || null, d.hourly);
-    $('#hour-range').textContent = d.hour ? SC.clock(d.hour.start) + ' ~ ' + SC.clock(d.hour.end) : '';
-    // hero shows rank 1; the list shows ranks 2..5
+    $('#hour-range').textContent = d.hour ? SC.clock(d.hour.start) + '~' + SC.clock(d.hour.end) : '';
     hourList.update(rank.slice(1, 5).map(function (r, i) { return Object.assign({}, r, { rank: i + 2 }); }), function (r) { return r.table; });
 
-    var ids = Object.keys(d.gameInfo || d.games || {});
-    $('#games').style.setProperty('--n', Math.max(1, Math.min(ids.length, 3)));
+    var all = Object.keys(d.gameInfo || d.games || {});
+    // two panels fit a projector: the games that have scores (fall back to the first two)
+    var withScores = all.filter(function (id) { return d.games && d.games[id] && d.games[id].length; });
+    var four = withScores.length > 2;
+    var ids = (withScores.length ? withScores : all).slice(0, four ? 4 : 2);
+    var topN = four ? 5 : 10;
+    $('#games').classList.toggle('grid4', four);
+    Object.keys(gamePanels).forEach(function (id) { if (ids.indexOf(id) < 0) { gamePanels[id].el.remove(); delete gamePanels[id]; } });
     ids.forEach(function (id) {
       var g = ensureGame(id, (d.gameInfo && d.gameInfo[id] && d.gameInfo[id].label) || id);
-      var list = (d.games && d.games[id] || []).slice(0, 5);
+      var list = (d.games && d.games[id] || []).slice(0, topN).map(function (r, i) { return Object.assign({}, r, { rank: r.rank || i + 1 }); });
       g.list.update(list, function (r) { return r.table; });
       if (!list.length) { if (!g.empty.parentNode) g.list.el.appendChild(g.empty); } else if (g.empty.parentNode) g.empty.remove();
     });
     var pw = d.prevHour && d.prevHour.winner;
-    SC.fill($('#prev'), pw ? ['지난 시간 1등 ', h('b', null, pw.table + '번 테이블' + (pw.nick ? ' · ' + pw.nick : '')), d.prevHour.awarded ? ' · 시상 완료' : ''] : []);
+    SC.fill($('#prev'), pw ? ['지난 시간 1등 ', h('b', null, pw.table + '번 테이블' + (pw.nick ? ' · ' + pw.nick : '')), d.prevHour.awarded ? ' · 시상 완료' : ''] : null);
     renderStock();
+    renderTicker();
   }
 
   function renderStock() {
@@ -117,10 +112,35 @@
     var box = $('#stock');
     box.hidden = !(list && list.length);
     if (box.hidden) return;
-    SC.fill(box, h('span', { class: 'lab' }, '남은 보상'), list.map(function (r) {
-      var left = r.remaining != null ? r.remaining : r.stock;
-      return h('span', { class: 'pill' + (left <= 0 ? ' out' : '') }, r.label + ' ', left <= 0 ? '소진' : h('b', null, left + '개'));
+    SC.fill(box, list.map(function (r) {
+      var left = r.remaining != null ? r.remaining : r.stock, total = r.stock || 0;
+      var on = total > 0 ? Math.min(10, Math.ceil(left / total * 10)) : 0;
+      var segs = []; for (var i = 0; i < 10; i++) segs.push(h('i', { class: i < on ? 'on' : '' }));
+      return h('div', { class: 'stock' + (left <= 0 ? ' out' : left / (total || 1) <= 0.2 ? ' low' : '') },
+        h('span', { class: 'lab' }, r.label), h('span', { class: 'y2k-progress', role: 'img', 'aria-label': r.label + ' 남은 수량 ' + left + '개' }, segs), h('span', { class: 'n' }, left <= 0 ? '소진' : left + '개'));
     }));
+  }
+
+  // ticker: staff notice (server payload only, never the URL) + call to action + the hourly prize
+  var lastTicker = '', warnIcon = null;
+  function renderTicker() {
+    var parts = [], n = state && state.notice && state.notice.text ? state.notice : null;
+    if (n) parts.push(n.text);
+    parts.push('QR 찍고 도전!');
+    parts.push('테이블 QR로 게임하고 쿠폰을 받아 가세요');
+    if (state && state.hourly && state.hourly.label && state.hourly.enabled !== false) parts.push('매 정시 1등 테이블에게 ' + state.hourly.label);
+    var t = (n && n.level === 'warn' ? 'W|' : '') + parts.join('   ★   ');
+    if (t !== lastTicker) {
+      lastTicker = t;
+      var tk = $('#ticker');
+      tk.textContent = parts.join('   ★   ');
+      if (n && n.level === 'warn') {
+        var ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg'), use = document.createElementNS(ns, 'use');
+        svg.setAttribute('class', 'y2k-i b-warn'); svg.setAttribute('aria-hidden', 'true');
+        use.setAttribute('href', SC.BASE + '/static/brand/icons.svg#i-warning'); svg.appendChild(use);
+        tk.insertBefore(svg, tk.firstChild);
+      }
+    }
   }
 
   // ---------- clock ----------

@@ -38,7 +38,7 @@
     var menuBtn = h('button', { class: 'btn hub-btn', type: 'button', 'aria-haspopup': 'dialog', onclick: function () { sheet.showModal(); } }, '메뉴');
     var logout = h('button', { class: 'btn', type: 'button', onclick: function () { if (opts.onLogout) opts.onLogout(); } }, '로그아웃');
     var el = h('header', { class: 'top noprint' },
-      h('h1', null, '주점 부스 ', h('span', null, opts.label)),
+      h('h1', { class: 'y2k-lockup top-brand' }, h('span', { class: 'y2k-ico', 'aria-hidden': 'true' }), h('span', { class: 'y2k-chrome-text' }, 'COMHERE'), h('span', { class: 'brand-page y2k-pixel' }, opts.label)),
       nav, menuBtn, conn, SC.soundButton(), SC.alarmMenu(opts.kinds || ['order']), logout);
     return { el: el, conn: conn };
   };
@@ -91,14 +91,17 @@
       });
     }
     input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
-    '123456789'.split('').forEach(function (d) { pad.appendChild(h('button', { class: 'btn', type: 'button', 'aria-label': d, onclick: function () { press(d); } }, d)); });
-    pad.appendChild(h('button', { class: 'btn fn', type: 'button', 'aria-label': '한 자리 지우기', onclick: back }, '지움'));
-    pad.appendChild(h('button', { class: 'btn', type: 'button', 'aria-label': '0', onclick: function () { press('0'); } }, '0'));
-    pad.appendChild(h('button', { class: 'btn btn-primary fn', type: 'button', onclick: submit }, '입장'));
-    SC.fill(root, h('form', { class: 'login-card', onsubmit: function (e) { e.preventDefault(); submit(); } },
-      h('h1', { class: 'login-title' }, '주점 부스 ', h('span', null, '스태프')),
-      where ? h('p', { class: 'muted' }, where + ' 화면은 스태프 PIN이 필요해요.') : null,
-      input, msg, pad));
+    '123456789'.split('').forEach(function (d) { pad.appendChild(h('button', { class: 'y2k-btn', type: 'button', 'aria-label': d, onclick: function () { press(d); } }, d)); });
+    pad.appendChild(h('button', { class: 'y2k-btn fn', type: 'button', 'aria-label': '한 자리 지우기', onclick: back }, '지움'));
+    pad.appendChild(h('button', { class: 'y2k-btn', type: 'button', 'aria-label': '0', onclick: function () { press('0'); } }, '0'));
+    pad.appendChild(h('button', { class: 'y2k-btn y2k-btn--primary fn', type: 'button', onclick: submit }, '입장'));
+    input.className = 'y2k-field pin-in';
+    SC.fill(root, h('form', { class: 'login-card y2k-window', onsubmit: function (e) { e.preventDefault(); submit(); } },
+      h('div', { class: 'y2k-title' }, h('span', { class: 'y2k-ico', 'aria-hidden': 'true', style: 'width:16px;height:18px;color:#fff' }), h('h1', { class: 'y2k-title-t', style: 'margin:0;font:inherit' }, 'COMHERE.exe - 스태프 로그인'),
+        h('span', { class: 'y2k-title-btns', 'aria-hidden': 'true' }, h('span', { class: 'y2k-tb' }, '_'), h('span', { class: 'y2k-tb' }, '×'))),
+      h('div', { class: 'login-body' },
+        where ? h('p', { class: 'login-where' }, where + ' 화면은 스태프 PIN이 필요해요.') : null,
+        input, msg, pad)));
     if (matchMedia('(pointer: fine)').matches) input.focus();
   };
 
@@ -112,7 +115,7 @@
     function enter() { login.hidden = true; opts.app.hidden = false; active = true; opts.start(); }
     function showLogin() {
       if (active) { active = false; if (opts.stop) opts.stop(); }
-      opts.app.hidden = true; login.hidden = false; document.title = '로그인 · 주점 부스';
+      opts.app.hidden = true; login.hidden = false; document.title = '로그인 · COMHERE';
       SC.login(login, enter, opts.where);
     }
     SC.onUnauthorized = function () { if (active) { showLogin(); SC.toast('로그인이 만료됐어요. PIN을 다시 입력해 주세요.', 'error'); } };

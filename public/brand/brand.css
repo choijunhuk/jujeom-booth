@@ -1,0 +1,117 @@
+/* COMHERE brand system: Y2K / Windows-98 / PC-tongsin look. Namespace: y2k-*.
+   TYPE RULE (read this first):
+   - The bitmap font (Neo둥근모, token --y-font-pixel) is ONLY for 16px or exact multiples (16/32/48/64). Never below 16px,
+     never at 17-31px, never synthetic-bold. Use the .y2k-pixel utility to opt in deliberately.
+   - Everything else (captions, hints, badges, table headers, paths, small buttons, anything 17-31px) uses --y-font-ui (system stack).
+   - Digits that state money, percentages, counts or codes: pixel font only at 16/32/64, otherwise system font. Check 0/8, 1/7, 3/8, 5/6.
+   - Do not rename or remove classes/tokens: other pages depend on them. Only adjust values or add.
+   Load with: <link rel="stylesheet" href="__BASE__/static/brand/brand.css">
+   Hard pixel shadows only (no blur). Body copy stays on the system font; bitmap font for headings, buttons, numbers. */
+@font-face {
+  font-family: "NeoDgm";
+  src: url(__BASE__/static/brand/fonts/neodgm.woff2) format("woff2");
+  font-display: swap;
+}
+:root {
+  --y-bg: #008080;            /* desktop teal; alt silver-blue #c9d6ea */
+  --y-face: #c0c0c0;
+  --y-face-hi: #ffffff;
+  --y-face-lo: #808080;
+  --y-face-dk: #000000;
+  --y-face-mid: #dfdfdf;
+  --y-title-a: #000080;
+  --y-title-b: #1084d0;
+  --y-ink: #000000;
+  --y-ink-dim: #404040;       /* secondary text on the face: AA on #c0c0c0 */
+  --y-link: #0000ee;
+  --y-hot: #ff3f9f;
+  --y-lime: #b9ff3c;
+  --y-cyan: #2de2ff;
+  --y-term-bg: #0000a8;
+  --y-term-fg: #ffffff;
+  --y-term-hi: #ffff55;
+  --y-font-pixel: "NeoDgm", "Apple SD Gothic Neo", "Noto Sans KR", ui-monospace, Menlo, monospace;  /* 16 / 32 / 48 / 64px only */
+  --y-font-ui: system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --y-font: var(--y-font-pixel);          /* legacy alias, keep */
+  --y-font-body: var(--y-font-ui);        /* legacy alias, keep */
+  /* Win98 bevels as box-shadow lists */
+  --y-bevel-out: inset -1px -1px var(--y-face-dk), inset 1px 1px var(--y-face-hi), inset -2px -2px var(--y-face-lo), inset 2px 2px var(--y-face-mid);
+  --y-bevel-in: inset -1px -1px var(--y-face-hi), inset 1px 1px var(--y-face-lo), inset -2px -2px var(--y-face-mid), inset 2px 2px var(--y-face-dk);
+  --y-bevel-flat: inset -1px -1px var(--y-face-hi), inset 1px 1px var(--y-face-lo);
+}
+
+.y2k-pixel, .y2k-title, .y2k-menubar, .y2k-term, .y2k-marquee, .y2k-tab, .y2k-chrome-text { font-family: var(--y-font-pixel); -webkit-font-smoothing: none; font-smooth: never; text-rendering: optimizeSpeed; font-synthesis: none; }
+.y2k-pixel { font-size: 16px; font-weight: 400; }
+.y2k-pixel--2x { font-size: 32px; } .y2k-pixel--3x { font-size: 48px; } .y2k-pixel--4x { font-size: 64px; }
+.y2k-desktop { background: var(--y-bg); color: var(--y-ink); font-family: var(--y-font-body); }
+
+/* ---- window ---- */
+.y2k-window { background: var(--y-face); box-shadow: var(--y-bevel-out); padding: 3px; display: flex; flex-direction: column; color: var(--y-ink); }
+.y2k-title { display: flex; align-items: center; gap: 6px; min-height: 40px; padding: 2px 3px 2px 6px; background: linear-gradient(90deg, var(--y-title-a) 0%, var(--y-title-a) 35%, var(--y-title-b) 100%); color: #fff; font-family: var(--y-font); font-size: 16px; line-height: 20px; text-shadow: 1px 1px 0 #000; }
+.y2k-title--off { background: linear-gradient(90deg, #808080, #b5b5b5); }
+.y2k-title-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.y2k-title-btns { display: flex; gap: 2px; flex: none; }
+.y2k-tb { width: 22px; height: 20px; display: grid; place-items: center; background: var(--y-face); box-shadow: var(--y-bevel-out); color: #000; font: 700 12px/1 var(--y-font-ui); text-shadow: none; }
+.y2k-ico { display: inline-block; width: 20px; height: 20px; flex: none; background: currentColor; -webkit-mask: url(__BASE__/static/brand/coms-logo.svg) center / contain no-repeat; mask: url(__BASE__/static/brand/coms-logo.svg) center / contain no-repeat; }
+.y2k-i { width: 16px; height: 16px; flex: none; image-rendering: pixelated; vertical-align: -3px; }
+.y2k-i--2x { width: 32px; height: 32px; }
+.y2k-menubar { display: flex; align-items: center; gap: 4px; padding: 2px 4px; min-height: 28px; font-family: var(--y-font); font-size: 16px; border-bottom: 1px solid var(--y-face-lo); box-shadow: 0 1px 0 var(--y-face-hi); }
+.y2k-body { padding: 8px; background: var(--y-face); min-height: 0; }
+.y2k-body--sunken { background: #fff; box-shadow: var(--y-bevel-in); padding: 10px; }
+.y2k-status { display: flex; gap: 2px; padding-top: 3px; font-family: var(--y-font-ui); font-size: 14px; }
+.y2k-status > * { flex: 1; min-width: 0; padding: 3px 6px; box-shadow: var(--y-bevel-flat); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- controls ---- */
+.y2k-btn { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 0 14px; background: var(--y-face); color: var(--y-ink); border: 0; border-radius: 0; box-shadow: var(--y-bevel-out); font: 16px/1.2 var(--y-font); text-decoration: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.y2k-btn:active, .y2k-btn[aria-pressed="true"], .y2k-btn.is-pressed { box-shadow: var(--y-bevel-in); padding: 2px 13px 0 15px; }
+.y2k-btn:focus-visible { outline: 1px dotted #000; outline-offset: -6px; }
+.y2k-btn:focus-visible::after { content: ""; position: absolute; inset: -3px; border: 2px solid var(--y-title-a); pointer-events: none; }
+.y2k-btn[disabled], .y2k-btn[aria-disabled="true"] { color: var(--y-face-lo); text-shadow: 1px 1px 0 var(--y-face-hi); cursor: not-allowed; }
+.y2k-btn--primary { background: var(--y-hot); color: #000; /* pink = the single primary action on a screen (order / pay); do not use it for routine buttons */ box-shadow: 0 0 0 1px #000, inset -1px -1px #7a0b47, inset 1px 1px #ffc2e0, inset -2px -2px #c21e75, inset 2px 2px #ff8cc6; }
+.y2k-btn--primary:active { box-shadow: 0 0 0 1px #000, inset 1px 1px #7a0b47, inset -1px -1px #ffc2e0, inset 2px 2px #c21e75; }
+.y2k-btn--danger { color: #a00000; }
+.y2k-field { display: block; width: 100%; min-height: 44px; padding: 8px 10px; background: #fff; color: #000; border: 0; border-radius: 0; box-shadow: var(--y-bevel-in); font: 16px/1.3 var(--y-font-body); }
+.y2k-field:focus-visible { outline: 2px solid var(--y-title-a); outline-offset: 1px; }
+.y2k-tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; padding: 4px 4px 0; }
+.y2k-tabs::-webkit-scrollbar { display: none; }
+.y2k-tab { flex: none; min-height: 44px; padding: 0 14px; background: var(--y-face); color: var(--y-ink); border: 0; box-shadow: inset 1px 1px var(--y-face-hi), inset -1px 0 var(--y-face-dk), inset -2px 0 var(--y-face-lo); font: 16px/1 var(--y-font); cursor: pointer; }
+.y2k-tab[aria-pressed="true"], .y2k-tab[aria-selected="true"] { background: #fff; font-weight: 700; box-shadow: inset 1px 1px var(--y-face-hi), inset -1px 0 var(--y-face-dk), inset 0 3px var(--y-hot); }
+.y2k-tab:focus-visible { outline: 1px dotted #000; outline-offset: -6px; }
+
+/* ---- taskbar ---- */
+.y2k-taskbar { display: flex; gap: 3px; align-items: stretch; padding: 3px 3px calc(3px + env(safe-area-inset-bottom, 0px)); background: var(--y-face); box-shadow: inset 0 1px var(--y-face-hi), inset 0 2px var(--y-face-mid); border-top: 1px solid var(--y-face-lo); }
+.y2k-taskbar .y2k-btn { min-height: 52px; flex-direction: column; gap: 1px; font: 700 13px/1.1 var(--y-font-ui); padding: 0 4px; min-width: 0; }
+.y2k-start { font-weight: 700; flex: none; }
+.y2k-badge { display: inline-block; min-width: 18px; padding: 0 5px; background: var(--y-lime); color: #000; border: 1px solid #000; font: 700 13px/16px var(--y-font-ui); text-align: center; }
+.y2k-badge--hot { background: var(--y-hot); }
+
+/* ---- marquee ---- */
+.y2k-marquee { overflow: hidden; white-space: nowrap; background: #000; color: var(--y-term-hi); font: 16px/28px var(--y-font); box-shadow: var(--y-bevel-in); }
+.y2k-marquee > span { display: inline-block; padding-left: 100%; animation: y2k-scroll 16s linear infinite; }
+@keyframes y2k-scroll { to { transform: translateX(-100%); } }
+
+/* ---- PC-tongsin terminal ---- */
+.y2k-term { background: var(--y-term-bg); color: var(--y-term-fg); font: 16px/1.5 var(--y-font); border: 3px double #fff; padding: 8px 10px; }
+.y2k-term .hi { color: var(--y-term-hi); }
+.y2k-term .dim { color: #b8c0ff; }
+.y2k-term hr { border: 0; border-top: 2px dashed #8fa0ff; margin: 6px 0; }
+.y2k-cursor::after { content: "\2588"; margin-left: 2px; animation: y2k-blink 1s steps(1) infinite; }
+@keyframes y2k-blink { 50% { opacity: 0; } }
+
+/* ---- dialog / progress ---- */
+.y2k-dialog { background: var(--y-face); box-shadow: 0 0 0 1px #000, var(--y-bevel-out), 4px 4px 0 #000; padding: 3px; }
+.y2k-dialog-body { display: flex; gap: 12px; align-items: flex-start; padding: 12px; }
+.y2k-progress { display: flex; gap: 2px; padding: 3px; background: #fff; box-shadow: var(--y-bevel-in); }
+.y2k-progress > i { flex: 1; height: 14px; background: #e6e6e6; }
+.y2k-progress > i.on { background: var(--y-title-a); }
+
+/* ---- logo wordmark ---- */
+.y2k-chrome-text { font: 400 32px/1.1 var(--y-font-pixel); letter-spacing: .04em; background: linear-gradient(#fff 0, #eaf1ff 42%, #5f78ad 50%, #c8dbff 100%); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000) drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000) drop-shadow(3px 3px 0 #000); }
+.y2k-lockup { display: inline-flex; align-items: center; gap: 10px; }
+.y2k-lockup .y2k-ico { width: 46px; height: 52px; color: #fff; filter: drop-shadow(2px 2px 0 #000); }
+
+@media (prefers-reduced-motion: reduce) {
+  .y2k-marquee > span { animation: none; padding-left: 8px; }
+  .y2k-cursor::after { animation: none; }
+  .y2k-marquee { overflow-x: auto; text-overflow: ellipsis; }
+}

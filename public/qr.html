@@ -4,9 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
-<title>QR 인쇄 · 주점 부스</title>
+<title>QR 인쇄 · COMHERE</title>
 <script src="__BASE__/static/base.js"></script>
 <script src="__BASE__/static/notify.js"></script>
+<link rel="stylesheet" href="__BASE__/static/brand/brand.css">
 <link rel="stylesheet" href="__BASE__/static/staff.css">
 <style>
   .info { margin: 0 0 8px; display: grid; gap: 10px; }
@@ -19,17 +20,25 @@
   .acts { display: flex; gap: 6px; flex-wrap: wrap; }
   .acts .btn { flex: 1 1 auto; }
   .urlline { font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
-  .card { position: relative; width: 95mm; height: 138mm; display: flex; flex-direction: column; outline: .25mm dashed #888; outline-offset: -.25mm; break-inside: avoid; page-break-inside: avoid; background: #fff; color: #000; font-family: system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
-  .half { height: 69mm; padding: 4mm 5mm 3mm; overflow: hidden; display: grid; grid-template-columns: 1fr 42mm; grid-template-rows: 1fr auto; column-gap: 2mm; align-items: center; }
+  /* Print card: black on white "window". Bitmap font only at multiples of 16px; QR stays pure black/white with a 4-module quiet zone. */
+  .card { position: relative; width: 95mm; height: 138mm; display: flex; flex-direction: column; outline: .25mm dashed #888; outline-offset: -.25mm; break-inside: avoid; page-break-inside: avoid; background: #fff; color: #000; font-family: var(--y-font-ui); }
+  .half { height: 69mm; padding: 3mm; display: grid; }
   .half.flip { transform: rotate(180deg); }
+  .win { border: 2px solid #000; display: grid; grid-template-rows: auto 1fr auto auto; background: #fff; min-height: 0; }
+  .tbar { display: flex; align-items: center; gap: 6px; padding: 0 6px; height: 24px; background: #000; color: #fff; font: 16px/24px var(--y-font-pixel); -webkit-font-smoothing: none; font-synthesis: none; }
+  .tbar img { height: 16px; width: auto; filter: invert(1); }
+  .tbar .tt { flex: 1; }
+  .tbar .tb3 { display: flex; gap: 3px; } .tbar .tb3 i { width: 10px; height: 10px; border: 2px solid #fff; display: block; }
+  .hbody { display: grid; grid-template-columns: 1fr 42mm; align-items: center; padding: 1mm 2mm 0 2mm; min-height: 0; }
   .id { display: grid; justify-items: center; align-content: center; line-height: 1; }
-  .id .l { font-size: 4.6mm; font-weight: 800; letter-spacing: .08em; }
-  .id .n { font-weight: 900; letter-spacing: -.04em; font-variant-numeric: tabular-nums; margin-top: 1mm; }
-  .id .n.d1 { font-size: 44mm; } .id .n.d2 { font-size: 30mm; } .id .n.d3 { font-size: 21mm; } .id .n.w { font-size: 17mm; letter-spacing: 0; white-space: nowrap; }
+  .id .l { font: 800 14px/1 var(--y-font-ui); letter-spacing: .08em; }
+  .id .n { font-family: var(--y-font-pixel); font-weight: 400; margin-top: 2px; -webkit-font-smoothing: none; font-synthesis: none; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .id .n.d1 { font-size: 128px; } .id .n.d2 { font-size: 96px; } .id .n.d3 { font-size: 64px; }
+  .id .n.w { font-family: var(--y-font-ui); font-weight: 900; font-size: 60px; letter-spacing: 0; }
   .qrbox { width: 42mm; height: 42mm; }
   .qrbox svg { width: 100%; height: 100%; display: block; }
-  .cap { grid-column: 1 / -1; text-align: center; font-size: 5.8mm; font-weight: 900; padding-top: 1mm; }
-  .cap small { display: block; font-size: 3.1mm; font-weight: 700; color: #333; margin-top: .6mm; }
+  .cap { text-align: center; font-size: 5.4mm; font-weight: 900; padding-top: .8mm; }
+  .foot { text-align: center; font: 700 11px/1 var(--y-font-ui); letter-spacing: .12em; padding: .6mm 0 1mm; }
   .fold { position: absolute; left: 0; right: 0; top: 69mm; border-top: .25mm dashed #888; text-align: center; height: 0; }
   .fold span { position: relative; top: -1.7mm; background: #fff; padding: 0 2mm; font-size: 2.4mm; color: #666; }
   @media print {

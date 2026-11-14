@@ -17,10 +17,12 @@
   // ---------- DOM card ----------
   function half(c, flip) {
     var box = h('div', { class: 'qrbox', role: 'img', 'aria-label': c.caption + ' QR 코드' });
-    box.innerHTML = QR.svg(c.url, { margin: 2 }); // SVG built locally by our own encoder; no user text is interpolated
-    return h('div', { class: 'half' + (flip ? ' flip' : '') },
-      h('div', { class: 'id' }, h('span', { class: 'l' }, c.label), h('span', { class: 'n ' + c.cls }, c.big)),
-      box, h('div', { class: 'cap' }, c.caption, h('small', null, c.sub)));
+    box.innerHTML = QR.svg(c.url, { margin: 4 }); // SVG built locally by our own encoder; no user text is interpolated. 4-module quiet zone.
+    return h('div', { class: 'half' + (flip ? ' flip' : '') }, h('div', { class: 'win' },
+      h('div', { class: 'tbar' }, h('img', { src: SC.BASE + '/static/brand/coms-logo.svg', alt: '' }), h('span', { class: 'tt' }, 'COMHERE.exe'), h('span', { class: 'tb3', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'))),
+      h('div', { class: 'hbody' }, h('div', { class: 'id' }, h('span', { class: 'l' }, c.label), h('span', { class: 'n ' + c.cls }, c.big)), box),
+      h('div', { class: 'cap' }, c.caption),
+      h('div', { class: 'foot' }, "COM's")));
   }
   function cardEl(c) {
     return h('div', { class: 'card' }, half(c, true), h('div', { class: 'fold', 'aria-hidden': 'true' }, h('span', null, '접는 선')), half(c, false));
@@ -42,29 +44,55 @@
     ctx.fillStyle = color || '#000';
     ctx.fillText(str, x * s, y * s);
   }
+  var logoImg = null;
+  function loadLogo() {
+    if (logoImg) return Promise.resolve(logoImg);
+    return new Promise(function (res) { var i = new Image(); i.onload = function () { logoImg = i; res(i); }; i.onerror = function () { res(null); }; i.src = SC.BASE + '/static/brand/coms-logo.svg'; });
+  }
+  // Card PNG: same layout as the printed card. The bitmap font is drawn only at multiples of 16px (brand rule).
   function cardCanvas(c) {
-    var W = 1200, s = W / 95, H = Math.round(138 * s);
-    var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
-    var ctx = cv.getContext('2d');
-    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
-    function bottomHalf() { // drawn at y 69..138 mm
-      var oy = 69;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      text(ctx, c.label, 25.5, oy + 11, 4.6, s, 800);
-      var size = c.cls === 'w' ? 17 : c.cls === 'd1' ? 44 : c.cls === 'd2' ? 30 : 21;
-      text(ctx, c.big, 25.5, oy + 31, size, s, 900);
-      drawQR(ctx, c.url, 48 * s, (oy + 5) * s, 42 * s, 2);
-      text(ctx, c.caption, 47.5, oy + 56, 5.8, s, 900);
-      text(ctx, c.sub, 47.5, oy + 62, 3.1, s, 700, '#333');
-    }
-    bottomHalf();
-    ctx.save(); ctx.translate(W, H); ctx.rotate(Math.PI); bottomHalf(); ctx.restore(); // top half = bottom half rotated 180 degrees about the card centre
-    ctx.strokeStyle = '#888'; ctx.lineWidth = 3; ctx.setLineDash([14, 10]);
-    ctx.beginPath(); ctx.moveTo(0, 69 * s); ctx.lineTo(W, 69 * s); ctx.stroke();
-    ctx.strokeRect(2, 2, W - 4, H - 4);
-    ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.fillRect(W / 2 - 4 * s, 69 * s - 1.8 * s, 8 * s, 3.6 * s);
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; text(ctx, '접는 선', 47.5, 69, 2.4, s, 400, '#666');
-    return cv;
+    var fontsReady = document.fonts && document.fonts.load ? Promise.all([document.fonts.load('16px NeoDgm'), document.fonts.ready]) : Promise.resolve();
+    return Promise.all([fontsReady, loadLogo()]).then(function (r) {
+      var logo = r[1];
+      var W = 1200, s = W / 95, H = Math.round(138 * s), k = s / 3.7795;
+      function fpx(css) { return Math.max(16, Math.round(css * k / 16) * 16); }
+      var PIX = '"NeoDgm", "Apple SD Gothic Neo", "Noto Sans KR", monospace', UI = 'system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif';
+      var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      var ctx = cv.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+      function bottomHalf() { // one half, drawn at y 69..138 mm; the top half is this rotated 180 degrees about the card centre
+        var oy = 69, wx = 3, wy = oy + 3, ww = 89, wh = 63, tb = 6.4;
+        ctx.fillStyle = '#fff'; ctx.fillRect(wx * s, wy * s, ww * s, wh * s);
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 0.55 * k; ctx.strokeRect(wx * s + ctx.lineWidth / 2, wy * s + ctx.lineWidth / 2, ww * s - ctx.lineWidth, wh * s - ctx.lineWidth);
+        ctx.fillStyle = '#000'; ctx.fillRect(wx * s, wy * s, ww * s, tb * s);
+        var lx = (wx + 1.6) * s;
+        if (logo) { // black logo recoloured white
+          var lh = 4.2 * s, lw = lh * logo.naturalWidth / logo.naturalHeight, t = document.createElement('canvas'); t.width = Math.ceil(lw); t.height = Math.ceil(lh);
+          var tc = t.getContext('2d'); tc.drawImage(logo, 0, 0, t.width, t.height); tc.globalCompositeOperation = 'source-in'; tc.fillStyle = '#fff'; tc.fillRect(0, 0, t.width, t.height);
+          ctx.drawImage(t, lx, (wy + (tb - 4.2) / 2) * s); lx += lw + 1.4 * s;
+        }
+        ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = fpx(16) + 'px ' + PIX;
+        ctx.fillText('COMHERE.exe', lx, (wy + tb / 2) * s + 2);
+        for (var i = 0; i < 3; i++) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5 * k; var bx = (wx + ww - 2 - (3 - i) * 3.1) * s; ctx.strokeRect(bx, (wy + tb / 2 - 1.2) * s, 2.4 * s, 2.4 * s); }
+        var cx = 26.5, cy = wy + tb + 20;
+        ctx.textAlign = 'center'; ctx.fillStyle = '#000';
+        ctx.font = '800 ' + Math.round(14 * k) + 'px ' + UI; ctx.fillText(c.label, cx * s, (wy + tb + 3.4) * s);
+        var css = c.cls === 'w' ? 64 : c.cls === 'd1' ? 128 : c.cls === 'd2' ? 96 : 64;
+        if (c.cls === 'w') ctx.font = '900 ' + Math.round(60 * k) + 'px ' + UI; else ctx.font = fpx(css) + 'px ' + PIX; // Korean words use the system font; only digits use the bitmap font
+        ctx.fillText(c.big, cx * s, (oy + 33.5) * s);
+        drawQR(ctx, c.url, 48 * s, (wy + tb + 2.2) * s, 42 * s, 4);
+        ctx.font = '900 ' + Math.round(5.4 * s) + 'px ' + UI; ctx.fillText(c.caption, (wx + ww / 2) * s, (oy + 58.4) * s);
+        ctx.font = '700 ' + Math.round(11 * k) + 'px ' + UI; ctx.fillText("COM's", (wx + ww / 2) * s, (oy + 63.6) * s);
+      }
+      bottomHalf();
+      ctx.save(); ctx.translate(W, H); ctx.rotate(Math.PI); bottomHalf(); ctx.restore();
+      ctx.strokeStyle = '#888'; ctx.lineWidth = 3; ctx.setLineDash([14, 10]);
+      ctx.beginPath(); ctx.moveTo(0, 69 * s); ctx.lineTo(W, 69 * s); ctx.stroke();
+      ctx.strokeRect(2, 2, W - 4, H - 4);
+      ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.fillRect(W / 2 - 4 * s, 69 * s - 1.8 * s, 8 * s, 3.6 * s);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#666'; ctx.font = Math.round(2.4 * s) + 'px ' + UI; ctx.fillText('접는 선', W / 2, 69 * s);
+      return cv;
+    });
   }
   function qrCanvas(c) {
     var cv = document.createElement('canvas'); cv.width = 1000; cv.height = 1000;
@@ -142,7 +170,7 @@
         h('div', { class: 'acts noprint' },
           h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { copy(c.url); } }, '주소 복사'),
           h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { doPrint('print-one', el); } }, '이 카드만 인쇄'),
-          h('button', { class: 'btn btn-sm', type: 'button', onclick: function (e) { SC.act(e.currentTarget, function () { return save(cardCanvas(c), c.file + '.png'); }, '이미지를 저장했어요'); } }, '이미지 저장'),
+          h('button', { class: 'btn btn-sm', type: 'button', onclick: function (e) { SC.act(e.currentTarget, function () { return cardCanvas(c).then(function (cv) { return save(cv, c.file + '.png'); }); }, '이미지를 저장했어요'); } }, '이미지 저장'),
           h('button', { class: 'btn btn-sm', type: 'button', onclick: function (e) { SC.act(e.currentTarget, function () { return save(qrCanvas(c), c.file + '-qr.png'); }, 'QR 이미지를 저장했어요'); } }, 'QR만 저장'),
           c.key === 'wait' ? null : h('button', { class: 'btn btn-sm btn-danger', type: 'button', onclick: function (e) {
             var btn = e.currentTarget;

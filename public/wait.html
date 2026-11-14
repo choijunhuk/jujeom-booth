@@ -3,55 +3,79 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#14110f">
-<title>대기 등록 · 주점 부스</title>
+<meta name="theme-color" content="#008080">
+<title>대기 등록 · COMHERE</title>
 <script src="__BASE__/static/base.js"></script>
 <script src="__BASE__/static/notify.js"></script>
+<link rel="stylesheet" href="__BASE__/static/brand/brand.css">
 <link rel="stylesheet" href="__BASE__/static/staff.css">
 <style>
-  body { min-height: 100dvh; }
-  #main { padding: 0; max-width: none; margin: 0; display: grid; gap: 18px; }
-  .w-wrap { max-width: 480px; margin: 0 auto; padding: 22px 18px calc(30px + env(safe-area-inset-bottom)); display: grid; gap: 18px; align-content: start; min-height: 100dvh; }
+  /* Guest-facing: Windows-98 desktop. Bitmap font only at 16/32/48/64 px; all other text system font. */
+  body { min-height: 100dvh; background: var(--y-bg); color: #000; font-family: var(--y-font-ui); }
+  #main { padding: 0; max-width: none; margin: 0; display: grid; gap: 14px; }
+  .w-wrap { max-width: 480px; margin: 0 auto; padding: 18px 14px calc(26px + env(safe-area-inset-bottom)); display: grid; gap: 14px; align-content: start; min-height: 100dvh; }
   .w-brand { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-  .w-brand b { font-size: 1.1rem; font-weight: 900; }
-  .w-brand b span { color: var(--accent); }
-  .w-h { font-size: 1.9rem; font-weight: 900; line-height: 1.2; }
-  .w-sub { color: var(--muted); font-weight: 600; }
-  .w-form { display: grid; gap: 18px; }
-  .lab { display: grid; gap: 8px; font-weight: 800; }
-  .stepper { display: grid; grid-template-columns: 64px 1fr 64px; gap: 10px; align-items: center; }
-  .stepper .btn { min-height: 64px; font-size: 1.8rem; }
-  .stepper output { text-align: center; font-size: 2.6rem; font-weight: 900; font-variant-numeric: tabular-nums; }
-  .stepper output small { font-size: 1rem; color: var(--muted); margin-left: 4px; }
-  .err { color: var(--danger); font-weight: 800; min-height: 1.4em; }
-  .ticket { position: relative; background: var(--surface); border: 2px solid var(--line); border-radius: 22px; padding: 22px 20px; display: grid; gap: 12px; text-align: center; }
-  .ticket::before, .ticket::after { content: ""; position: absolute; top: 58%; width: 26px; height: 26px; border-radius: 50%; background: var(--bg); border: 2px solid var(--line); }
-  .ticket::before { left: -14px; clip-path: inset(0 0 0 50%); }
-  .ticket::after { right: -14px; clip-path: inset(0 50% 0 0); }
-  .ticket .k { color: var(--muted); font-weight: 800; }
-  .ticket .pos { font-size: 7.5rem; line-height: 1; font-weight: 900; color: var(--accent); font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
-  .ticket .pos small { font-size: 2rem; color: var(--text); letter-spacing: 0; margin-left: 4px; }
-  .ticket .ahead { font-size: 1.5rem; font-weight: 900; }
-  .perf { border-top: 3px dashed var(--line); margin: 6px 0; }
-  .who { font-size: 1.2rem; font-weight: 800; overflow-wrap: anywhere; }
-  .hint { color: var(--muted); font-size: .95rem; }
-  .called { position: fixed; inset: 0; z-index: 50; background: var(--accent); color: var(--accent-ink); display: grid; place-content: center; text-align: center; gap: 18px; padding: 24px; animation: calledpulse 1.2s ease-in-out infinite alternate; }
-  .called h1 { font-size: clamp(3rem, 16vw, 6rem); font-weight: 900; line-height: 1.05; margin: 0; }
-  .called p { font-size: 1.4rem; font-weight: 800; }
-  .called .btn { background: var(--accent-ink); color: var(--accent); border-color: var(--accent-ink); justify-self: center; }
-  @keyframes calledpulse { to { background: #ffc85a; } }
-  @media (prefers-reduced-motion: reduce) { .called { animation: none; } }
+  .w-brand .y2k-lockup { gap: 8px; }
+  .w-brand .y2k-lockup .y2k-ico { width: 30px; height: 34px; }
+  .w-brand .y2k-chrome-text { font-size: 32px; }
+  .w-brand .conn { background: var(--y-face); color: #000; border: 0; border-radius: 0; box-shadow: var(--y-bevel-out); }
+  .w-body { padding: 14px; display: grid; gap: 14px; }
+  .w-h { margin: 0; font-size: 1.6rem; font-weight: 900; line-height: 1.25; color: #000; }
+  .w-sub { margin: 0; color: var(--y-ink-dim); font-weight: 700; }
+  .w-form { display: grid; gap: 14px; }
+  .lab { display: grid; gap: 6px; font-weight: 800; color: #000; }
+  .stepper { display: grid; grid-template-columns: 64px 1fr 64px; gap: 8px; align-items: stretch; }
+  .stepper .y2k-btn { min-height: 64px; font: 700 28px/1 var(--y-font-ui); }
+  .lcd-sm { display: flex; align-items: center; justify-content: center; gap: 6px; background: #000; color: var(--y-lime); box-shadow: var(--y-bevel-in); font: 400 32px/1 var(--y-font-pixel); -webkit-font-smoothing: none; font-synthesis: none; }
+  .lcd-sm small { font: 700 16px/1 var(--y-font-ui); color: #fff; }
+  .err { margin: 0; color: #a00000; font-weight: 800; min-height: 1.4em; }
+  .ticket { display: grid; gap: 10px; text-align: center; }
+  .ticket .k { color: var(--y-ink-dim); font-weight: 800; }
+  .lcd { background: #000; box-shadow: var(--y-bevel-in); padding: 14px 8px; }
+  .lcd .pos { font: 400 64px/1 var(--y-font-pixel); color: var(--y-lime); letter-spacing: .02em; -webkit-font-smoothing: none; font-synthesis: none; font-variant-numeric: tabular-nums; }
+  .lcd .pos small { font: 800 20px/1 var(--y-font-ui); color: #fff; margin-left: 8px; letter-spacing: 0; }
+  .ticket .ahead { font-size: 1.4rem; font-weight: 900; color: #000; }
+  .perf { border-top: 2px dashed var(--y-face-lo); margin: 4px 0; }
+  .who { font-size: 1.15rem; font-weight: 800; overflow-wrap: anywhere; color: #000; }
+  .hint { margin: 0; color: var(--y-ink-dim); font-size: .95rem; font-weight: 600; }
   .ctl { display: grid; gap: 8px; }
-  .ctl .btn[aria-pressed="true"] { border-color: var(--success); color: var(--success); }
-  .end { text-align: center; display: grid; gap: 16px; padding: 30px 0; }
+  .ctl .y2k-btn { min-height: 48px; font: 700 15px/1.2 var(--y-font-ui); }
+  .ctl .y2k-btn[aria-pressed="true"] { background: #fff; }
+  .wnotice { display: flex; gap: 8px; align-items: center; margin: 8px auto 0; width: min(440px, calc(100% - 24px)); padding: 8px 10px; background: #fff; color: #000; border: 2px solid #000; box-shadow: 3px 3px 0 #000; font-weight: 800; }
+  .wnotice[data-level="warn"] { background: #ffff55; }
+  .wnotice .y2k-i { width: 20px; height: 20px; flex: none; }
+  .wnotice span { min-width: 0; overflow-wrap: anywhere; }
+  .end { text-align: center; display: grid; gap: 14px; padding: 12px 0; }
+  .end .y2k-btn { justify-self: center; }
+  /* called: centred dialog on a dim backdrop; title bar toggles at 1 Hz (well under 3 Hz), static for reduced motion */
+  .called { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 40, .82); display: grid; place-items: center; padding: 14px; }
+  .called-win { width: min(440px, 100%); box-shadow: 0 0 0 1px #000, var(--y-bevel-out), 6px 6px 0 #000; }
+  .called-title { animation: calledtitle 2s steps(1) infinite; }
+  @keyframes calledtitle { 0%, 49.99% { background: linear-gradient(90deg, #a0006a, var(--y-hot)); } 50%, 100% { background: linear-gradient(90deg, var(--y-title-a), var(--y-title-b)); } }
+  .called-body { padding: 22px 14px; display: grid; gap: 14px; text-align: center; justify-items: center; }
+  .called-h { margin: 0; font: 400 48px/1.1 var(--y-font-pixel); color: #000; -webkit-font-smoothing: none; font-synthesis: none; }
+  .called-who { margin: 0; font-size: 1.4rem; font-weight: 900; overflow-wrap: anywhere; }
+  .called-note { margin: 0; font-size: 1.1rem; font-weight: 800; color: var(--y-ink-dim); }
+  .called-body .y2k-btn { min-height: 56px; min-width: 200px; font: 700 18px/1 var(--y-font-ui); }
+  @media (prefers-reduced-motion: reduce) { .called-title { animation: none; } }
+  /* shared dialogs / toasts rendered by staff-common.js, dressed as Win98 on this page */
+  .dlg { background: var(--y-face); color: #000; border: 0; border-radius: 0; box-shadow: 0 0 0 1px #000, var(--y-bevel-out), 5px 5px 0 #000; padding: 3px; }
+  .dlg::backdrop { background: rgba(0, 0, 40, .75); }
+  .dlg-title { color: #fff; background: linear-gradient(90deg, var(--y-title-a), var(--y-title-b)); margin: -17px -17px 4px; padding: 8px 12px; font: 800 1rem/1.3 var(--y-font-ui); }
+  .dlg-msg { color: var(--y-ink-dim); }
+  .dlg .btn { background: var(--y-face); color: #000; border: 0; border-radius: 0; box-shadow: var(--y-bevel-out); }
+  .dlg .btn-primary { background: var(--y-hot); }
+  .dlg .btn-danger { color: #a00000; background: var(--y-face); }
+  .toast { background: var(--y-face); color: #000; border: 0; border-radius: 0; box-shadow: 0 0 0 1px #000, var(--y-bevel-out); }
+  .strip { background: var(--y-term-hi); color: #000; border-radius: 0; box-shadow: 0 0 0 1px #000, 4px 4px 0 #000; }
 </style>
 </head>
 <body>
 <div class="w-wrap">
-  <div class="w-brand"><b>주점 부스 <span>대기</span></b><div class="conn" id="conn" data-s="wait" hidden><span class="dot"></span><span id="conn-t"></span></div></div>
+  <div class="w-brand"><h1 class="y2k-lockup" style="margin:0"><span class="y2k-ico" aria-hidden="true"></span><span class="y2k-chrome-text">COMHERE</span></h1><div class="conn" id="conn" data-s="wait" hidden><span class="dot"></span><span id="conn-t"></span></div></div>
   <main id="main" aria-live="polite"></main>
 </div>
-<div id="called" class="called" hidden role="alertdialog" aria-labelledby="called-h"></div>
+<div id="called" class="called" hidden></div>
 <div id="toasts" role="status" aria-live="polite"></div>
 <script src="__BASE__/static/staff-common.js"></script>
 <script src="__BASE__/static/wait.js"></script>

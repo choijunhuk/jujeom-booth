@@ -239,6 +239,55 @@ CREATE INDEX IF NOT EXISTS nicks_ts ON nicks(table_id, seat);
 CREATE INDEX IF NOT EXISTS plays_fin ON plays(finished_at);
 `;
 
+// schema written by Release 1 (git cf5d032, the version running in production): the Release 2 migration test boots on a database created with it
+const R1_SCHEMA = `
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA busy_timeout=5000;
+CREATE TABLE IF NOT EXISTS tables(id INTEGER PRIMARY KEY, token TEXT NOT NULL UNIQUE, seat INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS orders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', paid INTEGER NOT NULL DEFAULT 0,
+  subtotal INTEGER NOT NULL, discount INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL,
+  member_discount INTEGER NOT NULL DEFAULT 0, member_id INTEGER, depositor TEXT, paid_by TEXT, notice_id INTEGER,
+  coupon_code TEXT, note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  cooking_at INTEGER, UNIQUE(table_id, seat, key));
+CREATE INDEX IF NOT EXISTS orders_ts ON orders(table_id, seat);
+CREATE TABLE IF NOT EXISTS order_items(order_id INTEGER NOT NULL, item_id TEXT NOT NULL, name TEXT NOT NULL, unit_price INTEGER NOT NULL, qty INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS order_items_o ON order_items(order_id);
+CREATE TABLE IF NOT EXISTS menu_categories(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS menu_items(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, price INTEGER NOT NULL, category_id INTEGER NOT NULL, descr TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0, sold_out INTEGER NOT NULL DEFAULT 0, sort INTEGER NOT NULL DEFAULT 0, photo TEXT);
+CREATE INDEX IF NOT EXISTS order_items_item ON order_items(item_id);
+CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rewards(
+  id TEXT PRIMARY KEY, label TEXT NOT NULL, game TEXT NOT NULL, threshold INTEGER NOT NULL, type TEXT NOT NULL, amount INTEGER, item TEXT,
+  stock INTEGER NOT NULL, issued INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS coupons(
+  code TEXT PRIMARY KEY, reward_id TEXT NOT NULL, source TEXT NOT NULL, type TEXT NOT NULL, amount INTEGER, label TEXT NOT NULL, item TEXT,
+  table_id INTEGER NOT NULL, seat INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'issued', order_id INTEGER, used_at INTEGER, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS coupons_ts ON coupons(table_id, seat);
+CREATE TABLE IF NOT EXISTS plays(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, game TEXT NOT NULL, device TEXT NOT NULL,
+  nick TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, score INTEGER, rejected INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS plays_dev ON plays(device);
+CREATE INDEX IF NOT EXISTS plays_ts ON plays(table_id, seat);
+CREATE TABLE IF NOT EXISTS nicks(device TEXT NOT NULL, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, nick TEXT NOT NULL, PRIMARY KEY(device, table_id, seat));
+CREATE TABLE IF NOT EXISTS calls(id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER);
+CREATE TABLE IF NOT EXISTS waitlist(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL, size INTEGER NOT NULL, secret TEXT NOT NULL, device TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'waiting', created_at INTEGER NOT NULL, called_at INTEGER);
+CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS login_keys(hash TEXT PRIMARY KEY, fails INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS deposit_notices(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, received_at INTEGER NOT NULL, raw TEXT NOT NULL, norm TEXT NOT NULL, amount INTEGER, depositor TEXT,
+  status TEXT NOT NULL, order_id INTEGER, matched_at INTEGER, matched_by TEXT, duplicate_of INTEGER, reasons TEXT, amount_guessed INTEGER NOT NULL DEFAULT 0, repeat_count INTEGER NOT NULL DEFAULT 1, last_at INTEGER);
+CREATE INDEX IF NOT EXISTS deposit_norm ON deposit_notices(norm, received_at);
+CREATE INDEX IF NOT EXISTS nicks_ts ON nicks(table_id, seat);
+CREATE INDEX IF NOT EXISTS plays_fin ON plays(finished_at);
+`;
+
 // stands in for the club site's GET /api/auth/me
 async function startFakeClub() {
   const specs = new Map();
@@ -249,9 +298,11 @@ async function startFakeClub() {
     if (req.url === '/other') { other.n++; res.end('{}'); return; }
     const m = /(?:^|;\s*)token=([^;]*)/.exec(req.headers.cookie || '');
     const tok = m ? m[1] : '';
-    hits.push({ method: req.method, url: req.url, headers: req.headers, tok });
+    const hit = { method: req.method, url: req.url, headers: req.headers, tok, sentAt: 0 };
+    hits.push(hit);
     const spec = specs.get(tok) || { status: 401 };
     const send = () => {
+      hit.sentAt = Date.now();
       if (spec.location) { res.writeHead(spec.status || 302, { location: spec.location }); res.end(); return; }
       res.writeHead(spec.status, { 'content-type': 'application/json' });
       res.end(spec.raw !== undefined ? spec.raw : spec.json === undefined ? '' : JSON.stringify(spec.json));
@@ -1255,7 +1306,7 @@ test('waitlist switch: closing refuses registrations, clear cancels everyone', a
     const w1 = await a.post('/api/wait', { nick: '가', size: 2 });
     const w2 = await b.post('/api/wait', { nick: '나', size: 2 });
     assert.equal(w1.status, 201);
-    assert.deepEqual((await a.get('/api/wait/info')).json, { open: true, waitingTotal: 2 });
+    assert.deepEqual((await a.get('/api/wait/info')).json, { open: true, waitingTotal: 2, notice: null });
     assert.equal((await s.get('/api/staff/state')).json.waitOpen, true);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: 'no' })).status, 400);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: false })).json.waitOpen, false);
@@ -1430,7 +1481,8 @@ test('member discount: a slow club server (timeout 2 s) means not a member', asy
   const took = Date.now() - t0;
   assert.equal(r.status, 201);
   assert.equal(r.json.order.memberDiscount, 0);
-  assert.ok(took >= 1800 && took < 3300, `took ${took} ms`);
+  assert.ok(took >= 1800, `waited for the club server before giving up: ${took} ms`);
+  assert.equal(fake.hitsFor(g.jar.token)[0].sentAt, 0, 'the server gave up before the club server answered (ordering, not a wall-clock bound)');
   await staff.post(`/api/staff/orders/${r.json.order.id}/status`, { status: 'cancelled' });
 });
 
@@ -3669,7 +3721,9 @@ test('deposit notices: undo, assign, dismiss, auto-confirm switch, unparsed, sec
     const mm = await asg(second.id, { orderId: o2.id });
     assert.equal(mm.status, 409); assert.deepEqual([mm.json.error, mm.json.noticeAmount, mm.json.orderTotal], ['amount_mismatch', 8000, 9000]);
     assert.equal((await asg(second.id, { orderId: o2.id, force: 'true' })).json.error, 'amount_mismatch', 'only literal true forces');
-    assert.equal((await asg(second.id, { orderId: o2.id, force: true })).status, 200);
+    assert.equal((await asg(second.id, { orderId: o2.id, force: true })).json.error, 'note_required', 'forcing a mismatch needs a reason');
+    assert.equal((await asg(second.id, { orderId: o2.id, force: true, note: 'x'.repeat(61) })).json.error, 'note_required', 'note is at most 60 characters');
+    assert.equal((await asg(second.id, { orderId: o2.id, force: true, note: '차액은 현금으로 받음' })).status, 200);
     // cancelled orders cannot be assigned
     const o3 = await d.place(tk[2], '이영희'); await s.post(`/api/staff/orders/${o3.id}/status`, { status: 'cancelled' });
     const third = await d.sms(8000, '이영희');
@@ -3688,7 +3742,8 @@ test('deposit notices: undo, assign, dismiss, auto-confirm switch, unparsed, sec
     assert.deepEqual([st.pending, st.unparsed, st.autoConfirm], [0, 1, true]);
     const o4 = await d.place(tk[3], '박넷째');
     assert.equal((await asg(garbage.id, { orderId: o4.id })).json.error, 'amount_mismatch', 'no amount known: staff has to force it');
-    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true })).status, 200);
+    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true })).json.error, 'note_required');
+    assert.equal((await asg(garbage.id, { orderId: o4.id, force: true, note: '문자 형식이 달라 직접 확인' })).status, 200);
     assert.equal((await s.post(`/api/staff/deposits/${garbage.id}/dismiss`)).json.error, 'notice_closed');
     // ---- the auto-confirm switch ----
     for (const bad of ['yes', 1, null, undefined]) assert.equal((await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: bad })).json.error, 'bad_auto_confirm', String(bad));
@@ -3718,7 +3773,7 @@ test('deposit notices: undo, assign, dismiss, auto-confirm switch, unparsed, sec
     // ---- guests never see notices or the secret ----
     const g = new Client(srv);
     const everything = [(await g.get(`/api/t/${tk[0]}`)).text, (await g.get('/api/board')).text, (await g.get('/api/menu')).text];
-    for (const text of everything) assert.ok(!text.includes(rot.json.secret) && !/notice/i.test(text) && !text.includes('Web발신'), 'no notice data for guests');
+    for (const text of everything) assert.ok(!text.includes(rot.json.secret) && !/notices|noticeId|receivedAt/i.test(text) && !text.includes('Web발신'), 'no notice data for guests');
     for (const p of ['/api/staff/deposits', '/api/staff/deposit-hook']) assert.equal((await g.get(p)).status, 401, p);
     assert.equal((await g.get(`/api/deposit-hook/${rot.json.secret}`)).status, 404);
     // ---- reset clears notices, keeps the secret and the pay settings ----
@@ -3739,8 +3794,10 @@ test('deposit notices: the staff list is capped at the newest 200', () => {
   const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 });
   try {
     for (let i = 0; i < 205; i++) store.ingestDeposit(`입금 ${1000 + i}원 홍길동 #${i}`);
-    const list = store.listDeposits();
+    const { notices: list, next } = store.listDeposits();
     assert.equal(list.length, 200);
+    assert.equal(next, list[199].id, 'a full page tells where the next one starts');
+    assert.equal(store.listDeposits({ before: next, limit: 50 }).notices.length, 5);
     assert.equal(list[0].amount, 1204);
     assert.deepEqual(store.depositCounts(), { pending: 205, unparsed: 0, ignored: 0, review: 0, autoConfirm: false, autoConfirmMaxAmount: 30000 });
   } finally { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
@@ -3808,7 +3865,8 @@ test('deposit matching: a hand-paid order with the same amount blocks auto-confi
     // amount mismatch needs force on attach, and undoing the payment releases the notice
     const Z = await d.place(tk[1], '김철수', 'odeng'); await s.post(`/api/staff/orders/${Z.id}/paid`, { paid: true });
     assert.equal((await attach(another.id, { orderId: Z.id })).json.error, 'amount_mismatch');
-    assert.equal((await attach(another.id, { orderId: Z.id, force: true })).status, 200);
+    assert.equal((await attach(another.id, { orderId: Z.id, force: true })).json.error, 'note_required');
+    assert.equal((await attach(another.id, { orderId: Z.id, force: true, note: '현금 일부' })).status, 200);
     assert.equal((await s.post(`/api/staff/orders/${Z.id}/paid`, { paid: false })).status, 200);
     assert.equal((await d.notices()).find((x) => x.id === another.id).status, 'pending');
     assert.equal((await attach(another.id, { orderId: X.id, force: true })).json.error, 'order_has_notice');
@@ -4024,23 +4082,1571 @@ test('KakaoBank shape: 입출금통장 is a template word, not a withdrawal; the
 });
 
 test('deposit hook: wrong-secret attempts have their own small budget; malformed requests with the right secret cost nothing', async () => {
-  const d = await depositSetup();
+  const statsFile = path.join(os.tmpdir(), `booth-stats-${process.pid}-${Date.now()}.json`);
+  const d = await depositSetup({ BOOTH_TEST_STATS_FILE: statsFile });
+  const stats = () => JSON.parse(fs.readFileSync(statsFile, 'utf8'));
   try {
     const { srv, secret } = d;
-    // 30 concurrent wrong secrets: at most 20 are delayed, the rest answer at once; none consumes the real budget
-    const t0 = Date.now();
-    const res = await Promise.all(Array.from({ length: 30 }, async (_, i) => { const t = Date.now(); const r = await hookPost(srv, 'e'.repeat(63) + (i % 10), { text: 'x' }); return [r.status, Date.now() - t]; }));
-    assert.ok(res.every(([st]) => st === 404));
-    assert.ok(res.filter(([, ms]) => ms < 150).length >= 8, 'over-budget attempts are answered immediately: ' + JSON.stringify(res.map((x) => x[1])));
-    assert.ok(res.filter(([, ms]) => ms >= 250).length <= 20 + 2, 'at most ~20 idle sockets');
-    void t0;
+    // 30 concurrent wrong secrets: the server counts how many it delayed (an idle socket) and how many it answered at once; no wall-clock thresholds
+    const res = await Promise.all(Array.from({ length: 30 }, async (_, i) => (await hookPost(srv, 'e'.repeat(63) + (i % 10), { text: 'x' })).status));
+    assert.ok(res.every((st) => st === 404));
+    assert.deepEqual(stats(), { badDelayed: 20, badImmediate: 10 }, 'at most 20 idle sockets, the rest answered at once');
     // after more than 20 bad attempts in a minute no more delays at all
-    const t1 = Date.now();
     assert.equal((await hookPost(srv, 'f'.repeat(64), { text: 'x' })).status, 404);
-    assert.ok(Date.now() - t1 < 150);
+    assert.deepEqual(stats(), { badDelayed: 20, badImmediate: 11 });
     // the real forwarder is unaffected, and malformed requests with the right secret do not use up its 60/min
     for (let i = 0; i < 70; i++) assert.equal((await hookPost(srv, secret, 'x', 'application/xml')).status, 415);
     for (let i = 0; i < 5; i++) assert.equal((await hookPost(srv, secret, { text: smsText(2000 + i, '이름', i + 1) })).status, 200);
     assert.equal((await d.s.get('/api/staff/state')).json.hookRateLimited, false);
+    assert.deepEqual(stats(), { badDelayed: 20, badImmediate: 11 }, 'right-secret requests are not counted as bad attempts');
+  } finally { await d.srv.stop(); fs.rmSync(statsFile, { force: true }); }
+});
+
+// =====================================================================================================
+// Release 2 (addendum H): staff order tools, payments, refunds, write-offs, notice banner, stock, audit, day close
+// =====================================================================================================
+async function withBooth(fn, { env = {}, ...opts } = {}) {
+  const srv = await boot({ env, ...opts });
+  try {
+    const s = await staffLogin(srv);
+    const tk = (await tablesOf(s)).map((t) => t.token);
+    return await fn({ srv, s, tk });
+  } finally { await srv.stop(); }
+}
+const orderOf = async (s, id) => (await s.get('/api/staff/state')).json.orders.find((o) => o.id === id);
+const staffOrder = (s, n, items, extra = {}) => s.post(`/api/staff/tables/${n}/orders`, { key: newKey(), items, ...extra });
+const stTables = async (s) => (await s.get('/api/staff/state')).json.tables; // number, seat, unclearUntil, ...
+async function csvOf(srv, s, p) { // fetch strips a BOM from text(), so read the bytes
+  const res = await fetch(srv.origin + srv.base + p, { headers: { cookie: s.cookieHeader() } });
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  return { status: res.status, headers: res.headers, bom: bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf, text: new TextDecoder().decode(bytes).replace(/^\uFEFF/, '') };
+}
+const dbOf = (srv) => new DatabaseSync(path.join(srv.data, 'booth.db'));
+const auditOf = async (s, limit = 200) => (await s.get(`/api/staff/audit?limit=${limit}`)).json.entries;
+
+test('H1 staff creates an order: no discount or coupon, allowed while ordering is closed, accept starts cooking, idempotent, hidden items need allowHidden', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    assert.equal((await s.post('/api/staff/ordering', { open: false })).status, 200);
+    const g = new Client(srv);
+    assert.equal((await order(g, tk[0], [{ id: 'cola', qty: 1 }])).json.error, 'closed');
+    const key = newKey();
+    const r = await s.post('/api/staff/tables/1/orders', { key, items: [{ id: 'tteokbokki', qty: 2 }, { id: 'cola', qty: 1 }], note: '빨리', depositor: '김철수' });
+    assert.equal(r.status, 201, r.text);
+    assert.deepEqual([r.json.order.createdBy, r.json.order.status, r.json.order.total, r.json.order.memberDiscount, r.json.order.depositor, r.json.order.note], ['staff', 'pending', 18000, 0, '김철수', '빨리']);
+    const again = await s.post('/api/staff/tables/1/orders', { key, items: [{ id: 'tteokbokki', qty: 2 }] });
+    assert.equal(again.status, 200);
+    assert.deepEqual([again.json.duplicate, again.json.order.id], [true, r.json.order.id], 'same key = same order, never a duplicate');
+    const acc = await staffOrder(s, 1, [{ id: 'odeng', qty: 1 }], { accept: true });
+    assert.equal(acc.json.order.status, 'cooking');
+    assert.deepEqual((await s.get('/api/kitchen')).json.orders.map((o) => o.id), [acc.json.order.id]);
+    assert.deepEqual((await g.get(`/api/t/${tk[0]}`)).json.orders.map((o) => o.createdBy).sort(), ['staff', 'staff']);
+    // validation shares the guest rules
+    assert.equal((await staffOrder(s, 1, [])).json.error, 'bad_items');
+    assert.equal((await staffOrder(s, 1, [{ id: 'nope', qty: 1 }])).json.error, 'unknown_item');
+    assert.equal((await staffOrder(s, 1, [{ id: 'cola', qty: 21 }])).json.error, 'bad_qty');
+    assert.equal((await s.post('/api/staff/tables/1/orders', { key: 'x', items: [{ id: 'cola', qty: 1 }] })).json.error, 'bad_key');
+    assert.equal((await s.post('/api/staff/tables/99/orders', { key: newKey(), items: [{ id: 'cola', qty: 1 }] })).status, 404);
+    // no coupon on staff orders
+    const cp = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: '직원 쿠폰' })).json.coupon;
+    assert.equal((await staffOrder(s, 1, [{ id: 'cola', qty: 1 }], { couponCode: cp.code })).json.error, 'coupon_not_allowed');
+    // sold-out visible items are refused; hidden items need allowHidden (and are not sold-out checked)
+    await s.post('/api/staff/menu/cola/soldout', { soldOut: true });
+    assert.equal((await staffOrder(s, 1, [{ id: 'cola', qty: 1 }])).json.error, 'sold_out');
+    const hid = await mkItem(s, '비밀 메뉴', 3000);
+    await s.post(`/api/staff/menu/items/${hid}`, { hidden: true });
+    assert.equal((await staffOrder(s, 1, [{ id: hid, qty: 1 }])).json.error, 'unknown_item');
+    const hr = await staffOrder(s, 1, [{ id: hid, qty: 1 }], { allowHidden: true });
+    assert.equal(hr.status, 201, hr.text);
+    assert.equal(hr.json.order.total, 3000);
+  });
+});
+
+test('H1 staff may create up to twice the per-seat order cap; guests cannot', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv);
+    for (let i = 0; i < 40; i++) assert.equal((await staffOrder(s, 2, [{ id: 'cola', qty: 1 }])).status, 201);
+    assert.equal((await order(g, tk[1], [{ id: 'cola', qty: 1 }])).json.error, 'too_many_orders', 'guest cap is 40 per seat');
+    for (let i = 0; i < 40; i++) assert.equal((await staffOrder(s, 2, [{ id: 'cola', qty: 1 }])).status, 201);
+    assert.equal((await staffOrder(s, 2, [{ id: 'cola', qty: 1 }])).json.error, 'too_many_orders', 'staff cap is 80');
+  });
+});
+
+test('H2 edit lines: original prices stay, new lines use today\'s price, qty 0 removes, at least one line, member rule is re-applied, coupon is capped', async () => {
+  const fk = fake;
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv); g.jar.token = fk.member(7001); g.jar.booth_d = await realDevice(srv);
+    const o = (await order(g, tk[0], [{ id: 'tteokbokki', qty: 2 }, { id: 'cola', qty: 1 }])).json.order; // 18,000 -> member 10% = 1,800
+    assert.deepEqual([o.subtotal, o.memberDiscount, o.total], [18000, 1800, 16200]);
+    assert.deepEqual(o.memberRule, { mode: 'percent', pct: 10, amount: 1000, maxDiscount: 0, minOrder: 0 });
+    // the menu price changes: existing lines keep the old unit price, the new line gets the current one
+    const item = await mkItem(s, '신메뉴', 4000);
+    await s.post('/api/staff/menu/items/tteokbokki', { price: 9000 });
+    const e1 = await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 3 }, { id: 'cola', qty: 1 }, { id: item, qty: 1 }] });
+    assert.equal(e1.status, 200, e1.text);
+    assert.deepEqual(e1.json.order.items.map((i) => [i.id, i.qty, i.unitPrice]), [['tteokbokki', 3, 8000], ['cola', 1, 2000], [item, 1, 4000]]);
+    assert.deepEqual([e1.json.order.subtotal, e1.json.order.memberDiscount, e1.json.order.total], [30000, 3000, 27000], 'member discount follows the rule stored on the order');
+    // qty 0 removes a line, an order must keep one line
+    const e2 = await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 0 }, { id: 'cola', qty: 0 }, { id: item, qty: 1 }] });
+    assert.deepEqual(e2.json.order.items.map((i) => i.id), [item]);
+    assert.equal(e2.json.order.total, 3600);
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: item, qty: 0 }] })).json.error, 'no_lines');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/items`, { items: [] })).json.error, 'no_lines', 'lines not listed are removed (replace semantics)');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'nope', qty: 1 }] })).json.error, 'unknown_item');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: item, qty: -1 }] })).json.error, 'bad_qty');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: item, qty: 1 }, { id: item, qty: 2 }] })).json.error, 'dup_item');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/items`, { items: 'x' })).json.error, 'bad_items');
+    assert.equal((await s.post('/api/staff/orders/99999/items', { items: [{ id: item, qty: 1 }] })).status, 404);
+    // a coupon on the order is re-capped at what is left to pay
+    const c = (await s.post('/api/staff/tables/2/coupons', { type: 'discount', amount: 5000, label: '5천원' })).json.coupon;
+    const g2 = new Client(srv);
+    const o2 = (await order(g2, tk[1], [{ id: 'fries', qty: 2 }], { couponCode: c.code })).json.order; // 12,000 - 5,000
+    assert.deepEqual([o2.couponDiscount, o2.total], [5000, 7000]);
+    const e3 = await s.post(`/api/staff/orders/${o2.id}/items`, { items: [{ id: 'fries', qty: 0 }, { id: 'cola', qty: 1 }] });
+    assert.deepEqual([e3.json.order.subtotal, e3.json.order.couponDiscount, e3.json.order.total], [2000, 2000, 0], 'coupon = min(amount, remaining); total never below 0');
+    // cancelled orders cannot be edited
+    await s.post(`/api/staff/orders/${o2.id}/status`, { status: 'cancelled' });
+    assert.equal((await s.post(`/api/staff/orders/${o2.id}/items`, { items: [{ id: 'cola', qty: 2 }] })).json.error, 'order_cancelled');
+  }, { env: { COMS_ME_URL: fk.url + '/api/auth/me' } });
+});
+
+test('H2 editing a paid order: lower total makes a refund due, higher total makes it unpaid with a balance', async () => {
+  await withBooth(async ({ s }) => {
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 2 }])).json.order; // 16,000
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true })).json.order.paidAmount, 16000);
+    const lower = (await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }] })).json.order; // 8,000
+    assert.deepEqual([lower.paid, lower.total, lower.paidAmount, lower.overpaid, lower.refundDue, lower.balanceDue], [true, 8000, 16000, 8000, 8000, 0]);
+    const st = (await s.get('/api/staff/state')).json;
+    assert.deepEqual(st.refunds.map((r) => [r.orderId, r.amount, r.doneAt, r.reason]), [[o.id, 8000, null, 'edit_lower_total']]);
+    const higher = (await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 3 }] })).json.order; // 24,000
+    assert.deepEqual([higher.paid, higher.total, higher.paidAmount, higher.balanceDue, higher.refundDue, higher.overpaid], [false, 24000, 16000, 8000, 0, 0]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.refunds, [], 'the refund entry goes away when the order grows again');
+    const back = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true })).json.order; // pays the balance
+    assert.deepEqual([back.paid, back.paidAmount, back.balanceDue], [true, 24000, 0]);
+  });
+});
+
+test('H3 service lines cost nothing, show in the kitchen and in sales, and use stock', async () => {
+  await withBooth(async ({ s }) => {
+    const it = await mkItem(s, '서비스감', 3000);
+    await s.post(`/api/staff/menu/items/${it}`, { stockLeft: 5 });
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }], { accept: true })).json.order;
+    const r = await s.post(`/api/staff/orders/${o.id}/service`, { itemId: it, qty: 2 });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.order.items.find((i) => i.id === it), { id: it, name: '서비스감', qty: 2, unitPrice: 0, service: true });
+    assert.deepEqual([r.json.order.subtotal, r.json.order.total], [8000, 8000]);
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/service`, { itemId: it, qty: 1 })).json.order.items.find((i) => i.id === it).qty, 3, 'same service line accumulates');
+    assert.deepEqual((await s.get('/api/kitchen')).json.orders[0].items.find((i) => i.id === it).service, true);
+    assert.equal((await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === it).stockLeft, 2);
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual(sale.byItem.find((i) => i.id === it), { id: it, name: '서비스감', qty: 0, serviceQty: 3, gross: 0 });
+    assert.equal(sale.totals.billed, 8000);
+    // validation
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/service`, { itemId: it, qty: 0 })).json.error, 'bad_qty');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/service`, { itemId: 'nope', qty: 1 })).json.error, 'unknown_item');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/service`, { itemId: it, qty: 3 })).json.error, 'insufficient_stock');
+    // an edit keeps service lines unless they are listed
+    const ed = (await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 2 }] })).json.order;
+    assert.deepEqual(ed.items.map((i) => [i.id, i.qty, i.service]), [['tteokbokki', 2, false], [it, 3, true]]);
+    await s.post(`/api/staff/orders/${o.id}/status`, { status: 'cancelled' });
+    assert.equal((await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === it).stockLeft, 5, 'cancelling gives the service stock back');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/service`, { itemId: it, qty: 1 })).json.error, 'order_cancelled');
+  });
+});
+
+test('H4 move one order to another table: coupon stays with its original seat, cancelled and same-table refused, guests see it at the new table', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const gA = new Client(srv); const gB = new Client(srv);
+    const cp = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: '천원' })).json.coupon;
+    const o = (await order(gA, tk[0], [{ id: 'tteokbokki', qty: 1 }], { couponCode: cp.code })).json.order;
+    const keep = (await order(gA, tk[0], [{ id: 'cola', qty: 1 }])).json.order;
+    const mv = await s.post(`/api/staff/orders/${o.id}/move`, { to: 3 });
+    assert.equal(mv.status, 200, mv.text);
+    assert.deepEqual([mv.json.order.table, mv.json.from, mv.json.order.couponCode], [3, 1, cp.code]);
+    assert.deepEqual((await gB.get(`/api/t/${tk[2]}`)).json.orders.map((x) => x.id), [o.id]);
+    assert.deepEqual((await gA.get(`/api/t/${tk[0]}`)).json.orders.map((x) => x.id), [keep.id], 'only the moved order left table 1');
+    const db = dbOf(srv); assert.deepEqual({ ...db.prepare('SELECT table_id, order_id FROM coupons WHERE code=?').get(cp.code) }, { table_id: 1, order_id: o.id }, 'the coupon stays recorded for the seat that earned it and stays tied to the order'); db.close();
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/move`, { to: 3 })).json.error, 'same_table');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/move`, { to: 99 })).status, 404);
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/move`, { to: 'x' })).json.error, 'bad_tables');
+    await s.post(`/api/staff/orders/${keep.id}/status`, { status: 'cancelled' });
+    assert.equal((await s.post(`/api/staff/orders/${keep.id}/move`, { to: 2 })).json.error, 'order_cancelled');
+    // an order moved onto a table where the same idempotency key already exists does not collide
+    const key = newKey();
+    const a = (await gA.post(`/api/t/${tk[0]}/orders`, { key, items: [{ id: 'cola', qty: 1 }] })).json.order;
+    const b = (await gB.post(`/api/t/${tk[2]}/orders`, { key, items: [{ id: 'cola', qty: 1 }] })).json.order;
+    assert.equal((await s.post(`/api/staff/orders/${a.id}/move`, { to: 3 })).status, 200);
+    assert.ok((await orderOf(s, b.id)) && (await orderOf(s, a.id)));
+  });
+});
+
+test('H5 payments: method and amount are recorded, partial leaves a balance, overpayment owes a refund, a second paid:true is refused', async () => {
+  await withBooth(async ({ s }) => {
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order; // 8,000
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'bitcoin' })).json.error, 'bad_method');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, amount: -1 })).json.error, 'bad_amount');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, amount: 1.5 })).json.error, 'bad_amount');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/paid`, { paid: 'yes' })).json.error, 'bad_paid');
+    const part = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 5000 })).json.order;
+    assert.deepEqual([part.paid, part.paidAmount, part.paidMethod, part.balanceDue, part.paidBy], [false, 5000, 'cash', 3000, 'staff']);
+    const rest = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'transfer' })).json.order; // default amount = balance
+    assert.deepEqual([rest.paid, rest.paidAmount, rest.paidMethod, rest.balanceDue, typeof rest.paidAt], [true, 8000, 'transfer', 0, 'number']);
+    const dup = await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
+    assert.equal(dup.status, 409); assert.equal(dup.json.error, 'stale', 'a second tap on another phone must not double-apply');
+    assert.equal((await orderOf(s, o.id)).paidAmount, 8000);
+    // overpayment
+    const over = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 2000 })).json.order;
+    assert.deepEqual([over.paid, over.paidAmount, over.overpaid, over.refundDue], [true, 10000, 2000, 2000]);
+    // undo clears every payment and the refund entry; the default method is transfer
+    const un = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: false })).json.order;
+    assert.deepEqual([un.paid, un.paidAmount, un.paidMethod, un.paidAt, un.refundDue, un.balanceDue], [false, 0, null, null, 0, 8000]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.refunds, []);
+    const dflt = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true })).json.order;
+    assert.deepEqual([dflt.paidMethod, dflt.paidAmount], ['transfer', 8000]);
+    // cancelled orders cannot be paid
+    const c = (await staffOrder(s, 3, [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${c.id}/status`, { status: 'cancelled' });
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true })).json.error, 'order_cancelled');
+  });
+});
+
+test('H5 deposit assign: a forced mismatch needs a note (<= 60 chars); a partial deposit leaves a balance, an excess owes a refund', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const o = await d.place(tk[0], '김철수', 'odeng'); // 9,000
+    const under = await d.sms(5000, '김철수');
+    assert.equal(under.status, 'pending');
+    const asg = (nid, body) => s.post(`/api/staff/deposits/${nid}/assign`, body);
+    assert.equal((await asg(under.id, { orderId: o.id, force: true })).json.error, 'note_required');
+    assert.equal((await asg(under.id, { orderId: o.id, force: true, note: '   ' })).json.error, 'note_required');
+    const ok = await asg(under.id, { orderId: o.id, force: true, note: '나머지는 현금' });
+    assert.equal(ok.status, 200, ok.text);
+    assert.deepEqual([ok.json.order.paid, ok.json.order.paidAmount, ok.json.order.balanceDue, ok.json.order.paidMethod], [false, 5000, 4000, 'transfer']);
+    const more = await d.sms(6000, '김철수');
+    const ok2 = await asg(more.id, { orderId: o.id, force: true, note: '잘못 많이 보냄' });
+    assert.deepEqual([ok2.json.order.paid, ok2.json.order.paidAmount, ok2.json.order.overpaid, ok2.json.order.refundDue], [true, 11000, 2000, 2000]);
+    // the audit log keeps the note, not the notice text
+    const log = JSON.stringify(await auditOf(s));
+    assert.ok(log.includes('나머지는 현금') && log.includes('deposit_assign'));
+    assert.ok(!log.includes('Web발신'));
+  } finally { await d.srv.stop(); }
+});
+
+test('H6 refunds: cancelling a paid order owes the money back; marking it done moves it from refund-due to refunded; revenue = received - refunded', async () => {
+  await withBooth(async ({ s }) => {
+    const a = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order; // 8,000
+    const b = (await staffOrder(s, 2, [{ id: 'odeng', qty: 1 }])).json.order; // 9,000
+    await s.post(`/api/staff/orders/${a.id}/paid`, { paid: true, method: 'cash' });
+    await s.post(`/api/staff/orders/${b.id}/paid`, { paid: true });
+    let sale = (await s.get('/api/staff/sales')).json.totals;
+    assert.deepEqual([sale.revenue, sale.refundDue, sale.refundsDone, sale.billed], [17000, 0, 0, 17000]);
+    const cx = (await s.post(`/api/staff/orders/${a.id}/status`, { status: 'cancelled' })).json.order;
+    assert.deepEqual([cx.status, cx.refundDue, cx.paidAmount, cx.balanceDue], ['cancelled', 8000, 8000, 0]);
+    const refunds = (await s.get('/api/staff/state')).json.refunds;
+    assert.deepEqual(refunds.map((r) => [r.orderId, r.amount, r.reason, r.doneAt, r.table]), [[a.id, 8000, 'cancelled', null, 1]]);
+    sale = (await s.get('/api/staff/sales')).json.totals;
+    assert.deepEqual([sale.revenue, sale.refundDue, sale.refundsDone, sale.billed, sale.orders], [17000, 8000, 0, 9000, 1], 'until the cash is handed back the money still counts as received');
+    const done = await s.post(`/api/staff/refunds/${refunds[0].id}/done`, { method: 'cash', note: '현금 반환', amount: refunds[0].amount });
+    assert.equal(done.status, 200, done.text);
+    assert.deepEqual([done.json.refund.method, done.json.refund.note, typeof done.json.refund.doneAt], ['cash', '현금 반환', 'number']);
+    sale = (await s.get('/api/staff/sales')).json.totals;
+    assert.deepEqual([sale.revenue, sale.refundDue, sale.refundsDone], [9000, 0, 8000]);
+    assert.equal((await orderOf(s, a.id)).refundDue, 0);
+    assert.equal((await orderOf(s, a.id)).refundedAmount, 8000);
+    assert.equal((await s.post(`/api/staff/refunds/${refunds[0].id}/done`, { amount: refunds[0].amount })).json.error, 'refund_done');
+    assert.equal((await s.post('/api/staff/refunds/99999/done', { amount: 1 })).status, 404);
+    assert.equal((await s.post(`/api/staff/refunds/${refunds[0].id}/done`, { method: 'gold', amount: refunds[0].amount })).json.error, 'bad_method');
+    assert.equal((await s.post(`/api/staff/orders/${a.id}/paid`, { paid: false })).json.error, 'order_cancelled');
+    // an overpayment on a live order: refund done, then undoing the payment is refused
+    const over = (await staffOrder(s, 3, [{ id: 'cola', qty: 1 }])).json.order; // 2,000
+    await s.post(`/api/staff/orders/${over.id}/paid`, { paid: true, amount: 5000, method: 'cash' });
+    const r2 = (await s.get('/api/staff/state')).json.refunds.find((r) => r.orderId === over.id);
+    assert.equal(r2.amount, 3000);
+    await s.post(`/api/staff/refunds/${r2.id}/done`, { amount: r2.amount }); // default method cash
+    assert.equal((await s.post(`/api/staff/orders/${over.id}/paid`, { paid: false })).json.error, 'has_refunds');
+    const o2 = await orderOf(s, over.id);
+    assert.deepEqual([o2.paid, o2.paidAmount, o2.refundedAmount, o2.refundDue, o2.overpaid], [true, 5000, 3000, 0, 0]);
+    // editing the order UP after a refund must not count the refunded cash as still held
+    const up = (await s.post(`/api/staff/orders/${over.id}/items`, { items: [{ id: 'cola', qty: 2 }] })).json.order; // 4,000, held 2,000
+    assert.deepEqual([up.paid, up.balanceDue, up.total], [false, 2000, 4000]);
+    sale = (await s.get('/api/staff/sales')).json.totals;
+    assert.deepEqual([sale.paidAmount, sale.refundsDone, sale.revenue], [22000, 11000, 11000], 'revenue is Σ received - Σ refunded');
+  });
+});
+
+test('H7 force-clear writes unpaid orders off (미수금): out of revenue, listed in sales and the CSV, gone from the list once paid; unclear removes the write-off', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const a = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order; // 8,000 unpaid
+    const b = (await staffOrder(s, 1, [{ id: 'odeng', qty: 1 }])).json.order; // 9,000, paid partly
+    const c = (await staffOrder(s, 1, [{ id: 'cola', qty: 1 }])).json.order; // 2,000 paid
+    await s.post(`/api/staff/orders/${b.id}/paid`, { paid: true, amount: 4000, method: 'cash' });
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true });
+    const refused = await s.post('/api/staff/tables/1/clear', {});
+    assert.equal(refused.status, 409); assert.equal(refused.json.error, 'unsettled');
+    assert.equal(refused.json.unpaidTotal, 13000, 'balance still owed: 8,000 + (9,000 - 4,000)');
+    const r = await s.post('/api/staff/tables/1/clear', { force: true });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json.writtenOff, { orders: 2, amount: 13000 });
+    assert.equal(r.json.seat, 2);
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.totals.writtenOff, sale.totals.revenue, sale.totals.unpaidRevenue], [13000, 6000, 0], 'revenue is only the money actually received (4,000 + 2,000)');
+    assert.deepEqual(sale.writtenOff.map((w) => [w.orderId, w.table, w.total, w.paidAmount, w.balance]).sort((x, y) => x[0] - y[0]), [[a.id, 1, 8000, 0, 8000], [b.id, 1, 9000, 4000, 5000]]);
+    const csv = await csvOf(srv, s, '/api/staff/sales.csv');
+    assert.ok(csv.bom && csv.text.includes('[미수금]') && csv.text.includes('[환불]') && csv.text.includes(`${a.id},1,8000,0,8000`), csv.text);
+    // an order cleared WITHOUT force (everything settled) writes nothing off
+    const g = new Client(srv);
+    const ok = (await order(g, tk[1], [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${ok.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${ok.id}/status`, { status: 'served' });
+    assert.deepEqual((await s.post('/api/staff/tables/2/clear', {})).json.writtenOff, { orders: 0, amount: 0 });
+    // the cleared seat's old orders are no longer on the board; a late payment still works and leaves the 미수금 list
+    assert.equal((await orderOf(s, a.id)), undefined);
+    const late = await s.post(`/api/staff/orders/${a.id}/paid`, { paid: true, method: 'cash' });
+    assert.equal(late.status, 200, late.text);
+    const sale2 = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale2.totals.writtenOff, sale2.totals.revenue], [5000, 16000], 'received: 4,000 + 2,000 + 2,000 + the late 8,000');
+    assert.deepEqual(sale2.writtenOff.map((w) => w.orderId), [b.id]);
+  });
+});
+
+test('H8 unclear: only while the new seat is completely empty and within 10 minutes', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv);
+    assert.equal((await s.post('/api/staff/tables/1/unclear', {})).json.reason, 'no_clear', 'nothing to undo');
+    const o = (await order(g, tk[0], [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${o.id}/status`, { status: 'served' });
+    assert.equal((await stTables(s))[0].unclearUntil, null);
+    assert.equal((await s.post('/api/staff/tables/1/clear', {})).json.seat, 2);
+    const until = (await stTables(s))[0].unclearUntil;
+    assert.ok(until > Date.now() && until <= Date.now() + 10 * 60000, 'staff are told how long the undo is possible');
+    assert.equal((await g.get(`/api/t/${tk[0]}`)).json.orders.length, 0);
+    const un = await s.post('/api/staff/tables/1/unclear', {});
+    assert.equal(un.status, 200, un.text);
+    assert.deepEqual([un.json.seat, un.json.table], [1, 1]);
+    assert.deepEqual((await g.get(`/api/t/${tk[0]}`)).json.orders.map((x) => x.id), [o.id], 'the old seat (orders, coupons) is back');
+    assert.equal((await stTables(s))[0].unclearUntil, null);
+    // new guests already used the new seat -> refused with the reason
+    await s.post('/api/staff/tables/1/clear', {});
+    const o2 = (await order(new Client(srv), tk[0], [{ id: 'cola', qty: 1 }])).json.order;
+    const used = await s.post('/api/staff/tables/1/unclear', {});
+    assert.deepEqual([used.status, used.json.error, used.json.reason, used.json.used], [409, 'cannot_undo', 'seat_in_use', { orders: 1 }]);
+    assert.equal((await orderOf(s, o2.id)).seat, 2);
+    // too old
+    const db = dbOf(srv);
+    await s.post('/api/staff/tables/3/clear', {});
+    db.prepare('UPDATE table_clears SET at=at-? WHERE table_id=3').run(11 * 60000);
+    db.close();
+    const old = await s.post('/api/staff/tables/3/unclear', {});
+    assert.deepEqual([old.status, old.json.error, old.json.reason], [409, 'cannot_undo', 'too_old']);
+    // a table move after the clear
+    await s.post('/api/staff/tables/4/clear', {});
+    await s.post('/api/staff/tables/move', { from: 4, to: 5 });
+    assert.equal((await s.post('/api/staff/tables/4/unclear', {})).json.reason, 'seat_changed');
+  });
+});
+
+test('H8 unclear restores written-off orders as unpaid again', async () => {
+  await withBooth(async ({ s }) => {
+    const a = (await staffOrder(s, 1, [{ id: 'cola', qty: 1 }])).json.order;
+    assert.equal((await s.post('/api/staff/tables/1/clear', { force: true })).json.writtenOff.orders, 1);
+    assert.equal((await s.get('/api/staff/sales')).json.totals.writtenOff, 2000);
+    assert.equal((await s.post('/api/staff/tables/1/unclear', {})).status, 200);
+    assert.equal((await s.get('/api/staff/sales')).json.totals.writtenOff, 0);
+    const back = await orderOf(s, a.id);
+    assert.deepEqual([back.writtenOff, back.balanceDue, back.paid], [false, 2000, false]);
+    assert.equal((await s.get('/api/staff/sales')).json.totals.unpaidRevenue, 2000);
+  });
+});
+
+test('H9 notice banner: shown in guest, wait and board state, validated, cleared by reset', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv);
+    const guestN = async () => (await g.get(`/api/t/${tk[0]}`)).json.notice;
+    assert.equal(await guestN(), null);
+    const set = await s.post('/api/staff/notice', { text: '  주문이 밀려 20분 걸려요  ', level: 'warn' });
+    assert.equal(set.status, 200, set.text);
+    assert.deepEqual(set.json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
+    assert.deepEqual(await guestN(), { text: '주문이 밀려 20분 걸려요', level: 'warn' });
+    assert.deepEqual((await g.get('/api/wait/info')).json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
+    assert.deepEqual((await g.get('/api/board')).json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
+    assert.deepEqual((await s.get('/api/staff/state')).json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
+    const w = (await g.post('/api/wait', { nick: '대기', size: 2 })).json;
+    assert.deepEqual((await g.get(`/api/wait/${w.id}?secret=${w.secret}`)).json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
+    assert.deepEqual((await s.post('/api/staff/notice', { text: '곧 마감' })).json.notice, { text: '곧 마감', level: 'info' }, 'level defaults to info');
+    assert.equal((await s.post('/api/staff/notice', { text: 'x'.repeat(81) })).json.error, 'bad_text');
+    assert.equal((await s.post('/api/staff/notice', { text: 'ok', level: 'red' })).json.error, 'bad_level');
+    assert.equal((await s.post('/api/staff/notice', { text: 42 })).json.error, 'bad_text');
+    assert.equal((await s.post('/api/staff/notice', { text: 'x'.repeat(80) })).status, 200, '80 characters are fine');
+    assert.equal((await new Client(srv).post('/api/staff/notice', { text: 'hack' })).status, 401);
+    assert.deepEqual((await s.post('/api/staff/notice', { text: '' })).json.notice, null, 'empty text clears');
+    assert.equal(await guestN(), null);
+    await s.post('/api/staff/notice', { text: '다시' });
+    assert.equal((await s.post('/api/staff/reset', { confirm: '초기화' })).status, 200);
+    assert.equal(await guestN(), null, 'reset clears the banner');
+  });
+});
+
+test('H10 stock counters: decrement in the order transaction, insufficient_stock, automatic sold-out at 0, restore on cancel/reduce, guests see small counts', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const it = await mkItem(s, '한정 안주', 5000);
+    const setStock = (v) => s.post(`/api/staff/menu/items/${it}`, { stockLeft: v });
+    assert.equal((await setStock(-1)).json.error, 'bad_stock_left');
+    assert.equal((await setStock(10000)).json.error, 'bad_stock_left');
+    assert.equal((await setStock(1.5)).json.error, 'bad_stock_left');
+    assert.equal((await setStock('3')).json.error, 'bad_stock_left');
+    assert.equal((await setStock(10)).json.item.stockLeft, 10);
+    const guestItem = async () => (await new Client(srv).get(`/api/t/${tk[0]}`)).json.menu.items.find((i) => i.id === it);
+    assert.equal((await guestItem()).stockLeft, null, 'guests only see the count once it is 5 or less');
+    const g = new Client(srv);
+    const o1 = (await order(g, tk[0], [{ id: it, qty: 6 }])).json.order;
+    assert.equal((await guestItem()).stockLeft, 4);
+    const st = async () => (await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === it);
+    assert.deepEqual([(await st()).stockLeft, (await st()).soldOut], [4, false]);
+    const short = await order(g, tk[0], [{ id: it, qty: 5 }]);
+    assert.equal(short.status, 409);
+    assert.deepEqual([short.json.error, short.json.id, short.json.left], ['insufficient_stock', it, 4]);
+    assert.equal((await st()).stockLeft, 4, 'a refused order takes nothing');
+    const o2 = (await order(g, tk[0], [{ id: it, qty: 4 }])).json.order;
+    assert.deepEqual([(await st()).stockLeft, (await st()).soldOut, (await st()).stockAuto], [0, true, true], 'automatic sold-out at 0');
+    assert.equal((await order(g, tk[0], [{ id: it, qty: 1 }])).json.error, 'sold_out');
+    assert.equal((await guestItem()).soldOut, true);
+    // cancelling restores the stock and lifts the AUTOMATIC sold-out
+    await s.post(`/api/staff/orders/${o2.id}/status`, { status: 'cancelled' });
+    assert.deepEqual([(await st()).stockLeft, (await st()).soldOut, (await st()).stockAuto], [4, false, false]);
+    // reducing a line restores the difference
+    await s.post(`/api/staff/orders/${o1.id}/items`, { items: [{ id: it, qty: 2 }] });
+    assert.equal((await st()).stockLeft, 8);
+    await s.post(`/api/staff/orders/${o1.id}/items`, { items: [{ id: it, qty: 4 }] });
+    assert.equal((await st()).stockLeft, 6);
+    assert.equal((await s.post(`/api/staff/orders/${o1.id}/items`, { items: [{ id: it, qty: 21 }] })).json.error, 'bad_qty');
+    assert.equal((await s.post(`/api/staff/orders/${o1.id}/items`, { items: [{ id: it, qty: 11 }] })).json.error, 'insufficient_stock');
+    assert.equal((await st()).stockLeft, 6);
+    // a MANUAL sold-out is never lifted by stock changes
+    await s.post(`/api/staff/menu/${it}/soldout`, { soldOut: true });
+    await s.post(`/api/staff/orders/${o1.id}/status`, { status: 'cancelled' });
+    assert.deepEqual([(await st()).stockLeft, (await st()).soldOut, (await st()).stockAuto], [10, true, false]);
+    await setStock(null);
+    assert.deepEqual([(await st()).stockLeft, (await st()).soldOut], [null, true], 'clearing the limit keeps a manual sold-out');
+    // setting 0 by hand = automatic sold-out; raising it lifts it again
+    await s.post(`/api/staff/menu/${it}/soldout`, { soldOut: false });
+    await setStock(0);
+    assert.deepEqual([(await st()).soldOut, (await st()).stockAuto], [true, true]);
+    await setStock(3);
+    assert.deepEqual([(await st()).soldOut, (await st()).stockLeft], [false, 3]);
+    // created with a stock
+    const nid = (await s.post('/api/staff/menu/items', { name: '재고품', price: 1000, category: '테스트', stockLeft: 2 })).json.item;
+    assert.equal(nid.stockLeft, 2);
+    // two guests race for the last pieces: stock never goes negative
+    await setStock(3);
+    const res = await Promise.all(Array.from({ length: 6 }, (_, i) => order(new Client(srv), tk[2 + (i % 4)], [{ id: it, qty: 1 }])));
+    assert.equal(res.filter((r) => r.status === 201).length, 3);
+    assert.equal((await st()).stockLeft, 0);
+  });
+});
+
+test('H11 manual coupons: discount or item, at most 20 per hour, void blocks use, used coupons cannot be voided', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const mk = (n, body) => s.post(`/api/staff/tables/${n}/coupons`, body);
+    assert.equal((await mk(1, { type: 'gift', label: 'x' })).json.error, 'bad_type');
+    assert.equal((await mk(1, { type: 'discount', label: 'x' })).json.error, 'bad_amount');
+    assert.equal((await mk(1, { type: 'discount', amount: 150, label: 'x' })).json.error, 'bad_amount');
+    assert.equal((await mk(1, { type: 'discount', amount: 1000, label: '' })).json.error, 'bad_label');
+    assert.equal((await mk(99, { type: 'item', label: '서비스' })).status, 404);
+    const item = (await mk(1, { type: 'item', label: '서비스 음료' })).json.coupon;
+    assert.deepEqual([item.type, item.label, item.source, item.table, item.amount], ['item', '서비스 음료', 'staff', 1, null]);
+    const disc = (await mk(1, { type: 'discount', amount: 2000, label: '직원 할인' })).json.coupon;
+    assert.match(disc.code, /^[A-Z0-9]{6}$/, 'same code format as reward coupons');
+    const g = new Client(srv);
+    assert.deepEqual((await g.get(`/api/t/${tk[0]}`)).json.coupons.map((c) => c.code).sort(), [disc.code, item.code].sort(), 'guests see manual coupons');
+    // the discount works on an order; the item coupon is redeemed by staff
+    const o = (await order(g, tk[0], [{ id: 'tteokbokki', qty: 1 }], { couponCode: disc.code })).json.order;
+    assert.equal(o.total, 6000);
+    assert.equal((await s.post(`/api/staff/coupons/${disc.code}/void`, {})).json.error, 'coupon_used');
+    assert.equal((await s.post(`/api/staff/coupons/${item.code}/void`, {})).status, 200);
+    assert.equal((await s.post(`/api/staff/coupons/${item.code}/void`, {})).json.error, 'coupon_void');
+    assert.equal((await s.post('/api/staff/coupons/ZZZZZZ/void', {})).status, 404);
+    assert.equal((await s.post('/api/staff/coupons/redeem', { code: item.code })).json.error, 'coupon_void');
+    assert.ok(!(await g.get(`/api/t/${tk[0]}`)).json.coupons.some((c) => c.code === item.code), 'voided coupons disappear for guests');
+    const d2 = (await mk(2, { type: 'discount', amount: 1000, label: '무효 예정' })).json.coupon;
+    await s.post(`/api/staff/coupons/${d2.code}/void`, {});
+    assert.equal((await order(new Client(srv), tk[1], [{ id: 'tteokbokki', qty: 1 }], { couponCode: d2.code })).json.error, 'coupon_void');
+    // 20 per hour (the three above count)
+    let made = 3;
+    for (; made < 20; made++) assert.equal((await mk(3, { type: 'item', label: `쿠폰${made}` })).status, 200);
+    const over = await mk(3, { type: 'item', label: '넘침' });
+    assert.deepEqual([over.status, over.json.error], [409, 'manual_coupon_limit']);
+    // the hour window: older coupons stop counting
+    const db = dbOf(srv);
+    db.prepare("UPDATE coupons SET created_at=created_at-? WHERE source='staff'").run(61 * 60000);
+    db.close();
+    assert.equal((await mk(3, { type: 'item', label: '다시 가능' })).status, 200);
+  });
+});
+
+test('H12 wait no-show: called parties become no-show after the timeout (setting), staff may recall once', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const st0 = (await s.get('/api/staff/state')).json;
+    assert.equal(st0.waitCallTimeoutMin, 5, 'default 5 minutes');
+    assert.equal((await s.post('/api/staff/waitlist/timeout', { minutes: 0 })).json.error, 'bad_minutes');
+    assert.equal((await s.post('/api/staff/waitlist/timeout', { minutes: 31 })).json.error, 'bad_minutes');
+    assert.equal((await s.post('/api/staff/waitlist/timeout', { minutes: 2.5 })).json.error, 'bad_minutes');
+    assert.equal((await new Client(srv).post('/api/staff/waitlist/timeout', { minutes: 3 })).status, 401);
+    assert.equal((await s.post('/api/staff/waitlist/timeout', { minutes: 3 })).json.minutes, 3);
+    assert.equal((await s.get('/api/staff/state')).json.waitCallTimeoutMin, 3);
+    const g = new Client(srv);
+    const w = (await g.post('/api/wait', { nick: '손님', size: 2 })).json;
+    const wid = w.id;
+    assert.equal((await s.post(`/api/staff/wait/${wid}/recall`, {})).json.error, 'not_noshow');
+    assert.equal((await s.post(`/api/staff/wait/${wid}/call`, {})).status, 200);
+    const status = async () => (await g.get(`/api/wait/${wid}?secret=${w.secret}`)).json.status;
+    assert.equal(await status(), 'called');
+    const db = dbOf(srv);
+    db.prepare('UPDATE waitlist SET called_at=called_at-? WHERE id=?').run(2 * 60000, wid);
+    assert.equal(await status(), 'called', 'still inside the 3 minutes');
+    db.prepare('UPDATE waitlist SET called_at=called_at-? WHERE id=?').run(2 * 60000, wid);
+    assert.equal(await status(), 'noshow', 'lazily evaluated on read');
+    assert.equal((await s.get('/api/staff/state')).json.waitlist.find((x) => x.id === wid).status, 'noshow');
+    assert.equal((await s.post(`/api/staff/wait/${wid}/call`, {})).json.error, 'wait_noshow');
+    const rc = await s.post(`/api/staff/wait/${wid}/recall`, {});
+    assert.equal(rc.status, 200, rc.text);
+    assert.equal(await status(), 'called');
+    assert.equal((await s.get('/api/staff/state')).json.waitlist.find((x) => x.id === wid).recalled, true);
+    db.prepare('UPDATE waitlist SET called_at=called_at-? WHERE id=?').run(10 * 60000, wid);
+    assert.equal(await status(), 'noshow');
+    assert.equal((await s.post(`/api/staff/wait/${wid}/recall`, {})).json.error, 'already_recalled', 'only once');
+    // a no-show can be cancelled by the guest or by staff, and is not counted in the queue
+    assert.equal((await g.get('/api/wait/info')).json.waitingTotal, 0);
+    assert.equal((await s.post(`/api/staff/wait/${wid}/cancel`, {})).status, 200);
+    assert.equal(await status(), 'cancelled');
+    // seating a called party before the timeout is unaffected
+    const w2 = (await g.post('/api/wait', { nick: '둘째', size: 1 })).json;
+    await s.post(`/api/staff/wait/${w2.id}/call`, {});
+    assert.equal((await s.post(`/api/staff/wait/${w2.id}/seat`, {})).status, 200);
+    db.prepare('UPDATE waitlist SET called_at=called_at-? WHERE id=?').run(60 * 60000, w2.id);
+    assert.equal((await g.get(`/api/wait/${w2.id}?secret=${w2.secret}`)).json.status, 'seated');
+    db.close();
+  });
+});
+
+test('H12 the no-show timeout default comes from WAIT_CALL_TIMEOUT_MIN (1..30, anything else refuses to start)', async () => {
+  await withBooth(async ({ s }) => assert.equal((await s.get('/api/staff/state')).json.waitCallTimeoutMin, 9), { env: { WAIT_CALL_TIMEOUT_MIN: '9' } });
+  await assert.rejects(boot({ env: { WAIT_CALL_TIMEOUT_MIN: '999' } }), /WAIT_CALL_TIMEOUT_MIN must be an integer between 1 and 30/);
+});
+
+test('H12 a timer marks no-shows without anyone reading the queue', async () => {
+  // the server sweeps every 30 s; here the sweep is proven through the staff snapshot on the SSE-free path
+  await withBooth(async ({ srv, s }) => {
+    const g = new Client(srv);
+    const w = (await g.post('/api/wait', { nick: '손님', size: 1 })).json;
+    await s.post(`/api/staff/wait/${w.id}/call`, {});
+    const db = dbOf(srv);
+    db.prepare('UPDATE waitlist SET called_at=called_at-? WHERE id=?').run(6 * 60000, w.id);
+    db.close();
+    assert.equal((await s.get('/api/staff/state')).json.waitlist[0].status, 'noshow');
+  });
+});
+
+test('H13 audit log: money and setting changes are recorded without PINs, tokens, secrets or account numbers; pagination; login and lockout recorded', async () => {
+  const d = await depositSetup({ LOCKOUT_MS: '60000', PAY_BANK: '신한', PAY_ACCOUNT: '110-123-456789', PAY_HOLDER: '동아리' });
+  try {
+    const { srv, s, tk, secret } = d;
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 2 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 10000 });
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: false });
+    await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }] });
+    await s.post(`/api/staff/orders/${o.id}/service`, { itemId: 'cola', qty: 1 });
+    await s.post(`/api/staff/orders/${o.id}/move`, { to: 2 });
+    const cx = (await staffOrder(s, 3, [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${cx.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${cx.id}/status`, { status: 'cancelled' });
+    const rf = (await s.get('/api/staff/state')).json.refunds[0];
+    await s.post(`/api/staff/refunds/${rf.id}/done`, { method: 'cash', amount: rf.amount });
+    const cp = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '서비스' })).json.coupon;
+    await s.post(`/api/staff/coupons/${cp.code}/void`, {});
+    const cp2 = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '서비스2' })).json.coupon;
+    await s.post('/api/staff/coupons/redeem', { code: cp2.code });
+    await s.post('/api/staff/menu/cola/soldout', { soldOut: true });
+    await s.post('/api/staff/menu/items/cola', { price: 2500 });
+    await s.post('/api/staff/menu/items/cola/photo/delete', {});
+    await s.post('/api/staff/rewards/drink', { stock: 5 });
+    await s.post('/api/staff/hourly-reward', { enabled: false });
+    await s.post('/api/staff/member-discount', { pct: 20 });
+    await s.post('/api/staff/pay', { holder: '새예금주', confirmAccount: '110-123-456789' });
+    await s.post('/api/staff/ordering', { open: false });
+    await s.post('/api/staff/tables/count', { count: 30 });
+    await s.post('/api/staff/tables/5/rotate', {});
+    await s.post('/api/staff/deposit-hook/rotate', {});
+    const sms = JSON.parse((await hookPost(srv, (await s.get('/api/staff/deposit-hook')).json.secret, { text: smsText(5000, '아무개', 777) })).text);
+    await s.post(`/api/staff/deposits/${sms.id}/dismiss`, {});
+    await s.post('/api/staff/tables/6/clear', {});
+    await s.post('/api/staff/tables/move', { from: 7, to: 8 });
+    await s.post('/api/staff/notice', { text: '공지' });
+    // wrong PINs -> lockout, correct login
+    const bad = new Client(srv);
+    for (let i = 0; i < 5; i++) await bad.post('/api/staff/login', { pin: '000000' });
+    const entries = await auditOf(s);
+    const actions = new Set(entries.map((e) => e.action));
+    for (const a of ['order_create_staff', 'order_paid', 'order_unpaid', 'order_edit', 'order_service', 'order_move', 'order_cancel', 'refund_done', 'coupon_manual', 'coupon_void', 'coupon_redeem',
+      'menu_update', 'pay_settings', 'member_discount', 'table_clear', 'table_move', 'notice', 'deposit_dismiss', 'login', 'lockout', 'staff_action']) assert.ok(actions.has(a), `missing audit action ${a}: ${[...actions].join(',')}`);
+    const staffActions = entries.filter((e) => e.action === 'staff_action').map((e) => e.target);
+    for (const a of ['ordering', 'table_count', 'table_rotate', 'deposit_secret_rotate', 'member_discount', 'notice']) assert.ok(actions.has(a), `store-level audit ${a}`);
+    for (const t of ['/api/staff/menu/cola/soldout', '/api/staff/hourly-reward', '/api/staff/rewards/drink', '/api/staff/menu/items/cola/photo/delete']) {
+      assert.ok(staffActions.includes(t), `generic audit row for ${t}: ${staffActions.join(' | ')}`);
+    }
+    // newest first, ids strictly decreasing, no PIN / token / secret / account number anywhere
+    assert.ok(entries.every((e, i) => i === 0 || e.id < entries[i - 1].id));
+    const text = JSON.stringify(entries);
+    const pay = (await s.get('/api/staff/state')).json.pay;
+    for (const secretText of [PIN, '000000', secret, (await s.get('/api/staff/deposit-hook')).json.secret, ...tk.slice(0, 3), pay.account, 'Web발신']) assert.ok(secretText && !text.includes(secretText), `audit leaks ${String(secretText).slice(0, 4)}…`);
+    assert.ok(text.includes('cash 10000'), 'amounts and methods are recorded');
+    // pagination
+    const p1 = (await s.get('/api/staff/audit?limit=5')).json;
+    assert.equal(p1.entries.length, 5);
+    assert.equal(p1.next, p1.entries[4].id);
+    const p2 = (await s.get(`/api/staff/audit?limit=5&before=${p1.next}`)).json;
+    assert.ok(p2.entries.every((e) => e.id < p1.next) && p2.entries.length === 5);
+    assert.equal((await s.get('/api/staff/audit?limit=1000')).json.entries.length <= 200, true, 'limit is capped');
+    assert.equal((await new Client(srv).get('/api/staff/audit')).status, 401);
+    assert.ok(entries[0].at <= Date.now() && entries[0].summary !== undefined && entries[0].target !== undefined);
+  } finally { await d.srv.stop(); }
+});
+
+test('H13 the audit log keeps only the newest 5000 rows and survives reset', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const db = dbOf(srv);
+    const ins = db.prepare("INSERT INTO audit_log(at, action, target, summary) VALUES(1, 'x', 'y', 'z')");
+    db.exec('BEGIN'); for (let i = 0; i < 5100; i++) ins.run(); db.exec('COMMIT');
+    db.close();
+    await s.post('/api/staff/notice', { text: '한 줄' }); // any audited write trims
+    const db2 = dbOf(srv);
+    assert.equal(db2.prepare('SELECT COUNT(*) n FROM audit_log').get().n, 5000);
+    db2.close();
+    await s.post('/api/staff/reset', { confirm: '초기화' });
+    const db3 = dbOf(srv);
+    assert.ok(db3.prepare('SELECT COUNT(*) n FROM audit_log').get().n >= 5000, 'reset does not erase the audit log');
+    assert.ok(db3.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='reset'").get().n >= 1);
+    db3.close();
+  });
+});
+
+test('H14 day close: needs the confirm word, freezes a report, wipes the day, keeps menu / rewards / settings / tokens / audit; reset makes no report', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv);
+    const a = (await order(g, tk[0], [{ id: 'tteokbokki', qty: 2 }])).json.order; // 16,000
+    await s.post(`/api/staff/orders/${a.id}/paid`, { paid: true, method: 'cash' });
+    const b = (await staffOrder(s, 2, [{ id: 'odeng', qty: 1 }])).json.order; // 9,000, 3,000 received
+    await s.post(`/api/staff/orders/${b.id}/paid`, { paid: true, amount: 3000, method: 'cash' });
+    const c = (await staffOrder(s, 3, [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${c.id}/status`, { status: 'cancelled' }); // refund due 2,000
+    await s.post('/api/staff/tables/2/clear', { force: true }); // writes off b's 6,000 balance
+    await s.post('/api/staff/notice', { text: '공지' });
+    await s.post('/api/staff/menu/cola/soldout', { soldOut: true });
+    await s.post('/api/staff/pay', { holder: '마감예금주', confirmAccount: (await s.get('/api/staff/state')).json.pay.account });
+    const before = (await s.get('/api/staff/sales')).json;
+    const tokensBefore = tk.slice();
+    assert.equal((await s.post('/api/staff/day/close', {})).status, 400);
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '초기화' })).status, 400, 'reset word does not close the day');
+    assert.equal((await new Client(srv).post('/api/staff/day/close', { confirm: '마감' })).status, 401);
+    assert.deepEqual((await s.get('/api/staff/day/reports')).json.reports, []);
+    const refused = await s.post('/api/staff/day/close', { confirm: '마감' });
+    assert.deepEqual([refused.status, refused.json.error], [409, 'open_items']);
+    assert.equal((await s.get('/api/staff/day/reports')).json.reports.length, 0, 'nothing happened');
+    assert.equal((await orderOf(s, a.id)).id, a.id, 'nothing was wiped');
+    const r = await s.post('/api/staff/day/close', { confirm: '마감', force: true });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.report.id, 1);
+    assert.match(r.json.report.label, /^\d{4}-\d\d-\d\d$/);
+    assert.deepEqual([r.json.report.totals.revenue, r.json.report.totals.refundDue, r.json.report.totals.writtenOff], [before.totals.revenue, 2000, 6000]);
+    assert.deepEqual([before.totals.revenue, before.totals.paidAmount], [16000 + 3000 + 2000, 21000]);
+    // the day is wiped
+    const st = (await s.get('/api/staff/state')).json;
+    assert.deepEqual([st.orders.length, st.refunds.length, st.coupons.length, st.notice], [0, 0, 0, null]);
+    assert.deepEqual((await s.get('/api/staff/sales')).json.totals, { orders: 0, billed: 0, discount: 0, memberDiscount: 0, memberOrders: 0, paidAmount: 0, refundsDone: 0, paidRevenue: 0, revenue: 0, refundDue: 0, writtenOff: 0, unpaidRevenue: 0 });
+    // ...but menu, rewards, settings, tokens and the audit log stay
+    assert.equal(st.pay.holder, '마감예금주');
+    assert.deepEqual((await tablesOf(s)).map((t) => t.token), tokensBefore);
+    assert.ok(st.rewards.length === 3 && st.menu.items.length >= 4);
+    assert.equal(st.menu.items.find((i) => i.id === 'cola').soldOut, false, 'sold-out flags reset like reset does');
+    assert.ok((await auditOf(s)).some((e) => e.action === 'day_close'));
+    assert.deepEqual((await stTables(s)).map((t) => t.seat), Array(tk.length).fill(1));
+    // the report is frozen and readable
+    const list = (await s.get('/api/staff/day/reports')).json.reports;
+    assert.deepEqual(list.map((x) => x.id), [1]);
+    assert.equal(list[0].totals.revenue, 21000);
+    const rep = (await s.get('/api/staff/day/reports/1')).json;
+    assert.deepEqual([rep.id, rep.totals.revenue, rep.writtenOff.length, rep.refunds.length, rep.byItem.length > 0], [1, 21000, 1, 1, true]);
+    assert.equal((await s.get('/api/staff/day/reports/99')).status, 404);
+    const csv = await csvOf(srv, s, '/api/staff/day/reports/1.csv');
+    assert.equal(csv.status, 200);
+    assert.ok(csv.bom && csv.text.includes('[미수금]') && csv.text.includes('[환불]') && csv.text.includes('21000'), csv.text.slice(0, 200));
+    assert.match(csv.headers.get('content-type'), /text\/csv/);
+    assert.match(csv.headers.get('content-disposition'), /attachment/);
+    assert.equal((await new Client(srv).get('/api/staff/day/reports')).status, 401);
+    assert.equal((await new Client(srv).get('/api/staff/day/reports/1.csv')).status, 401);
+    // a second day gets its own report; reset creates none
+    const d2 = (await order(new Client(srv), tk[0], [{ id: 'cola', qty: 1 }])).json.order;
+    assert.equal(d2.id, 1, 'order numbering restarts like reset');
+    assert.equal((await s.post('/api/staff/reset', { confirm: '초기화' })).status, 200);
+    assert.equal((await s.get('/api/staff/day/reports')).json.reports.length, 1, 'reset creates no report');
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '마감' })).json.error, 'nothing_to_close', 'the day was just emptied by reset');
+    await s.post('/api/staff/day/close', { confirm: '마감', force: true });
+    assert.deepEqual((await s.get('/api/staff/day/reports')).json.reports.map((x) => x.id), [2, 1]);
+    assert.equal((await s.get('/api/staff/day/reports/1')).json.totals.revenue, 21000, 'earlier reports never change');
+  });
+});
+
+test('H14 closing the day takes a backup first', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await order(new Client(srv), tk[0], [{ id: 'cola', qty: 1 }]);
+    const dir = path.join(srv.data, 'backup');
+    const count = () => (fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.db')).length : 0);
+    const before = count();
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '마감', force: true })).status, 200);
+    assert.ok(count() > before, 'a copy of the data about to be wiped was written');
+  });
+});
+
+test('H15 stale writes: expectedUpdatedAt on status / paid / items / service / move / refund; a stale view gets 409 stale with the current order', async () => {
+  await withBooth(async ({ s }) => {
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    const t0 = o.updatedAt;
+    // a first staff member advances the order
+    const r1 = await s.post(`/api/staff/orders/${o.id}/status`, { status: 'cooking', expectedUpdatedAt: t0 });
+    assert.equal(r1.status, 200, r1.text);
+    assert.ok(r1.json.order.updatedAt > t0, 'updatedAt strictly increases');
+    // a second one still holds the old view
+    for (const [p, body] of [
+      [`/api/staff/orders/${o.id}/status`, { status: 'cancelled' }], [`/api/staff/orders/${o.id}/paid`, { paid: true }],
+      [`/api/staff/orders/${o.id}/items`, { items: [{ id: 'cola', qty: 1 }] }], [`/api/staff/orders/${o.id}/service`, { itemId: 'cola', qty: 1 }], [`/api/staff/orders/${o.id}/move`, { to: 2 }],
+    ]) {
+      const r = await s.post(p, { ...body, expectedUpdatedAt: t0 });
+      assert.equal(r.status, 409, `${p}: ${r.text}`);
+      assert.equal(r.json.error, 'stale', p);
+      assert.equal(r.json.order.id, o.id); assert.equal(r.json.order.status, 'cooking'); assert.equal(r.json.order.updatedAt, r1.json.order.updatedAt, 'the current order is returned');
+    }
+    assert.equal((await orderOf(s, o.id)).status, 'cooking', 'nothing was applied');
+    assert.equal((await orderOf(s, o.id)).paid, false);
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/status`, { status: 'served', expectedUpdatedAt: 'x' })).json.error, 'bad_expected');
+    // without expectedUpdatedAt the call still works (backward compatible)
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/status`, { status: 'served' })).status, 200);
+    // matching timestamp passes for every kind of write, each advancing updatedAt
+    let cur = await orderOf(s, o.id);
+    for (const [p, body] of [[`/api/staff/orders/${o.id}/paid`, { paid: true }], [`/api/staff/orders/${o.id}/service`, { itemId: 'cola', qty: 1 }], [`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 2 }] }]]) {
+      const r = await s.post(p, { ...body, expectedUpdatedAt: cur.updatedAt });
+      assert.equal(r.status, 200, `${p}: ${r.text}`);
+      assert.ok(r.json.order.updatedAt > cur.updatedAt, p);
+      cur = r.json.order;
+    }
+    const mv = await s.post(`/api/staff/orders/${o.id}/move`, { to: 2, expectedUpdatedAt: cur.updatedAt });
+    assert.equal(mv.status, 200, mv.text);
+    // refund done honours it too
+    const c = (await staffOrder(s, 3, [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true });
+    const cx = (await s.post(`/api/staff/orders/${c.id}/status`, { status: 'cancelled' })).json.order;
+    const rid = (await s.get('/api/staff/state')).json.refunds.find((x) => x.orderId === c.id).id;
+    assert.equal((await s.post(`/api/staff/refunds/${rid}/done`, { amount: 2000, expectedUpdatedAt: cx.updatedAt - 1 })).json.error, 'stale');
+    assert.equal((await s.post(`/api/staff/refunds/${rid}/done`, { amount: 2000, expectedUpdatedAt: cx.updatedAt })).status, 200);
+  });
+});
+
+test('H15 two phones tap paid at once: only one payment is applied', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const s2 = await staffLogin(srv);
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    const res = await Promise.all([s.post(`/api/staff/orders/${o.id}/paid`, { paid: true }), s2.post(`/api/staff/orders/${o.id}/paid`, { paid: true })]);
+    assert.deepEqual(res.map((r) => r.status).sort(), [200, 409]);
+    assert.equal((await orderOf(s, o.id)).paidAmount, 8000, 'never double-counted');
+    assert.equal((await s.get('/api/staff/sales')).json.totals.revenue, 8000);
+  });
+});
+
+test('every new staff endpoint requires a session', async () => {
+  const anon = guest();
+  const checks = [
+    ['POST', '/api/staff/tables/1/orders', { key: 'abcdefgh', items: [{ id: 'cola', qty: 1 }] }], ['POST', '/api/staff/orders/1/items', { items: [] }], ['POST', '/api/staff/orders/1/service', { itemId: 'cola', qty: 1 }],
+    ['POST', '/api/staff/orders/1/move', { to: 2 }], ['POST', '/api/staff/refunds/1/done', {}], ['POST', '/api/staff/tables/1/unclear', {}], ['POST', '/api/staff/notice', { text: 'x' }],
+    ['POST', '/api/staff/tables/1/coupons', { type: 'item', label: 'x' }], ['POST', '/api/staff/coupons/ABCDEF/void', {}], ['POST', '/api/staff/waitlist/timeout', { minutes: 3 }],
+    ['POST', '/api/staff/wait/1/recall', {}], ['GET', '/api/staff/audit'], ['POST', '/api/staff/day/close', { confirm: '마감' }], ['GET', '/api/staff/day/reports'], ['GET', '/api/staff/day/reports/1'], ['GET', '/api/staff/day/reports/1.csv'],
+  ];
+  for (const [m, p, b] of checks) {
+    const r = await anon.req(m, p, b);
+    assert.equal(r.status, 401, `${m} ${p} -> ${r.status}`);
+  }
+});
+
+// ---- property-style test: random staff sequences never break the money invariants ----
+function lcg(seed) { let x = seed >>> 0; return () => ((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) / 2 ** 32); }
+for (const seed of [11, 4242, 90210]) {
+  test(`money invariants hold after every step of a random staff sequence (seed ${seed})`, async () => {
+    const rnd = lcg(seed);
+    const pick = (a) => a[Math.floor(rnd() * a.length)];
+    await withBooth(async ({ srv, s }) => {
+      const ids = ['tteokbokki', 'odeng', 'fries', 'cola'];
+      let refundsDoneByMe = 0;
+      const check = async (step) => {
+        const st = (await s.get('/api/staff/state')).json;
+        const sale = (await s.get('/api/staff/sales')).json;
+        let doneSum = 0;
+        for (const o of st.orders) {
+          const where = `${step}, order #${o.id} ${JSON.stringify({ t: o.total, p: o.paidAmount, st: o.status, paid: o.paid })}`;
+          assert.equal(o.subtotal - o.memberDiscount - o.couponDiscount, o.total, `total = subtotal - member - coupon: ${where}`);
+          assert.ok(o.total >= 0, `total >= 0: ${where}`);
+          assert.ok(o.paidAmount >= 0 && o.balanceDue >= 0 && o.overpaid >= 0 && o.refundDue >= 0 && o.refundedAmount >= 0, `nothing negative: ${where}`);
+          const expectedDue = o.status === 'cancelled' ? o.paidAmount - o.refundedAmount : Math.max(0, o.paidAmount - o.total - o.refundedAmount);
+          assert.equal(o.refundDue, Math.max(0, expectedDue), `refundDue: ${where}`);
+          if (o.status !== 'cancelled') assert.equal(o.paid, o.paidAmount - o.refundedAmount >= o.total && (o.paidAmount > 0 || o.total === 0) ? true : false, `paid flag follows the money held: ${where}`);
+          doneSum += o.refundedAmount;
+        }
+        // orders cleared away still count: the sales figure is global
+        assert.equal(sale.totals.revenue, sale.totals.paidAmount - sale.totals.refundsDone, `revenue = received - refunded: ${step}`);
+        assert.equal(Object.values(sale.byMethod).reduce((n, m) => n + m.net, 0), sale.totals.revenue, `Σ net by method = revenue: ${step}`);
+        assert.equal(Object.values(sale.byMethod).reduce((n, m) => n + m.received, 0), sale.totals.paidAmount, `Σ received by method = paidAmount: ${step}`);
+        assert.ok(sale.totals.revenue >= 0 && sale.totals.refundDue >= 0 && sale.totals.writtenOff >= 0 && sale.totals.unpaidRevenue >= 0 && sale.totals.billed >= 0, `no negative totals: ${step}`);
+        assert.equal(sale.totals.refundsDone, refundsDoneByMe, `refunds done = those staff confirmed: ${step}`);
+        assert.ok(doneSum <= sale.totals.refundsDone);
+      };
+      for (let step = 0; step < 70; step++) {
+        const kind = pick(['order', 'order', 'edit', 'pay', 'pay', 'overpay', 'cancel', 'refund', 'clear', 'unclear', 'service', 'unpay']);
+        const live = (await s.get('/api/staff/state')).json.orders;
+        const o = live.length ? pick(live) : null;
+        const label = `${kind}#${step}`;
+        if (kind === 'order' || !o) {
+          const n = 1 + Math.floor(rnd() * 3);
+          const items = [...new Set(Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(ids)))].map((id) => ({ id, qty: 1 + Math.floor(rnd() * 3) }));
+          const r = await staffOrder(s, n, items);
+          assert.ok(r.status === 201, r.text);
+        } else if (kind === 'edit') {
+          const items = [...new Set(Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(ids)))].map((id) => ({ id, qty: Math.floor(rnd() * 4) }));
+          await s.post(`/api/staff/orders/${o.id}/items`, { items });
+        } else if (kind === 'pay') {
+          await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: pick(['cash', 'transfer', 'other']), ...(rnd() < 0.5 ? { amount: 1000 * (1 + Math.floor(rnd() * 12)) } : {}) });
+        } else if (kind === 'overpay') {
+          await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: o.total + 1000 * (1 + Math.floor(rnd() * 5)) });
+        } else if (kind === 'unpay') {
+          await s.post(`/api/staff/orders/${o.id}/paid`, { paid: false });
+        } else if (kind === 'cancel') {
+          await s.post(`/api/staff/orders/${o.id}/status`, { status: 'cancelled' });
+        } else if (kind === 'service') {
+          await s.post(`/api/staff/orders/${o.id}/service`, { itemId: pick(ids), qty: 1 });
+        } else if (kind === 'refund') {
+          const open = (await s.get('/api/staff/state')).json.refunds.filter((x) => !x.doneAt);
+          if (open.length) { const r = pick(open); const res = await s.post(`/api/staff/refunds/${r.id}/done`, { amount: r.amount }); if (res.status === 200) refundsDoneByMe += r.amount; }
+        } else if (kind === 'clear') {
+          await s.post(`/api/staff/tables/${o.table}/clear`, { force: true });
+        } else if (kind === 'unclear') {
+          await s.post(`/api/staff/tables/${1 + Math.floor(rnd() * 3)}/unclear`, {});
+        }
+        await check(label);
+      }
+      const fin = (await s.get('/api/staff/sales')).json; // the sequence really moved money in every way
+      assert.ok(fin.totals.paidAmount > 0 && fin.totals.refundsDone > 0 && fin.refunds.length > 0 && fin.totals.writtenOff > 0, JSON.stringify(fin.totals));
+    });
+  });
+}
+
+test('upgrade from Release 1: a booth.db created by the production schema (cf5d032) boots, keeps its data and gains payments, refunds, audit and stock', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-r1-'));
+  fs.mkdirSync(path.join(dir, 'data'));
+  const old = new DatabaseSync(path.join(dir, 'data', 'booth.db'));
+  old.exec(R1_SCHEMA);
+  assert.ok(!old.prepare('PRAGMA table_info(orders)').all().some((c) => c.name === 'paid_amount'), 'fixture is the Release 1 schema');
+  assert.equal(old.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name IN ('refunds','audit_log','day_reports','table_clears')").get().n, 0);
+  const tokensOld = [];
+  for (let i = 1; i <= 8; i++) { const t = crypto.randomBytes(12).toString('base64url'); tokensOld.push(t); old.prepare('INSERT INTO tables(id, token) VALUES(?,?)').run(i, t); }
+  old.prepare("INSERT INTO menu_categories(id, name, sort) VALUES(1, '안주', 0)").run();
+  old.prepare("INSERT INTO menu_items(id, name, price, category_id, descr, sort) VALUES('legacy-item', '레거시 메뉴', 5000, 1, '', 0)").run();
+  old.prepare("INSERT INTO settings(k, v) VALUES('menu_seeded', '1')").run();
+  const ts = Date.now() - 60000;
+  const mk = old.prepare('INSERT INTO orders(table_id, seat, key, status, paid, subtotal, discount, total, created_at, updated_at, paid_by, depositor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+  const item = old.prepare("INSERT INTO order_items(order_id, item_id, name, unit_price, qty) VALUES(?, 'legacy-item', '레거시 메뉴', 5000, ?)");
+  const ids = [
+    ['paid by staff', mk.run(1, 1, 'key-staff-paid', 'served', 1, 10000, 0, 10000, ts, ts, 'staff', null).lastInsertRowid, 2],
+    ['paid by auto', mk.run(1, 1, 'key-auto-paid', 'cooking', 1, 5000, 0, 5000, ts, ts, 'auto', '김철수').lastInsertRowid, 1],
+    ['unpaid', mk.run(2, 1, 'key-unpaid', 'pending', 0, 15000, 0, 15000, ts, ts, null, null).lastInsertRowid, 3],
+    ['cancelled but paid', mk.run(3, 1, 'key-cancelled', 'cancelled', 1, 5000, 0, 5000, ts, ts, 'staff', null).lastInsertRowid, 1],
+    ['cancelled unpaid', mk.run(3, 1, 'key-cancelled2', 'cancelled', 0, 5000, 0, 5000, ts, ts, null, null).lastInsertRowid, 1],
+  ];
+  for (const [, id, q] of ids) item.run(id, q);
+  old.prepare("INSERT INTO deposit_notices(received_at, raw, norm, amount, depositor, status, order_id, matched_at, matched_by) VALUES(?, '원문', '원문', 5000, '김철수', 'matched', ?, ?, 'auto')").run(ts, ids[1][1], ts);
+  old.close();
+  let srv; let srv2;
+  try {
+    srv = await boot({ dir, tablesCount: 8 });
+    const s = await staffLogin(srv);
+    const st = (await s.get('/api/staff/state')).json;
+    const byId = Object.fromEntries(st.orders.map((o) => [o.id, o]));
+    const [staffPaid, autoPaid, unpaid, cxPaid] = ids.map((x) => byId[x[1]]);
+    assert.deepEqual([staffPaid.paid, staffPaid.paidAmount, staffPaid.paidMethod, staffPaid.balanceDue, staffPaid.createdBy], [true, 10000, 'other', 0, 'guest'], 'hand-marked paid orders count as received in full');
+    assert.deepEqual([autoPaid.paid, autoPaid.paidAmount, autoPaid.paidMethod, autoPaid.paidBy], [true, 5000, 'transfer', 'auto']);
+    assert.deepEqual([unpaid.paid, unpaid.paidAmount, unpaid.paidMethod, unpaid.balanceDue], [false, 0, null, 15000]);
+    assert.deepEqual([cxPaid.status, cxPaid.paidAmount, cxPaid.refundDue], ['cancelled', 5000, 5000], 'money received on a cancelled order is owed back');
+    assert.deepEqual(st.refunds.map((r) => [r.orderId, r.amount, r.doneAt]), [[ids[3][1], 5000, null]], 'one open refund; the unpaid cancelled order owes nothing');
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.totals.paidAmount, sale.totals.revenue, sale.totals.refundDue, sale.totals.billed, sale.totals.unpaidRevenue, sale.totals.writtenOff], [20000, 20000, 5000, 30000, 15000, 0]);
+    assert.deepEqual([sale.byMethod.other.received, sale.byMethod.transfer.received, sale.byMethod.cash.received], [15000, 5000, 0], 'the payment ledger is backfilled from the old paid orders (hand-marked = other, automatic = transfer)');
+    assert.equal(Object.values(sale.byMethod).reduce((n, m) => n + m.net, 0), sale.totals.revenue);
+    assert.deepEqual(st.refunds.map((r) => r.reason), ['legacy_cancelled'], 'dated with the cancellation (updatedAt of the order), not with the boot');
+    assert.ok(st.refunds[0].createdAt < Date.now() - 30000, 'not stamped with the boot time');
+    assert.deepEqual(st.menu.items.map((i) => [i.id, i.stockLeft, i.stockAuto]), [['legacy-item', null, false]]);
+    assert.equal(st.waitCallTimeoutMin, 5);
+    assert.deepEqual([st.notice, (await s.get('/api/staff/day/reports')).json.reports, (await s.get('/api/staff/audit')).json.entries.map((e) => e.action)], [null, [], ['login', 'migrated']], 'empty new tables; the audit log has this login and the migration note');
+    assert.equal((await stTables(s))[0].unclearUntil, null);
+    // everything new works on the migrated rows
+    assert.equal((await s.post(`/api/staff/orders/${unpaid.id}/paid`, { paid: true, method: 'cash', amount: 5000 })).json.order.balanceDue, 10000);
+    assert.equal((await s.post(`/api/staff/orders/${staffPaid.id}/items`, { items: [{ id: 'legacy-item', qty: 1 }] })).json.order.refundDue, 5000);
+    assert.equal((await s.post(`/api/staff/refunds/${st.refunds[0].id}/done`, { method: 'cash', amount: st.refunds[0].amount })).status, 200);
+    assert.equal((await staffOrder(s, 1, [{ id: 'legacy-item', qty: 1 }])).status, 201);
+    assert.equal((await s.post('/api/staff/menu/items/legacy-item', { stockLeft: 3 })).json.item.stockLeft, 3);
+    assert.equal((await s.post('/api/staff/notice', { text: '업그레이드 확인' })).status, 200);
+    assert.ok((await auditOf(s)).length >= 4);
+    assert.deepEqual((await tablesOf(s)).map((t) => t.token), tokensOld, 'QR tokens unchanged');
+    await srv.stop({ keep: true });
+    // a second boot on the upgraded file changes nothing (migration is idempotent; refunds are not duplicated)
+    srv2 = await boot({ dir, tablesCount: 8 });
+    const s2 = await staffLogin(srv2);
+    const st2 = (await s2.get('/api/staff/state')).json;
+    assert.equal(st2.refunds.filter((r) => r.orderId === ids[3][1]).length, 1);
+    assert.equal(st2.orders.find((o) => o.id === unpaid.id).paidAmount, 5000);
+  } finally { if (srv2) await srv2.stop(); else if (srv && srv.child.exitCode === null) await srv.stop(); else fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+const FOUR_GAMES = {
+  ...REWARDS,
+  games: {
+    ...REWARDS.games,
+    bug: { label: '버그 잡기', maxScore: 500, minDurationMs: 200 },
+    typing: { label: '타자 배틀', maxScore: 1000, minDurationMs: 200 },
+  },
+};
+test('four games: nothing assumes pour/cheers; bug plays, rewards and the board work', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv); g.jar.booth_d = await realDevice(srv);
+    const r = await s.post('/api/staff/rewards', { label: '버그 음료', game: 'bug', threshold: 300, type: 'item', stock: 2 });
+    assert.equal(r.status, 200, r.text);
+    assert.equal((await s.post('/api/staff/rewards', { label: 'x', game: 'nope', threshold: 1, type: 'item', stock: 1 })).json.error, 'bad_game');
+    assert.match((await s.post('/api/staff/rewards', { label: 'x', game: 'nope', threshold: 1, type: 'item', stock: 1 })).json.message, /bug.*typing/);
+    assert.equal((await s.post('/api/staff/rewards', { label: '타자', game: 'typing', threshold: 1001, type: 'item', stock: 1 })).json.error, 'bad_threshold', 'threshold is capped by the typing maxScore (1000)');
+    const fin = await playOnce(g, tk[0], 'bug', 450);
+    assert.equal(fin.status, 200, fin.text);
+    assert.deepEqual(fin.json.rewards.map((x) => x.result), ['issued']);
+    assert.equal((await playOnce(g, tk[0], 'bug', 600)).json.error, 'bad_score', 'bug maxScore is 500');
+    assert.equal((await playOnce(g, tk[1], 'typing', 900)).status, 200);
+    const b = (await g.get('/api/board')).json;
+    assert.deepEqual(Object.keys(b.games).sort(), ['bug', 'cheers', 'pour', 'typing']);
+    assert.deepEqual(Object.keys(b.gameInfo).sort(), ['bug', 'cheers', 'pour', 'typing']);
+    assert.deepEqual([b.games.bug[0].score, b.games.typing[0].score], [450, 900]);
+    assert.ok(b.hour.ranking.some((x) => x.games.bug === 450), 'the hourly ranking sums every game');
+    assert.deepEqual(Object.keys((await s.get('/api/staff/state')).json.games).sort(), ['bug', 'cheers', 'pour', 'typing']);
+    assert.deepEqual(Object.keys((await g.get(`/api/t/${tk[0]}`)).json.games).sort(), ['bug', 'cheers', 'pour', 'typing']);
+  }, { rewards: FOUR_GAMES });
+});
+
+test('landing page says COMHERE and public/landing.html overrides it (with __BASE__)', async () => {
+  await withBooth(async ({ srv }) => {
+    const g = new Client(srv);
+    const a = await g.get('/');
+    assert.ok(a.status === 200 && a.text.includes('COMHERE') && a.text.includes('<title>COMHERE</title>') && !a.text.includes('주점 부스'));
+    fs.writeFileSync(path.join(srv.dir, 'pub', 'landing.html'), '<!doctype html><title>내 랜딩</title><a href="__BASE__/wait">대기</a>');
+    const b = await g.get('/');
+    assert.equal(b.status, 200);
+    assert.ok(b.text.includes('내 랜딩') && b.text.includes('href="/booth/wait"') && !b.text.includes('__BASE__'), b.text);
+    assert.match(b.headers.get('content-type'), /text\/html/);
+    assert.equal(b.headers.get('x-content-type-options'), 'nosniff');
+  }, { base: '/booth' });
+});
+
+
+// ---------------- Release 2 review fixes ----------------
+test('R2-1 pay default amount is the balance AFTER refunds paid back (reviewer sequence settles in one call)', async () => {
+  await withBooth(async ({ s }) => {
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }, { id: 'cola', qty: 1 }])).json.order; // 10,000
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }] }); // 8,000 -> 2,000 refund
+    const rid = (await s.get('/api/staff/state')).json.refunds[0].id;
+    assert.equal((await s.post(`/api/staff/refunds/${rid}/done`, { amount: 2000 })).status, 200);
+    const up = (await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }, { id: 'odeng', qty: 1 }] })).json.order; // 17,000, held 8,000
+    assert.deepEqual([up.paid, up.balanceDue, up.paidAmount, up.refundedAmount], [false, 9000, 10000, 2000]);
+    const done = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true })).json.order;
+    assert.deepEqual([done.paid, done.balanceDue, done.paidAmount, done.overpaid, done.refundDue], [true, 0, 19000, 2000 - 2000, 0]);
+    const sale = (await s.get('/api/staff/sales')).json.totals;
+    assert.deepEqual([sale.paidAmount, sale.refundsDone, sale.revenue], [19000, 2000, 17000]);
+  });
+});
+
+test('R2-2 editing an order that has a member discount but no stored rule keeps the discount', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-r2m-'));
+  fs.mkdirSync(path.join(dir, 'data'));
+  const old = new DatabaseSync(path.join(dir, 'data', 'booth.db'));
+  old.exec(R1_SCHEMA);
+  for (let i = 1; i <= 4; i++) old.prepare('INSERT INTO tables(id, token) VALUES(?,?)').run(i, crypto.randomBytes(12).toString('base64url'));
+  old.prepare("INSERT INTO menu_categories(id, name, sort) VALUES(1, '안주', 0)").run();
+  old.prepare("INSERT INTO menu_items(id, name, price, category_id, descr, sort) VALUES('legacy-item', '레거시', 8000, 1, '', 0)").run();
+  old.prepare("INSERT INTO menu_items(id, name, price, category_id, descr, sort) VALUES('extra', '추가', 7000, 1, '', 1)").run();
+  old.prepare("INSERT INTO settings(k, v) VALUES('menu_seeded', '1')").run();
+  const ts = Date.now() - 60000;
+  const id = old.prepare("INSERT INTO orders(table_id, seat, key, status, paid, subtotal, discount, member_discount, member_id, total, created_at, updated_at) VALUES(1,1,'key-member1','cooking',0,16000,0,1600,77,14400,?,?)").run(ts, ts).lastInsertRowid;
+  old.prepare("INSERT INTO order_items(order_id, item_id, name, unit_price, qty) VALUES(?, 'legacy-item', '레거시', 8000, 2)").run(id);
+  old.close();
+  let srv;
+  try {
+    srv = await boot({ dir, tablesCount: 4 });
+    const s = await staffLogin(srv);
+    const before = await orderOf(s, Number(id));
+    assert.deepEqual([before.memberDiscount, before.total, before.memberRule && before.memberRule.mode], [1600, 14400, 'fixed']);
+    const e = (await s.post(`/api/staff/orders/${id}/items`, { items: [{ id: 'legacy-item', qty: 2 }, { id: 'extra', qty: 1 }] })).json.order;
+    assert.deepEqual([e.subtotal, e.memberDiscount, e.total], [23000, 1600, 21400], 'the discount it got is kept');
+    const small = (await s.post(`/api/staff/orders/${id}/items`, { items: [{ id: 'extra', qty: 0 }, { id: 'legacy-item', qty: 0 }, { id: 'legacy-item', qty: 1, service: true }] }));
+    assert.equal(small.json.error, 'no_lines');
+  } finally { if (srv) await srv.stop(); else fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R2-3 moving an order keeps its coupon with the seat that earned it: that seat cannot earn it again, cancel still restores it', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv); g.jar.booth_d = await realDevice(srv);
+    const fin = await playOnce(g, tk[3], 'cheers', 750); // table 4 earns d1000
+    const cp = fin.json.coupons.find((c) => c.rewardId === 'd1000');
+    assert.ok(cp, fin.text);
+    const o = (await order(g, tk[3], [{ id: 'tteokbokki', qty: 1 }], { couponCode: cp.code })).json.order;
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/move`, { to: 5 })).status, 200);
+    const again = await playOnce(g, tk[3], 'cheers', 750);
+    assert.deepEqual(again.json.rewards.find((r) => r.rewardId === 'd1000').result, 'already_got', 'table 4 must not re-earn');
+    const g5 = new Client(srv); g5.jar.booth_d = await realDevice(srv);
+    const view5 = (await g5.get(`/api/t/${tk[4]}`)).json;
+    assert.equal(view5.rewards.find((r) => r.id === 'd1000').got, false, 'table 5 did not earn it');
+    await s.post(`/api/staff/orders/${o.id}/status`, { status: 'cancelled' });
+    const db = dbOf(srv);
+    assert.deepEqual({ ...db.prepare('SELECT status, order_id, table_id FROM coupons WHERE code=?').get(cp.code) }, { status: 'issued', order_id: null, table_id: 4 }, 'a restored coupon goes back to the seat that earned it');
+    db.close();
+  });
+});
+
+test('R2-4 unpay releases EVERY notice linked to the order', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const o = await d.place(tk[0], '김철수'); // 8,000
+    const n1 = await d.sms(3000, '김철수'); const n2 = await d.sms(5000, '김철수');
+    const asg = (nid, body) => s.post(`/api/staff/deposits/${nid}/assign`, body);
+    assert.equal((await asg(n1.id, { orderId: o.id, force: true, note: '일부' })).status, 200);
+    assert.equal((await asg(n2.id, { orderId: o.id })).json.order.paid, true, 'the remaining 5,000 equals the balance: no force needed');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/paid`, { paid: false })).status, 200);
+    const ns = await d.notices();
+    assert.deepEqual([n1.id, n2.id].map((id) => ns.find((x) => x.id === id).status), ['pending', 'pending']);
+    assert.deepEqual([n1.id, n2.id].map((id) => ns.find((x) => x.id === id).orderId), [null, null]);
+  } finally { await d.srv.stop(); }
+});
+
+test('R2-5 deposit matching compares the notice with the BALANCE: cash part + transfer of the rest', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const o = await d.place(tk[0], '김철수'); // 8,000
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 3000 });
+    const eight = await d.sms(8000, '김철수');
+    assert.notEqual(eight.status, 'matched', 'an 8,000 notice is NOT the balance (5,000) of this order');
+    const five = await d.sms(5000, '김철수');
+    assert.equal(five.status, 'matched', JSON.stringify(five));
+    const done = await d.order(o.id);
+    assert.deepEqual([done.paid, done.paidAmount, done.overpaid], [true, 8000, 0]);
+    // manual assign: the 8,000 notice against a partly paid order is a mismatch (needs force + note) and then owes the excess back
+    const o2 = await d.place(tk[1], '이영희'); // 8,000
+    await s.post(`/api/staff/orders/${o2.id}/paid`, { paid: true, method: 'cash', amount: 3000 });
+    const asg = (body) => s.post(`/api/staff/deposits/${eight.id}/assign`, { orderId: o2.id, ...body });
+    const mm = await asg({});
+    assert.deepEqual([mm.status, mm.json.error, mm.json.orderTotal, mm.json.orderBalance, mm.json.noticeAmount], [409, 'amount_mismatch', 8000, 5000, 8000]);
+    assert.equal((await asg({ force: true })).json.error, 'note_required');
+    const ok = await asg({ force: true, note: '전액을 계좌로 보냄' });
+    assert.deepEqual([ok.json.order.paid, ok.json.order.paidAmount, ok.json.order.overpaid, ok.json.order.refundDue], [true, 11000, 3000, 3000]);
+    const c = (await s.get('/api/staff/deposits')).json;
+    assert.ok(c.notices.every((n) => n.candidates.every((x) => typeof x.balance === 'number')));
+  } finally { await d.srv.stop(); }
+});
+
+test('R2-6 day close: open_items / nothing_to_close unless forced; the forced report itemises everything and the CSV has the sections', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const empty = await s.post('/api/staff/day/close', { confirm: '마감' });
+    assert.deepEqual([empty.status, empty.json.error], [409, 'nothing_to_close']);
+    const a = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order; // unpaid, unserved
+    const b = (await staffOrder(s, 2, [{ id: 'odeng', qty: 1 }])).json.order; // cancelled after payment -> refund
+    await s.post(`/api/staff/orders/${b.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${b.id}/status`, { status: 'cancelled' });
+    const c = (await staffOrder(s, 3, [{ id: 'cola', qty: 1 }])).json.order; // written off
+    await s.post('/api/staff/tables/3/clear', { force: true });
+    const r = await s.post('/api/staff/day/close', { confirm: '마감' });
+    assert.equal(r.status, 409);
+    assert.deepEqual([r.json.error, r.json.refundDue, r.json.unpaid, r.json.unserved, r.json.writtenOff], ['open_items', { entries: 1, amount: 9000 }, { orders: 1, amount: 8000 }, { orders: 2 }, { orders: 1, amount: 2000 }]);
+    assert.equal((await s.get('/api/staff/day/reports')).json.reports.length, 0);
+    assert.equal((await orderOf(s, a.id)).id, a.id);
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '마감', force: 'true' })).json.error, 'open_items', 'only literal true forces');
+    const ok = await s.post('/api/staff/day/close', { confirm: '마감', force: true });
+    assert.equal(ok.status, 200, ok.text);
+    const rep = (await s.get('/api/staff/day/reports/1')).json;
+    assert.deepEqual(rep.refunds.map((x) => [x.orderId, x.amount, x.doneAt]), [[b.id, 9000, null]]);
+    assert.deepEqual(rep.unpaid.map((x) => [x.orderId, x.balance]), [[a.id, 8000]]);
+    assert.deepEqual(rep.writtenOff.map((x) => [x.orderId, x.balance]), [[c.id, 2000]]);
+    assert.equal(rep.forced, true);
+    const csv = await csvOf(srv, s, '/api/staff/day/reports/1.csv');
+    assert.ok(csv.text.includes('[미결제(진행중)]') && csv.text.includes(`${a.id},1,8000,0,8000`) && csv.text.includes('[미수금]') && csv.text.includes('[환불]'), csv.text);
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '마감' })).json.error, 'nothing_to_close', 'a second close right after is refused');
+  });
+});
+
+test('R2-7 every staff POST route in server.js writes an audit row (or is read-only); settings rows carry before→after and never secrets', async () => {
+  const src = fs.readFileSync(SERVER, 'utf8');
+  const routes = [...src.matchAll(/route\('POST', '(\/api\/staff\/[^']*)'/g)].map((m) => m[1]);
+  assert.ok(routes.length > 30, `found ${routes.length} routes`);
+  await withBooth(async ({ srv, s, tk }) => {
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }, { id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
+    const it = await mkItem(s, '감사용', 1000);
+    const cx = (await staffOrder(s, 2, [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${cx.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${cx.id}/status`, { status: 'cancelled' });
+    const refundId = (await s.get('/api/staff/state')).json.refunds[0].id;
+    const cp = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '감사' })).json.coupon;
+    const cp2 = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '감사2' })).json.coupon;
+    const w = (await new Client(srv).post('/api/wait', { nick: '대기', size: 1 })).json;
+    const g = new Client(srv); await g.post(`/api/t/${tk[3]}/calls`, { type: '물' });
+    const call = (await s.get('/api/staff/state')).json.calls[0];
+    const sms = JSON.parse((await hookPost(srv, (await s.get('/api/staff/deposit-hook')).json.secret, { text: smsText(5000, '아무개', 31) })).text);
+    const pay = (await s.get('/api/staff/state')).json.pay;
+    // path -> [body]; routes with no entry make the test fail, so a new route must be added here
+    const calls = {
+      '/api/staff/logout': null, // session handling, not a state change (login/lockout are audited separately)
+      '/api/staff/orders/(\\d{1,9})/status': [`/api/staff/orders/${o.id}/status`, { status: 'cooking' }],
+      '/api/staff/orders/(\\d{1,9})/paid': [`/api/staff/orders/${o.id}/paid`, { paid: false }],
+      '/api/staff/orders/(\\d{1,9})/items': [`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 2 }] }],
+      '/api/staff/orders/(\\d{1,9})/service': [`/api/staff/orders/${o.id}/service`, { itemId: 'cola', qty: 1 }],
+      '/api/staff/orders/(\\d{1,9})/move': [`/api/staff/orders/${o.id}/move`, { to: 4 }],
+      '/api/staff/refunds/(\\d{1,9})/done': [`/api/staff/refunds/${refundId}/done`, { amount: 2000 }],
+      '/api/staff/menu/([A-Za-z0-9_-]{1,40})/soldout': ['/api/staff/menu/cola/soldout', { soldOut: true }],
+      '/api/staff/pay': ['/api/staff/pay', { tossEnabled: true }],
+      '/api/staff/deposits/(\\d{1,9})/assign': [`/api/staff/deposits/${sms.id}/assign`, { orderId: o.id, force: true, note: '감사' }],
+      '/api/staff/deposits/(\\d{1,9})/dismiss': 'dismiss',
+      '/api/staff/deposits/autoconfirm': ['/api/staff/deposits/autoconfirm', { autoConfirm: true, autoConfirmMaxAmount: 20000 }],
+      '/api/staff/deposits/(\\d{1,9})/attach': 'attach',
+      '/api/staff/deposit-hook/test': null, // dry run, stores nothing
+      '/api/staff/deposit-hook/rotate': ['/api/staff/deposit-hook/rotate', {}],
+      '/api/staff/menu/items': ['/api/staff/menu/items', { name: '새 메뉴', price: 1000, category: '테스트' }],
+      '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})': [`/api/staff/menu/items/${it}`, { price: 1500 }],
+      '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})/delete': 'delete-item',
+      '/api/staff/menu/reorder': ['/api/staff/menu/reorder', { items: ['cola', 'odeng'] }],
+      '/api/staff/menu/categories': ['/api/staff/menu/categories', { name: '새분류' }],
+      '/api/staff/menu/categories/(\\d{1,9})': 'rename-cat',
+      '/api/staff/menu/categories/(\\d{1,9})/delete': 'delete-cat',
+      '/api/staff/member-discount': ['/api/staff/member-discount', { pct: 15 }],
+      '/api/staff/rewards': ['/api/staff/rewards', { label: '감사보상', game: 'pour', threshold: 10, type: 'item', stock: 1 }],
+      '/api/staff/rewards/([A-Za-z0-9_-]{1,40})': ['/api/staff/rewards/drink', { stock: 5 }],
+      '/api/staff/rewards/([A-Za-z0-9_-]{1,40})/delete': 'delete-reward',
+      '/api/staff/hourly-reward': ['/api/staff/hourly-reward', { enabled: false }],
+      '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})/photo': null, // raw upload, covered by the generic row in its own test below
+      '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})/photo/delete': [`/api/staff/menu/items/${it}/photo/delete`, {}],
+      '/api/staff/ordering': ['/api/staff/ordering', { open: false }],
+      '/api/staff/coupons/redeem': ['/api/staff/coupons/redeem', { code: cp.code }],
+      '/api/staff/tables/count': ['/api/staff/tables/count', { count: 30 }],
+      '/api/staff/tables/(\\d{1,4})/rotate': ['/api/staff/tables/5/rotate', {}],
+      '/api/staff/tables/move': ['/api/staff/tables/move', { from: 6, to: 7 }],
+      '/api/staff/waitlist/open': ['/api/staff/waitlist/open', { open: false }],
+      '/api/staff/wait/(\\d{1,9})/(call|seat|cancel|recall)': [`/api/staff/wait/${w.id}/call`, {}],
+      '/api/staff/waitlist/clear': ['/api/staff/waitlist/clear', {}],
+      '/api/staff/tables/(\\d{1,4})/clear': ['/api/staff/tables/8/clear', {}],
+      '/api/staff/calls/(\\d{1,9})/resolve': [`/api/staff/calls/${call.id}/resolve`, {}],
+      '/api/staff/award-hour': null, // needs a finished play; covered by the generic row in the award test
+      '/api/staff/rewards/([A-Za-z0-9_-]{1,40})/stock': ['/api/staff/rewards/drink/stock', { stock: 6 }],
+      '/api/staff/tables/(\\d{1,4})/unclear': ['/api/staff/tables/8/unclear', {}],
+      '/api/staff/tables/(\\d{1,4})/orders': ['/api/staff/tables/9/orders', { key: newKey(), items: [{ id: 'fries', qty: 1 }] }],
+      '/api/staff/tables/(\\d{1,4})/coupons': ['/api/staff/tables/9/coupons', { type: 'item', label: '감사3' }],
+      '/api/staff/coupons/([A-Za-z0-9]{1,12})/void': [`/api/staff/coupons/${cp2.code}/void`, {}],
+      '/api/staff/notice': ['/api/staff/notice', { text: '감사 공지', level: 'warn' }],
+      '/api/staff/waitlist/timeout': ['/api/staff/waitlist/timeout', { minutes: 7 }],
+      '/api/staff/reset': 'reset',
+      '/api/staff/day/close': 'day-close',
+      '/api/staff/login': null,
+    };
+    for (const r of routes) if (r !== '/api/staff/login') assert.ok(Object.hasOwn(calls, r.replace(/\\\\/g, '\\')) || Object.hasOwn(calls, r), `new staff POST route without an audit test entry: ${r}`);
+    const count = async () => (await s.get('/api/staff/audit?limit=1')).json.entries[0]?.id ?? 0;
+    const stateful = async (key, spec) => {
+      if (spec === 'dismiss') { const n = JSON.parse((await hookPost(srv, (await s.get('/api/staff/deposit-hook')).json.secret, { text: smsText(7000, '다른이', 32) })).text); return [`/api/staff/deposits/${n.id}/dismiss`, {}]; }
+      if (spec === 'attach') { const o2 = (await staffOrder(s, 10, [{ id: 'fries', qty: 1 }])).json.order; await s.post(`/api/staff/orders/${o2.id}/paid`, { paid: true }); const n = JSON.parse((await hookPost(srv, (await s.get('/api/staff/deposit-hook')).json.secret, { text: smsText(6000, '또다른', 33) })).text); return [`/api/staff/deposits/${n.id}/attach`, { orderId: o2.id }]; }
+      if (spec === 'delete-item') { const id2 = await mkItem(s, '지울 메뉴', 1000); return [`/api/staff/menu/items/${id2}/delete`, {}]; }
+      if (spec === 'rename-cat') { const cat = (await s.get('/api/staff/state')).json.menu.categoryList.find((c) => c.name === '새분류'); return [`/api/staff/menu/categories/${cat.id}`, { name: '이름바꿈' }]; }
+      if (spec === 'delete-cat') { const cat = (await s.post('/api/staff/menu/categories', { name: '빈분류' })).json.category; return [`/api/staff/menu/categories/${cat.id}/delete`, {}]; }
+      if (spec === 'delete-reward') { const rw = (await s.post('/api/staff/rewards', { label: '지울보상', game: 'pour', threshold: 10, type: 'item', stock: 1 })).json.reward; return [`/api/staff/rewards/${rw.id}/delete`, {}]; }
+      if (spec === 'reset') return ['/api/staff/reset', { confirm: '초기화' }];
+      if (spec === 'day-close') return ['/api/staff/day/close', { confirm: '마감', force: true }];
+      throw new Error(key);
+    };
+    const missing = [];
+    for (const [key, spec] of Object.entries(calls)) {
+      if (spec === null) continue;
+      const [p, body] = typeof spec === 'string' ? await stateful(key, spec) : spec;
+      const before = await count();
+      const res = await s.post(p, body);
+      if (res.status !== 200 && res.status !== 201) { missing.push(`${p} -> ${res.status} ${res.text.slice(0, 80)}`); continue; }
+      if ((await count()) <= before) missing.push(`${p}: no audit row`);
+    }
+    assert.deepEqual(missing, []);
+    // before -> after values, no secrets
+    const entries = (await s.get('/api/staff/audit?limit=200')).json.entries;
+    const text = JSON.stringify(entries);
+    const find = (a) => entries.find((e) => e.action === a);
+    assert.match(find('deposit_auto_setting').summary, /autoConfirm true→true.*max 30000→20000|max 30000→20000/);
+    assert.match(find('ordering').summary, /true→false/);
+    assert.match(find('table_count').summary, /→30/);
+    assert.match(find('wait_timeout').summary, /5→7 min/);
+    assert.match(find('notice').summary, /\(none\) → warn: 감사 공지/);
+    assert.ok(!text.includes((await s.get('/api/staff/deposit-hook')).json.secret) && !text.includes(pay.account || 'no-account') && !text.includes(PIN));
+    for (const token of tk.slice(0, 5)) assert.ok(!text.includes(token));
+  });
+});
+
+test('R2-12 CSV cells that start with = + - @ are neutralised', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const id = await mkItem(s, '=1+1', 1000);
+    const o = (await staffOrder(s, 1, [{ id, qty: 1 }])).json.order;
+    assert.ok(o.id);
+    const csv = await csvOf(srv, s, '/api/staff/sales.csv');
+    assert.ok(csv.text.includes("'=1+1,1,0,1000") && !/^=1\+1/m.test(csv.text), csv.text);
+  });
+});
+
+test('R2-14 self-heal: a paid order with nothing received (older code wrote it) gets paid_amount = total on boot', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-r2h-'));
+  const srv = await boot({ dir });
+  let srv2;
+  try {
+    const s = await staffLogin(srv);
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await srv.stop({ keep: true });
+    const db = dbOf(srv); db.prepare('UPDATE orders SET paid=1, paid_amount=0, paid_method=NULL, paid_at=NULL WHERE id=?').run(o.id); db.close();
+    srv2 = await boot({ dir });
+    const s2 = await staffLogin(srv2);
+    const h = await orderOf(s2, o.id);
+    assert.deepEqual([h.paid, h.paidAmount, h.balanceDue], [true, 8000, 0]);
+    assert.equal((await s2.get('/api/staff/sales')).json.totals.revenue, 8000);
+  } finally { if (srv2) await srv2.stop(); else fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R2-18 a guest depositor change moves updatedAt forward', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv);
+    const o = (await order(g, tk[0], [{ id: 'cola', qty: 1 }])).json.order;
+    let last = o.updatedAt;
+    for (const name of ['가나', '다라', '마바']) {
+      const r = await g.post(`/api/t/${tk[0]}/orders/${o.id}/depositor`, { depositor: name });
+      assert.equal(r.status, 200, r.text);
+      assert.ok(r.json.order.updatedAt > last, 'strictly increasing');
+      last = r.json.order.updatedAt;
+    }
+  });
+});
+
+test('R2-19 an item that ran out by count stays sold out after reset / day close', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await s.post('/api/staff/menu/items/cola', { stockLeft: 1 });
+    await order(new Client(srv), tk[0], [{ id: 'cola', qty: 1 }]);
+    assert.equal((await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === 'cola').soldOut, true);
+    await s.post('/api/staff/reset', { confirm: '초기화' });
+    const it = (await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === 'cola');
+    assert.deepEqual([it.stockLeft, it.soldOut, it.stockAuto], [0, true, true], 'orderable-with-0 state is avoided; raising the stock lifts it');
+    await s.post('/api/staff/menu/items/cola', { stockLeft: 5 });
+    assert.equal((await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === 'cola').soldOut, false);
+  });
+});
+
+test('R2-20 audit query parameters are validated', async () => {
+  await withBooth(async ({ s }) => {
+    for (const q of ['before=abc', 'limit=1.5', 'limit=', 'before=-1', 'limit=x']) assert.equal((await s.get(`/api/staff/audit?${q}`)).json.error, 'bad_query', q);
+    assert.equal((await s.get('/api/staff/audit?before=5&limit=3')).status, 200);
+  });
+});
+
+
+// ---------------- Release 2, second review ----------------
+test('R3-1 refund done is bound to the amount staff saw: a concurrent edit that changed it gives 409 refund_changed', async () => {
+  await withBooth(async ({ s }) => {
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }, { id: 'cola', qty: 1 }])).json.order; // 10,000
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }] }); // refund entry 2,000: staff A hands 2,000 back
+    const seen = (await s.get('/api/staff/state')).json.refunds[0];
+    assert.equal(seen.amount, 2000);
+    assert.equal((await s.post(`/api/staff/refunds/${seen.id}/done`, {})).json.error, 'bad_amount', 'amount is required');
+    assert.equal((await s.post(`/api/staff/refunds/${seen.id}/done`, { amount: 2000.5 })).json.error, 'bad_amount');
+    const cheap = await mkItem(s, '오백원', 500);
+    await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }, { id: cheap, qty: 3 }] }); // staff B makes it 9,500: the entry is trimmed to 500
+    assert.equal((await s.get('/api/staff/state')).json.refunds.find((r) => r.id === seen.id).amount, 500);
+    const r = await s.post(`/api/staff/refunds/${seen.id}/done`, { amount: 2000 }); // A confirms what A saw
+    assert.deepEqual([r.status, r.json.error, r.json.refund.amount, r.json.refund.id], [409, 'refund_changed', 500, seen.id]);
+    assert.equal((await s.get('/api/staff/sales')).json.totals.refundsDone, 0, 'nothing was recorded');
+    assert.equal((await s.post(`/api/staff/refunds/${seen.id}/done`, { amount: 500 })).status, 200);
+    const d = (await s.get('/api/staff/sales')).json.totals;
+    assert.deepEqual([d.refundsDone, d.refundDue], [500, 0]);
+  });
+});
+
+async function healCase(mutate, { items = [{ id: 'tteokbokki', qty: 1 }], setup } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-heal-'));
+  const servers = [];
+  const cleanup = async () => { for (const x of servers) if (x.child.exitCode === null) await x.stop({ keep: true }); fs.rmSync(dir, { recursive: true, force: true }); };
+  try {
+    const srv = await boot({ dir }); servers.push(srv);
+    const s = await staffLogin(srv);
+    const o = (await staffOrder(s, 1, items)).json.order;
+    if (setup) await setup(s, o);
+    await srv.stop({ keep: true });
+    const db = dbOf(srv); mutate(db, o.id); db.close(); // what Release 1 code writes: flags only
+    const srv2 = await boot({ dir }); servers.push(srv2);
+    const s2 = await staffLogin(srv2);
+    const again = async () => { await srv2.stop({ keep: true }); const srv3 = await boot({ dir }); servers.push(srv3); const s3 = await staffLogin(srv3); return { s: s3, state: (await s3.get('/api/staff/state')).json, audit: await auditOf(s3) }; };
+    return { s: s2, o, order: await orderOf(s2, o.id), state: (await s2.get('/api/staff/state')).json, audit: await auditOf(s2), again, cleanup };
+  } catch (e) { await cleanup(); throw e; }
+}
+
+test('R3-2a self-heal: Release 1 marks a partly paid order paid -> the missing money is recorded (flag trusted), ledger adds up', async () => {
+  const result = await healCase((db, id) => db.prepare('UPDATE orders SET paid=1 WHERE id=?').run(id), {
+    items: [{ id: 'tteokbokki', qty: 1 }], setup: async (s, o) => { await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 3000 }); } });
+  try {
+    const { order, s } = result;
+    assert.deepEqual([order.paid, order.paidAmount, order.balanceDue, order.refundDue], [true, 8000, 0, 0], 'the 5,000 R1 marked as paid is now recorded');
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.totals.revenue, sale.byMethod.cash.received, sale.byMethod.other.received], [8000, 3000, 5000]);
+    assert.ok(result.audit.some((e) => e.action === 'migrated' && /1차 버전/.test(e.summaryKo)));
+    const second = await result.again();
+    assert.equal(second.audit.filter((e) => e.action === 'migrated').length, 1, 'idempotent: no second migration row');
+    assert.equal((await orderOf(second.s, result.o.id)).paidAmount, 8000);
+  } finally { await result.cleanup(); }
+});
+
+test('R3-2b self-heal: Release 1 unpays a fully paid order -> paid_amount reset, the order can be settled again', async () => {
+  const result = await healCase((db, id) => db.prepare('UPDATE orders SET paid=0 WHERE id=?').run(id), {
+    items: [{ id: 'tteokbokki', qty: 1 }, { id: 'cola', qty: 1 }], setup: async (s, o) => { await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true }); } }); // 10,000
+  try {
+    const { order, s, o } = result;
+    assert.deepEqual([order.paid, order.paidAmount, order.balanceDue, order.paidMethod], [false, 0, 10000, null]);
+    assert.equal((await s.get('/api/staff/sales')).json.totals.revenue, 0);
+    const done = (await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true })).json.order; // bare call settles the full amount
+    assert.deepEqual([done.paid, done.paidAmount], [true, 10000]);
+  } finally { await result.cleanup(); }
+});
+
+test('R3-2c self-heal: Release 1 pays then cancels -> the money is owed back (refund entry dated with the cancellation)', async () => {
+  const result = await healCase((db, id) => db.prepare("UPDATE orders SET paid=1, status='cancelled', paid_amount=0, paid_method=NULL, updated_at=updated_at-120000 WHERE id=?").run(id), {
+    items: [{ id: 'tteokbokki', qty: 1 }] });
+  try {
+    const { order, state } = result;
+    assert.deepEqual([order.status, order.paidAmount, order.refundDue], ['cancelled', 8000, 8000]);
+    assert.deepEqual(state.refunds.map((r) => [r.orderId, r.amount, r.reason]), [[order.id, 8000, 'legacy_cancelled']]);
+    assert.ok(state.refunds[0].createdAt <= order.updatedAt && state.refunds[0].createdAt < Date.now() - 60000, 'dated with the order, not with the boot');
+    const sale = (await result.s.get('/api/staff/sales')).json;
+    assert.deepEqual([sale.totals.revenue, sale.totals.refundDue, sale.byMethod.other.net], [8000, 8000, 8000]);
+    const second = await result.again();
+    assert.equal(second.state.refunds.length, 1, 'idempotent: no second entry');
+    assert.equal(second.audit.filter((e) => e.action === 'migrated').length, 1);
+  } finally { await result.cleanup(); }
+});
+
+test('R3-3 board and wait payloads carry the staff notice; wait status exposes noshow and whether a recall is still possible', async () => {
+  await withBooth(async ({ srv, s }) => {
+    await s.post('/api/staff/notice', { text: '전광판 공지', level: 'warn' });
+    const g = new Client(srv);
+    assert.deepEqual((await g.get('/api/board')).json.notice, { text: '전광판 공지', level: 'warn' });
+    const sse = await openSse(srv, '/api/board/events');
+    try { const buf = await sse.until((b) => b.includes('event: state')); assert.ok(buf.includes('"notice":{"text":"전광판 공지","level":"warn"}'), buf); } finally { sse.close(); }
+    await s.post('/api/staff/notice', { text: '' });
+    assert.equal((await g.get('/api/board')).json.notice, null);
+    const w = (await g.post('/api/wait', { nick: '손님', size: 1 })).json;
+    const st = async () => (await g.get(`/api/wait/${w.id}?secret=${w.secret}`)).json;
+    assert.equal((await st()).canRecall, false);
+    await s.post(`/api/staff/wait/${w.id}/call`, {});
+    const db = dbOf(srv);
+    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(10 * 60000);
+    let x = await st();
+    assert.deepEqual([x.status, x.canRecall], ['noshow', true]);
+    await s.post(`/api/staff/wait/${w.id}/recall`, {});
+    x = await st();
+    assert.deepEqual([x.status, x.canRecall], ['called', false]);
+    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(10 * 60000);
+    x = await st();
+    assert.deepEqual([x.status, x.canRecall], ['noshow', false], 'recalled once already');
+    db.close();
+  });
+});
+
+test('R3-4 sales by method: received / refunded / net / count per method, in the summary, the day report and the CSV; net sums to revenue', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order; // 8,000
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 3000 });
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'transfer' }); // 5,000
+    const c = (await staffOrder(s, 2, [{ id: 'cola', qty: 1 }])).json.order; // 2,000 paid 5,000 cash -> 3,000 refund
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', amount: 5000 });
+    const rf = (await s.get('/api/staff/state')).json.refunds[0];
+    const done = await s.post(`/api/staff/refunds/${rf.id}/done`, { amount: rf.amount, method: 'transfer' }); // refunded by bank transfer
+    assert.equal(done.json.refund.method, 'transfer');
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.deepEqual(sale.byMethod, { transfer: { received: 5000, refunded: 3000, net: 2000, count: 1 }, cash: { received: 8000, refunded: 0, net: 8000, count: 2 }, other: { received: 0, refunded: 0, net: 0, count: 0 } });
+    assert.equal(Object.values(sale.byMethod).reduce((n, m) => n + m.net, 0), sale.totals.revenue);
+    const csv = await csvOf(srv, s, '/api/staff/sales.csv');
+    assert.ok(csv.text.includes('[결제수단별]') && csv.text.includes('현금,8000,0,8000,2') && csv.text.includes('계좌이체,5000,3000,2000,1'), csv.text);
+    await s.post('/api/staff/orders/' + o.id + '/status', { status: 'served' });
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '마감', force: true })).status, 200);
+    const rep = (await s.get('/api/staff/day/reports/1')).json;
+    assert.deepEqual(rep.byMethod, sale.byMethod);
+    assert.ok((await csvOf(srv, s, '/api/staff/day/reports/1.csv')).text.includes('[결제수단별]'));
+    assert.equal((await s.get('/api/staff/sales')).json.byMethod.cash.received, 0, 'the new day starts empty');
+    // undoing a payment removes it from the ledger
+    const d = (await staffOrder(s, 1, [{ id: 'cola', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${d.id}/paid`, { paid: true, method: 'other' });
+    await s.post(`/api/staff/orders/${d.id}/paid`, { paid: false });
+    assert.deepEqual((await s.get('/api/staff/sales')).json.byMethod.other, { received: 0, refunded: 0, net: 0, count: 0 });
+  });
+});
+
+test('R3-5 dryRun previews exactly what the real call returns and writes nothing (state, audit and stock byte-identical)', async () => {
+  await withBooth(async ({ s }) => {
+    const it = await mkItem(s, '한정', 3000);
+    await s.post(`/api/staff/menu/items/${it}`, { stockLeft: 5 });
+    const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 2 }])).json.order; // 16,000
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
+    const snap = async () => JSON.stringify([(await s.get('/api/staff/state')).json, (await s.get('/api/staff/audit?limit=200')).json.entries.map((e) => e.id), (await s.get('/api/staff/sales')).json]);
+    const strip = (x) => JSON.parse(JSON.stringify(x, (k, v) => (['updatedAt', 'createdAt', 'paidAt', 'cookingAt'].includes(k) ? undefined : v)));
+    const cases = [
+      [`/api/staff/orders/${o.id}/items`, { items: [{ id: 'tteokbokki', qty: 1 }, { id: it, qty: 2 }] }], // lower total? 8,000 + 6,000 = 14,000 -> refund 2,000
+      [`/api/staff/orders/${o.id}/service`, { itemId: it, qty: 1 }],
+      [`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 1000 }],
+      [`/api/staff/orders/${o.id}/paid`, { paid: false }],
+      ['/api/staff/tables/2/orders', { key: newKey(), items: [{ id: it, qty: 2 }], accept: true }],
+    ];
+    for (const [p, body] of cases) {
+      const before = await snap();
+      const pre = await s.post(p, { ...body, dryRun: true });
+      assert.ok(pre.status < 300, pre.text);
+      assert.equal(pre.json.dryRun, true, p);
+      assert.equal(await snap(), before, `${p}: nothing changed (state, audit, stock, sales)`);
+      const real = await s.post(p, body);
+      assert.ok(real.status < 300, real.text);
+      assert.deepEqual(strip(pre.json.order), strip(real.json.order), `${p}: the preview is what the real call returned`);
+    }
+    // stock problems show up in the preview like in the real call, and still write nothing
+    await s.post(`/api/staff/menu/items/${it}`, { stockLeft: 2 });
+    const before = await snap();
+    const bad = await s.post(`/api/staff/orders/${o.id}/service`, { itemId: it, qty: 5, dryRun: true });
+    assert.deepEqual([bad.status, bad.json.error], [409, 'insufficient_stock']);
+    assert.equal(await snap(), before);
+    // a dry run honours the same validation and staleness rules
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/items`, { items: [], dryRun: true })).json.error, 'no_lines');
+    assert.equal((await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'cola', qty: 1 }], dryRun: true, expectedUpdatedAt: 1 })).json.error, 'stale');
+    assert.equal(await snap(), before);
+    // only a literal true is a dry run
+    const real = await s.post(`/api/staff/orders/${o.id}/service`, { itemId: 'cola', qty: 1, dryRun: 'true' });
+    assert.equal(real.json.dryRun, undefined);
+  });
+});
+
+test('R3-6 every audit row has a Korean sentence (summaryKo), never a secret; examples', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const o = (await staffOrder(s, 3, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 5000 });
+    await s.post('/api/staff/tables/3/clear', { force: true });
+    await s.post('/api/staff/menu/cola/soldout', { soldOut: true });
+    await s.post('/api/staff/notice', { text: '곧 마감' });
+    const entries = await auditOf(s);
+    assert.ok(entries.length >= 5);
+    for (const e of entries) assert.ok(typeof e.summaryKo === 'string' && /[가-힣]/.test(e.summaryKo), `${e.action}: ${e.summaryKo}`);
+    const ko = Object.fromEntries(entries.map((e) => [e.action + (e.action === 'staff_action' ? ':' + e.target : ''), e.summaryKo]));
+    assert.equal(ko.order_paid, `주문 #${o.id} 입금 확인 · 현금 5,000원 · 잔액 3,000원`);
+    assert.equal(ko.table_clear, '3번 테이블 강제 정리 · 미수금 1건 3,000원');
+    assert.equal(ko['staff_action:/api/staff/menu/cola/soldout'], '메뉴 품절 표시');
+    assert.match(ko.notice, /공지 변경 · “곧 마감”/);
+    assert.ok(entries.every((e) => e.summary !== undefined && e.target !== undefined && e.at), 'machine fields are still there');
+    const text = JSON.stringify(entries);
+    assert.ok(!text.includes((await s.get('/api/staff/deposit-hook')).json.secret) && !text.includes(PIN));
+    void srv;
+  });
+});
+
+test('R3-7 sales unpaid / written-off rows and refund rows carry the order updatedAt (for expectedUpdatedAt)', async () => {
+  await withBooth(async ({ s }) => {
+    const a = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }])).json.order; // unpaid, stays open
+    const b = (await staffOrder(s, 2, [{ id: 'odeng', qty: 1 }])).json.order; // written off
+    const c = (await staffOrder(s, 3, [{ id: 'cola', qty: 1 }])).json.order; // cancelled after payment
+    await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true });
+    await s.post('/api/staff/tables/2/clear', { force: true });
+    const cx = (await s.post(`/api/staff/orders/${c.id}/status`, { status: 'cancelled' })).json.order;
+    const sale = (await s.get('/api/staff/sales')).json;
+    assert.equal(sale.unpaid.find((x) => x.orderId === a.id).updatedAt, (await orderOf(s, a.id)).updatedAt);
+    assert.equal(typeof sale.writtenOff.find((x) => x.orderId === b.id).updatedAt, 'number');
+    assert.equal(sale.refunds.find((x) => x.orderId === c.id).updatedAt, cx.updatedAt);
+    const st = (await s.get('/api/staff/state')).json.refunds.find((x) => x.orderId === c.id);
+    assert.equal(st.updatedAt, cx.updatedAt);
+    // a stale-guarded late payment of the written-off order works with that value
+    const late = await s.post(`/api/staff/orders/${b.id}/paid`, { paid: true, expectedUpdatedAt: sale.writtenOff[0].updatedAt });
+    assert.equal(late.status, 200, late.text);
+    assert.equal((await s.post(`/api/staff/orders/${b.id}/paid`, { paid: true, amount: 100, expectedUpdatedAt: sale.writtenOff[0].updatedAt })).json.error, 'stale');
+  });
+});
+
+test('R3-8 deposits payload is bounded: state has counts + the newest 50 open notices, candidates capped at 10, /deposits paginates', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-dep-big-'));
+  const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 4 });
+  try {
+    for (let i = 0; i < 190; i++) store.createOrder(1 + (i % 4), { key: `big-order-${i}`.padEnd(12, 'x'), items: [{ id: 'tteokbokki', qty: 1 }], depositor: `이름${i % 90}` }, { staff: {} }); // 190 unpaid orders, all 8,000
+    for (let i = 0; i < 200; i++) store.ingestDeposit(`[Web발신]\n신한11/13 21:03\n110-***-123456\n입금 8,000\n잔액 1,234,${String(i).padStart(3, '0')}\n 가나${String.fromCharCode(0xac00 + i)}`);
+    const state = store.staffState();
+    assert.ok(state.depositNotices.length <= 50);
+    assert.equal(state.deposit.pending, 200);
+    const worst = store.listDeposits({ limit: 200 });
+    for (const n of [...state.depositNotices, ...worst.notices]) assert.ok(n.candidates.length <= 10 && n.handledOrders.length <= 10);
+    assert.equal(worst.notices[0].candidateCount, 190);
+    assert.ok(state.depositNotices.every((n) => n.candidateCount === 190));
+    const stateBytes = JSON.stringify(state).length; const listBytes = JSON.stringify(worst).length;
+    assert.ok(stateBytes < 700000 && listBytes < 700000, `state ${stateBytes} B, list ${listBytes} B`);
+    assert.equal(store.listDeposits({ before: worst.notices[199].id }).notices.length, 0, 'nothing after the last page');
+  } finally { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R3-8b GET /api/staff/deposits paginates with before/limit and validates them', async () => {
+  const d = await depositSetup();
+  try {
+    for (let i = 0; i < 7; i++) await d.sms(1000 + i * 100, `이름${i}`);
+    const p1 = (await d.s.get('/api/staff/deposits?limit=3')).json;
+    assert.equal(p1.notices.length, 3); assert.equal(p1.next, p1.notices[2].id);
+    const p2 = (await d.s.get(`/api/staff/deposits?limit=3&before=${p1.next}`)).json;
+    assert.ok(p2.notices.every((n) => n.id < p1.next) && p2.notices.length === 3);
+    const p3 = (await d.s.get(`/api/staff/deposits?limit=3&before=${p2.next}`)).json;
+    assert.deepEqual([p3.notices.length, p3.next], [1, null]);
+    for (const q of ['before=x', 'limit=1.5', 'limit=', 'before=-1']) assert.equal((await d.s.get(`/api/staff/deposits?${q}`)).json.error, 'bad_query', q);
+    assert.equal((await d.s.get('/api/staff/state')).json.depositNotices.length, 7);
+  } finally { await d.srv.stop(); }
+});
+
+test('R3-9 a guest cannot cancel an order that is partly paid', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = new Client(srv);
+    const o = (await order(g, tk[0], [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true, method: 'cash', amount: 3000 });
+    const r = await g.post(`/api/t/${tk[0]}/orders/${o.id}/cancel`, {});
+    assert.deepEqual([r.status, r.json.error], [409, 'not_cancellable']);
+    assert.equal((await orderOf(s, o.id)).status, 'pending');
+    assert.deepEqual((await s.get('/api/staff/state')).json.refunds, [], 'no refund was invented');
+  });
+});
+
+test('R3-10 day close: unconfirmed deposit notices count as open items and are kept in the report', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    const o = await d.place(tk[0], '김철수');
+    await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
+    await s.post(`/api/staff/orders/${o.id}/status`, { status: 'served' });
+    await d.sms(12345, '아무개');
+    const r = await s.post('/api/staff/day/close', { confirm: '마감' });
+    assert.deepEqual([r.status, r.json.error, r.json.pendingNotices], [409, 'open_items', { count: 1, amount: 12345 }]);
+    assert.equal((await s.post('/api/staff/day/close', { confirm: '마감', force: true })).status, 200);
+    const rep = (await s.get('/api/staff/day/reports/1')).json;
+    assert.deepEqual(rep.pendingNotices.map((n) => [n.amount, n.status]), [[12345, 'pending']]);
+    assert.ok(!JSON.stringify(rep.pendingNotices).includes('Web발신'), 'no SMS text in the report');
+    assert.ok((await csvOf(d.srv, s, '/api/staff/day/reports/1.csv')).text.includes('[미확인 입금 알림]'));
   } finally { await d.srv.stop(); }
 });

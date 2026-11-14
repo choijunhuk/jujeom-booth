@@ -2,8 +2,8 @@
 (function () {
   'use strict';
   var SC = window.SC, h = SC.h, $ = SC.$;
-  var TITLE = '주방 · 주점 부스';
-  var seen = null, live = null, lockUntil = 0, shell = null, gate = null;
+  var TITLE = '주방 · COMHERE';
+  var seen = null, itemSigs = null, changed = {}, live = null, lockUntil = 0, shell = null, gate = null;
 
   var make = $('#make'), jobs = $('#jobs');
   var emptyMake = h('div', { class: 'empty' }, '만들 음식이 없어요'), emptyJobs = h('div', { class: 'empty' }, '조리 중인 주문이 없어요');
@@ -16,6 +16,8 @@
       w.hidden = !l;
       w.textContent = l === 2 ? '! 지연' : '! 오래 걸림';
       w.className = 'tag late ' + (l === 2 ? 'bad solid' : 'warn');
+      var ch = el.querySelector('.chg');
+      if (ch) ch.hidden = !(changed[el.dataset.oid] && Date.now() - changed[el.dataset.oid] < 90000);
     });
   }
 
@@ -34,13 +36,13 @@
       });
     } }, '완료');
     b.appendChild(h('span', { class: 'vh' }, ' ' + o.table + '번 테이블'));
-    return h('article', { class: 'ocard st-cooking xl', dataset: { since: o.since } },
+    return h('article', { class: 'ocard st-cooking xl' + (changed[o.id] && Date.now() - changed[o.id] < 4000 ? ' hl' : ''), dataset: { since: o.since, oid: o.id } },
       h('div', { class: 'ohead' },
         h('div', { class: 'tno' }, h('span', { class: 'n', text: o.table }), h('span', { class: 'u', text: '번 테이블' })),
         h('div', { class: 'ometa' },
           h('div', { class: 'line' }, h('span', { class: 'oid' }, '#' + o.id), SC.timeEl(o.since, 'dur')),
-          h('div', { class: 'line' }, h('span', { class: 'tag info' }, '조리 중'), o.member ? h('span', { class: 'tag info' }, '★ COMS 회원') : null, h('span', { class: 'tag late', hidden: true })))),
-      h('ul', { class: 'items' }, o.items.map(function (i) { return h('li', null, h('span', { class: 'q' }, '×' + i.qty), h('span', null, i.name)); })),
+          h('div', { class: 'line' }, h('span', { class: 'tag info' }, '조리 중'), o.member ? h('span', { class: 'tag info' }, '★ COMS 회원') : null, h('span', { class: 'tag late', hidden: true }), h('span', { class: 'tag bad solid chg', hidden: true }, '주문 변경됨')))),
+      h('ul', { class: 'items' }, o.items.map(function (i) { return h('li', null, h('span', { class: 'q' }, '×' + i.qty), h('span', null, i.name), i.service ? h('span', { class: 'tag ok' }, '서비스') : null); })),
       o.note ? h('p', { class: 'note' }, h('b', null, '요청'), o.note) : null,
       h('div', { class: 'oact' }, b));
   }
@@ -53,6 +55,14 @@
       if (fresh.length) { SC.attention('kitchen'); SC.toast('새 주문 · ' + fresh.map(function (o) { return o.table + '번'; }).join(', ') + ' 테이블', 'ok'); }
     }
     seen = ids;
+    var sigs = {};
+    d.orders.forEach(function (o) { sigs[o.id] = JSON.stringify(o.items); });
+    if (itemSigs) {
+      var edited = d.orders.filter(function (o) { return itemSigs[o.id] != null && itemSigs[o.id] !== sigs[o.id]; });
+      edited.forEach(function (o) { changed[o.id] = Date.now(); SC.notif.show('주문 변경 · ' + o.table + '번 테이블', SC.itemsText(o.items), 'chg-' + o.id + '-' + Date.now()); });
+      if (edited.length) { SC.attention('kitchen'); SC.toast('주문 변경 · ' + edited.map(function (o) { return o.table + '번'; }).join(', ') + ' 테이블', 'ok'); }
+    }
+    itemSigs = sigs;
     var total = d.items.reduce(function (a, i) { return a + i.qty; }, 0);
     $('#mk-n').textContent = total ? '총 ' + total + '개' : ''; $('#mk-n').hidden = !total;
     $('#jb-n').textContent = d.orders.length ? d.orders.length + '건' : ''; $('#jb-n').hidden = !d.orders.length;

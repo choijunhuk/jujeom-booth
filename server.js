@@ -76,7 +76,7 @@ const limits = {
 };
 const PHOTO_MAX = 400 * 1024;
 const PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const storeOpts = { photoMaxBytes: envInt('PHOTO_STORAGE_MAX', 40 * 1024 * 1024), maxDbBytes: envInt('DB_MAX_BYTES', 256 * 1024 * 1024), backupSkipBytes: envInt('BACKUP_SKIP_BYTES', 128 * 1024 * 1024) };
+const storeOpts = { waitCallTimeoutMin: envInt('WAIT_CALL_TIMEOUT_MIN', 5, 1, 30), photoMaxBytes: envInt('PHOTO_STORAGE_MAX', 40 * 1024 * 1024), maxDbBytes: envInt('DB_MAX_BYTES', 256 * 1024 * 1024), backupSkipBytes: envInt('BACKUP_SKIP_BYTES', 128 * 1024 * 1024) };
 const store = createStore({ dataDir: DATA_DIR, menu, rewards, tableCount: tablesCfg.count, payEnv: { bank: PAY.bank, account: PAY.account, holder: PAY.holder }, limits, memberEnabled: !!COMS_ME_URL, ...storeOpts });
 const DEVICE_KEY = store.deviceSecret();
 let tokenToTable = new Map(store.tokens().map((t) => [t.token, t.id]));
@@ -341,7 +341,8 @@ function guestCtx(c) {
 const G = '/api/t/([A-Za-z0-9_-]{8,64})';
 
 // pages
-const landing = (c) => sendText(c.res, 200, 'text/html; charset=utf-8', htmlShell('주점 부스', '<h2>주점 부스</h2><p>테이블에 붙어 있는 QR 코드를 찍어 주세요.</p><p>입구에서 대기 중이라면 대기 QR을 찍어 주세요.</p>'), { 'Cache-Control': 'no-cache' });
+const builtinLanding = (c) => sendText(c.res, 200, 'text/html; charset=utf-8', htmlShell('COMHERE', '<h2>COMHERE</h2><p>테이블에 붙어 있는 QR 코드를 찍어 주세요.</p><p>입구에서 대기 중이라면 대기 QR을 찍어 주세요.</p>'), { 'Cache-Control': 'no-cache' });
+const landing = (c) => (fs.existsSync(path.join(PUBLIC, 'landing.html')) ? servePage(c, 'landing.html') : builtinLanding(c)); // public/landing.html overrides the built-in page
 route('GET', '/', landing);
 route('GET', '/t/([A-Za-z0-9_-]{8,64})', (c) => {
   if (!tokenToTable.has(c.m[1])) return notFoundPage(c.res, '알 수 없는 테이블 QR입니다.');
@@ -446,6 +447,7 @@ route('POST', '/api/staff/login', (c) => {
     if (!key) lock.fails = 0;
     else store.loginKeyOk(key);
     addCookie(c.res, `booth_s=${store.newSession(SESSION_MS)}; ${COOKIE_FLAGS}; Max-Age=${SESSION_MS / 1000}`);
+    store.audit('login', 'staff', key ? 'trusted device' : 'pin', `직원 로그인${key ? ' (저장된 기기)' : ''}`);
     if (!key) addCookie(c.res, `booth_k=${store.newLoginKey()}; ${COOKIE_FLAGS}; Max-Age=${KEY_MAX_AGE_S}`);
     return { ok: true };
   }
@@ -457,6 +459,7 @@ route('POST', '/api/staff/login', (c) => {
   lock.fails++;
   if (lock.fails >= 5) { // flat lock, no escalation: a guest hammering the form can only deny new (key-less) logins one lock at a time
     lock.until = Date.now() + LOCKOUT_MS;
+    store.audit('lockout', 'staff', `login locked for ${Math.ceil(LOCKOUT_MS / 1000)} s after repeated wrong PINs`, `로그인 잠금 · PIN을 여러 번 틀려 ${Math.ceil(LOCKOUT_MS / 1000)}초 동안 막힘`);
     c.res.setHeader('Retry-After', Math.ceil(LOCKOUT_MS / 1000));
     throw locked(LOCKOUT_MS);
   }
@@ -471,6 +474,23 @@ route('GET', '/api/staff/me', () => ({ ok: true }), { staff: true });
 
 // staff api
 const S = { staff: true };
+// Korean sentence for the generic audit rows (field NAMES / booleans only, never values that could be secrets)
+const actionKo = (p, b) => {
+  const rules = [
+    [/^\/api\/staff\/menu\/[^/]+\/soldout$/, () => `메뉴 품절 ${b.soldOut ? '표시' : '해제'}`], [/^\/api\/staff\/menu\/items\/[^/]+\/delete$/, () => '메뉴 삭제'],
+    [/^\/api\/staff\/menu\/items\/[^/]+\/photo\/delete$/, () => '메뉴 사진 삭제'], [/^\/api\/staff\/menu\/items\/[^/]+\/photo$/, () => '메뉴 사진 올리기'],
+    [/^\/api\/staff\/menu\/reorder$/, () => '메뉴 순서 변경'], [/^\/api\/staff\/menu\/categories$/, () => '카테고리 추가'],
+    [/^\/api\/staff\/menu\/categories\/#\/delete$/, () => '카테고리 삭제'], [/^\/api\/staff\/menu\/categories\/#$/, () => '카테고리 이름 변경'],
+    [/^\/api\/staff\/rewards$/, () => '보상 추가'], [/^\/api\/staff\/rewards\/[^/]+\/delete$/, () => '보상 삭제'], [/^\/api\/staff\/rewards\/[^/]+\/stock$/, () => '보상 재고 변경'],
+    [/^\/api\/staff\/rewards\/[^/]+$/, () => '보상 수정'], [/^\/api\/staff\/hourly-reward$/, () => '시간대 보상 설정 변경'], [/^\/api\/staff\/award-hour$/, () => '시간대 보상 지급'],
+    [/^\/api\/staff\/waitlist\/open$/, () => `대기 접수 ${b.open ? '열기' : '닫기'}`], [/^\/api\/staff\/waitlist\/clear$/, () => '대기 명단 비우기'],
+    [/^\/api\/staff\/calls\/#\/resolve$/, () => '직원 호출 처리'],
+    [/^\/api\/staff\/wait\/#\/call$/, () => '대기 손님 호출'], [/^\/api\/staff\/wait\/#\/seat$/, () => '대기 손님 입장 처리'], [/^\/api\/staff\/wait\/#\/cancel$/, () => '대기 취소'], [/^\/api\/staff\/wait\/#\/recall$/, () => '미입장 손님 다시 호출'],
+  ];
+  for (const [re, f] of rules) if (re.test(p)) return f();
+  return `직원 작업 · ${p}`;
+};
+const DB_AUDITED = /^\/api\/staff\/(orders\/\d+\/(status|paid|items|service|move)|tables\/(\d+\/(clear|unclear|orders|coupons)|move)|refunds\/\d+\/done|coupons\/(redeem|[A-Za-z0-9]+\/void)|deposits\/(\d+\/(assign|dismiss|attach)|autoconfirm)|deposit-hook\/test|pay|member-discount|notice|reset|day\/close|ordering|tables\/count|tables\/\d+\/rotate|deposit-hook\/rotate|waitlist\/timeout|menu\/items(\/[A-Za-z0-9_-]+)?)$/; // routes whose store method writes its own (richer) audit row
 route('GET', '/api/staff/state', () => staffSnap(), S);
 route('GET', '/api/staff/events', (c) => sse(c, 'staff', () => staffSnap(), true), S);
 route('GET', '/api/staff/tables', () => ({
@@ -479,13 +499,17 @@ route('GET', '/api/staff/tables', () => ({
   origin: PUBLIC_ORIGIN, base: BASE,
 }), S);
 route('POST', '/api/staff/orders/(\\d{1,9})/status', (c) => {
-  const order = store.setStatus(int(c.m[1]), c.body.status);
+  const order = store.setStatus(int(c.m[1]), c.body.status, c.body.expectedUpdatedAt);
   touchTable(order.table);
   hint('g:' + order.table, 'order_status', { id: order.id, status: order.status });
   if (order.status === 'cooking') hint('kitchen', 'new_cooking', { id: order.id, table: order.table });
   return { order };
 }, S);
-route('POST', '/api/staff/orders/(\\d{1,9})/paid', (c) => { const order = store.setPaid(int(c.m[1]), c.body.paid); touchTable(order.table); return { order }; }, S);
+route('POST', '/api/staff/orders/(\\d{1,9})/paid', (c) => {
+  const go = () => store.setPaid(int(c.m[1]), c.body.paid, { method: c.body.method, amount: c.body.amount, expectedUpdatedAt: c.body.expectedUpdatedAt });
+  if (c.body.dryRun === true) return { dryRun: true, order: store.dry(go) }; // preview: runs the real code in a rolled-back transaction
+  const order = go(); touchTable(order.table); return { order };
+}, S);
 route('POST', '/api/staff/menu/([A-Za-z0-9_-]{1,40})/soldout', (c) => {
   need(typeof c.body.soldOut === 'boolean', 'bad_soldout', 'soldOut은 true/false여야 합니다.');
   store.setSoldOut(c.m[1], c.body.soldOut);
@@ -500,11 +524,16 @@ const hookUrl = () => {
 let hookLimitedAt = 0; // staff learn for 5 minutes that the hook hit its rate cap
 const staffSnap = () => ({ ...store.staffState(), hookRateLimited: Date.now() - hookLimitedAt < 5 * 60000 });
 route('POST', '/api/staff/pay', (c) => { const pay = store.setPay(c.body); touchAll(); return { ok: true, pay }; }, S);
-route('GET', '/api/staff/deposits', () => ({ notices: store.listDeposits(), ...store.depositCounts() }), S);
-route('POST', '/api/staff/deposits/(\\d{1,9})/assign', (c) => { const r = store.assignDeposit(int(c.m[1]), c.body.orderId, c.body.force); touchTable(r.order.table); return { ok: true, ...r }; }, S);
+route('GET', '/api/staff/deposits', (c) => {
+  const q = (k) => { const v = c.url.searchParams.get(k); return v == null ? null : /^\d{1,12}$/.test(v) ? Number(v) : NaN; };
+  const before = q('before'); const limit = q('limit');
+  if (Number.isNaN(before) || Number.isNaN(limit)) throw new HttpError(400, 'bad_query', 'before와 limit은 정수여야 합니다.');
+  return { ...store.listDeposits({ before, limit: limit ?? undefined }), ...store.depositCounts() };
+}, S);
+route('POST', '/api/staff/deposits/(\\d{1,9})/assign', (c) => { const r = store.assignDeposit(int(c.m[1]), c.body.orderId, c.body.force, c.body.note); touchTable(r.order.table); return { ok: true, ...r }; }, S);
 route('POST', '/api/staff/deposits/(\\d{1,9})/dismiss', (c) => { const notice = store.dismissDeposit(int(c.m[1])); touch('staff'); return { ok: true, notice }; }, S);
 route('POST', '/api/staff/deposits/autoconfirm', (c) => { const r = store.setAutoConfirm(c.body); touch('staff'); return { ok: true, ...r }; }, S);
-route('POST', '/api/staff/deposits/(\\d{1,9})/attach', (c) => { const r = store.attachDeposit(int(c.m[1]), c.body.orderId, c.body.force); touchTable(r.order.table); return { ok: true, ...r }; }, S);
+route('POST', '/api/staff/deposits/(\\d{1,9})/attach', (c) => { const r = store.attachDeposit(int(c.m[1]), c.body.orderId, c.body.force, c.body.note); touchTable(r.order.table); return { ok: true, ...r }; }, S);
 // "테스트 보내기": the real parser and matcher, but nothing is stored and nothing changes
 route('POST', '/api/staff/deposit-hook/test', (c) => {
   if (typeof c.body.text !== 'string' || c.body.text.length > 2048) throw new HttpError(400, 'bad_body', '{ "text": "..." } (최대 2KB) 형식이어야 합니다.');
@@ -517,12 +546,19 @@ const hookTimes = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const badTimes = []; // attempts with a wrong secret have their own small budget, separate from the real forwarder's
 let badWaiting = 0;
+const TEST_STATS_FILE = process.env.BOOTH_TEST_STATS_FILE || '';
+const badStats = { badDelayed: 0, badImmediate: 0 };
 async function depositHook(c, secret) {
   if (!store.checkDepositSecret(secret)) {
     const now = Date.now();
     while (badTimes.length && badTimes[0] < now - 60000) badTimes.shift();
     badTimes.push(now);
-    if (badWaiting < 20 && badTimes.length <= 20) { badWaiting++; try { await sleep(300); } finally { badWaiting--; } } // over the budget: answered at once, no idle socket
+    const delayed = badWaiting < 20 && badTimes.length <= 20;
+    if (TEST_STATS_FILE) { // test hook only (never served over HTTP): counts delayed vs immediate answers so tests need no wall-clock thresholds
+      badStats[delayed ? 'badDelayed' : 'badImmediate']++;
+      try { fs.writeFileSync(TEST_STATS_FILE, JSON.stringify(badStats)); } catch { /* test hook is best-effort */ }
+    }
+    if (delayed) { badWaiting++; try { await sleep(300); } finally { badWaiting--; } } // over the budget: answered at once, no idle socket
     throw new HttpError(404, 'not_found', '없는 API입니다.');
   }
   const t = Date.now();
@@ -611,13 +647,72 @@ route('POST', '/api/staff/waitlist/open', (c) => {
 route('POST', '/api/staff/waitlist/clear', () => { const cancelled = store.clearWait(); touch('staff', 'w:*'); return { ok: true, cancelled }; }, S);
 route('POST', '/api/staff/tables/(\\d{1,4})/clear', (c) => {
   const n = int(c.m[1]);
-  const seat = store.clearTable(n, c.body.force === true);
+  const r = store.clearTable(n, c.body.force === true);
   touchTable(n);
-  hint('g:' + n, 'cleared', { seat });
+  hint('g:' + n, 'cleared', { seat: r.seat });
+  return { ok: true, table: n, seat: r.seat, writtenOff: r.writtenOff };
+}, S);
+route('POST', '/api/staff/tables/(\\d{1,4})/unclear', (c) => {
+  const n = int(c.m[1]);
+  const seat = store.unclearTable(n);
+  touchTable(n);
+  hint('g:' + n, 'cleared', { seat }); // guests reload their (restored) state
   return { ok: true, table: n, seat };
 }, S);
+route('POST', '/api/staff/tables/(\\d{1,4})/orders', (c) => {
+  const n = int(c.m[1]);
+  const go = () => store.createOrder(n, c.body, { staff: { allowHidden: c.body.allowHidden === true, accept: c.body.accept === true } });
+  if (c.body.dryRun === true) return { dryRun: true, ...store.dry(go) };
+  const r = go();
+  if (!r.duplicate) {
+    c.status = 201;
+    touchTable(n);
+    hint('g:' + n, 'order_status', { id: r.order.id, status: r.order.status });
+    if (r.order.status === 'cooking') hint('kitchen', 'new_cooking', { id: r.order.id, table: n });
+  }
+  return r;
+}, S);
+route('POST', '/api/staff/tables/(\\d{1,4})/coupons', (c) => { const coupon = store.createManualCoupon(int(c.m[1]), c.body); touchTable(int(c.m[1])); return { ok: true, coupon }; }, S);
+route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/void', (c) => { const coupon = store.voidCoupon(c.m[1]); touchTable(coupon.table); return { ok: true, coupon }; }, S);
+const orderEdited = (order) => { touchTable(order.table); hint('g:' + order.table, 'order_status', { id: order.id, status: order.status }); return order; };
+route('POST', '/api/staff/orders/(\\d{1,9})/items', (c) => {
+  const go = () => store.editItems(int(c.m[1]), c.body.items, { expectedUpdatedAt: c.body.expectedUpdatedAt });
+  return c.body.dryRun === true ? { dryRun: true, order: store.dry(go) } : { order: orderEdited(go()) };
+}, S);
+route('POST', '/api/staff/orders/(\\d{1,9})/service', (c) => {
+  const go = () => store.addService(int(c.m[1]), c.body.itemId, c.body.qty, { expectedUpdatedAt: c.body.expectedUpdatedAt });
+  return c.body.dryRun === true ? { dryRun: true, order: store.dry(go) } : { order: orderEdited(go()) };
+}, S);
+route('POST', '/api/staff/orders/(\\d{1,9})/move', (c) => {
+  const r = store.moveOrder(int(c.m[1]), c.body.to, { expectedUpdatedAt: c.body.expectedUpdatedAt });
+  touchTable(r.from);
+  orderEdited(r.order);
+  return { order: r.order, from: r.from };
+}, S);
+route('POST', '/api/staff/refunds/(\\d{1,9})/done', (c) => { const refund = store.refundDone(int(c.m[1]), c.body); touchTable(refund.table); return { ok: true, refund }; }, S);
+route('POST', '/api/staff/notice', (c) => { const notice = store.setNotice(c.body); touchAll(); return { ok: true, notice }; }, S);
+route('GET', '/api/staff/audit', (c) => {
+  const before = c.url.searchParams.get('before'); const limit = c.url.searchParams.get('limit');
+  const int0 = (v) => (v == null ? null : /^\d{1,12}$/.test(v) ? Number(v) : NaN);
+  const b = int0(before); const l = int0(limit);
+  if (Number.isNaN(b) || Number.isNaN(l)) throw new HttpError(400, 'bad_query', 'before와 limit은 정수여야 합니다.');
+  return store.listAudit(b, l ?? undefined);
+}, S);
+route('POST', '/api/staff/day/close', async (c) => {
+  if (c.body.confirm !== '마감') throw new HttpError(400, 'confirm_required', '확인 문구 "마감"을 입력해 주세요.');
+  const force = c.body.force === true;
+  store.closeCheck(force); // refuse before the (slow) backup when open items / nothing to close
+  await backupNow(); // a safety copy first, then the frozen report + wipe in one transaction
+  const report = store.closeDay(force);
+  touchAll();
+  return { ok: true, report };
+}, S);
+route('GET', '/api/staff/day/reports', () => ({ reports: store.listDayReports() }), S);
+route('GET', '/api/staff/day/reports/(\\d{1,9})', (c) => store.dayReport(int(c.m[1])), S);
+route('GET', '/api/staff/day/reports/(\\d{1,9})\\.csv', (c) => sendText(c.res, 200, 'text/csv; charset=utf-8', store.dayReportCsv(int(c.m[1])), { 'Content-Disposition': `attachment; filename="booth-day-${int(c.m[1])}.csv"`, 'Cache-Control': 'no-store' }), S);
+route('POST', '/api/staff/waitlist/timeout', (c) => { const minutes = store.setWaitTimeout(c.body.minutes); touch('staff', 'w:*'); return { ok: true, minutes }; }, S);
 route('POST', '/api/staff/calls/(\\d{1,9})/resolve', (c) => { store.resolveCall(int(c.m[1])); touch('staff', 'g:*'); return { ok: true }; }, S);
-route('POST', '/api/staff/wait/(\\d{1,9})/(call|seat|cancel)', (c) => { store.waitAction(int(c.m[1]), c.m[2]); touch('staff', 'w:*'); return { ok: true }; }, S);
+route('POST', '/api/staff/wait/(\\d{1,9})/(call|seat|cancel|recall)', (c) => { store.waitAction(int(c.m[1]), c.m[2]); touch('staff', 'w:*'); return { ok: true }; }, S);
 route('POST', '/api/staff/award-hour', (c) => { const r = store.awardHour(c.body.hourStart); touchTable(r.table); return r; }, S);
 route('POST', '/api/staff/rewards/([A-Za-z0-9_-]{1,40})/stock', (c) => { store.setStock(c.m[1], c.body.stock); touch('staff', 'g:*'); return { ok: true }; }, S);
 route('GET', '/api/staff/sales', () => store.sales(), S);
@@ -673,6 +768,7 @@ async function handle(req, res) {
     }
   }
   const out = await r.fn(c);
+  if (method === 'POST' && r.staff && !DB_AUDITED.test(p)) { const norm = p.replace(/\/\d+(?=\/|$)/g, '/#'); store.audit('staff_action', norm, Object.keys(c.body || {}).join(','), actionKo(norm, c.body || {})); } // route + field NAMES only: never values (no PINs, tokens or secrets)
   if (!res.headersSent) sendJson(res, c.status, out ?? { ok: true });
 }
 
@@ -701,6 +797,8 @@ function runBackup(periodic = false) {
 async function backupNow() { if (backupP) await backupP; return runBackup(); }
 const backupTimer = setInterval(() => runBackup(true), BACKUP_MS);
 backupTimer.unref();
+const waitSweepTimer = setInterval(() => { try { if (store.sweepWait()) touch('staff', 'w:*'); } catch (e) { console.error('wait sweep failed:', e.message); } }, 30000); // calls nobody answered become no-shows
+waitSweepTimer.unref();
 
 let closing = false;
 async function shutdown(sig) {
