@@ -25,6 +25,23 @@
   function amountText(n) { return n.amount != null ? (n.amountGuessed ? '추정 ' : '') + won(n.amount) : '금액 읽기 실패'; }
   function openStatus(n) { return n.status === 'pending' || n.status === 'unparsed' || n.status === 'review'; }
   // a guessed amount or any parse / match reason (auto_off alone is the normal "auto-confirm is off" state)
+  // Why the server withheld one-tap (n.oneTapBlockedBy, codes below). Absent field (older server): fall back to the generic amount warning.
+  var BLOCK_TEXT = {
+    amount_uncertain: '문자의 금액을 믿을 수 없어요. 은행 앱에서 확인해 주세요',
+    name_missing: '보낸 사람 이름이 없어요. 주문을 골라 확인해 주세요',
+    name_mismatch: '보낸 사람 이름이 주문과 달라요. 주문을 골라 확인해 주세요',
+    several_candidates: '같은 금액 주문이 여러 개예요. 직접 골라 주세요',
+    maybe_already_handled: '이미 손으로 입금 확인한 같은 금액 주문이 있어요',
+    no_candidate: '금액이 같은 입금 대기 주문이 없어요',
+    over_max_amount: '자동 확인 최대 금액을 넘는 금액이에요',
+    duplicate: '같은 문자가 이미 처리된 뒤 또 들어왔어요',
+    review_word: '취소·정정으로 보이는 문자예요. 실제 입금인지 확인해 주세요'
+  };
+  function blockedBy(n) { return Array.isArray(n.oneTapBlockedBy) ? n.oneTapBlockedBy.filter(function (c) { return typeof c === 'string'; }) : null; }
+  function blockLines(n) { var b = blockedBy(n); return b ? b.filter(function (c) { return BLOCK_TEXT[c]; }) : []; }
+  // is the AMOUNT itself in doubt? (server says so, or old server: any guessed amount / parse reason)
+  function amountDoubt(n) { var b = blockedBy(n); return !!n.amountGuessed || (b && b.length ? b.indexOf('amount_uncertain') >= 0 : needsCheck(n)); }
+  PW.blockText = BLOCK_TEXT;
   function needsCheck(n) { return !!n.amountGuessed || (n.reasons || []).some(function (r) { return r !== 'auto_off'; }); }
 
   // One-tap confirm is offered ONLY when the server says oneTap === true (never derived from recommended / names / candidates).
@@ -41,7 +58,8 @@
     var who = n.depositor || '이름 없음';
     if (rec && rec.intent) return [rec.table + '번 테이블 · ' + coverLabel(d) + ' ' + rec.intent.shares + '명분 · ' + amountText(n) + ' · ', SC.nameChip(rec.intent.payer || who)];
     if (rec) return [rec.table + '번 테이블 입금 문자 도착 · ' + (n.amount != null ? won(n.amount) : amountText(n)) + ' · ', SC.nameChip(who)];
-    if (needsCheck(n)) return ['입금 문자 도착 · 금액 확인 필요 · ', SC.nameChip(who)];
+    if (needsCheck(n) && amountDoubt(n)) return ['입금 문자 도착 · 금액 확인 필요 · ', SC.nameChip(who)];
+    if (needsCheck(n) && blockLines(n).length) return ['입금 문자 도착 · ' + amountText(n) + ' · ', SC.nameChip(who)];
     return ['입금 문자 도착 · ' + amountText(n) + ' · ', SC.nameChip(who), ' · 주문을 골라 주세요'];
   }
   function openNotice(n) { dismissed[n.id] = true; renderDep(); PW.openDeposits(n.id); }
@@ -75,7 +93,7 @@
       var rec = recOf(n);
       var chk = !rec && needsCheck(n);
       var b = h('div', { class: 'pw-banner dep' + (rec ? ' rec' : ''), role: 'alert', dataset: { nid: n.id } },
-        h('div', { class: 'pw-txt' }, h('b', null, bannerParts(n, rec, d)), n.repeatCount > 1 ? h('span', { class: 'pw-sub' }, '같은 문자가 ' + n.repeatCount + '번 왔어요') : null, !rec && !chk && (n.reasons || []).indexOf('several_candidates') >= 0 ? h('span', { class: 'pw-sub' }, '같은 금액 후보가 여러 개라 직접 골라야 해요') : null, chk ? h('span', { class: 'pw-sub' }, '문자의 금액을 믿을 수 없어요. 은행 앱에서 확인해 주세요') : null),
+        h('div', { class: 'pw-txt' }, h('b', null, bannerParts(n, rec, d)), n.repeatCount > 1 ? h('span', { class: 'pw-sub' }, '같은 문자가 ' + n.repeatCount + '번 왔어요') : null, !rec && !chk && (n.reasons || []).indexOf('several_candidates') >= 0 ? h('span', { class: 'pw-sub' }, '같은 금액 후보가 여러 개라 직접 골라야 해요') : null, chk ? h('span', { class: 'pw-sub' }, blockLines(n).length ? BLOCK_TEXT[blockLines(n)[0]] : BLOCK_TEXT.amount_uncertain) : null),
         h('div', { class: 'pw-btns' },
           rec ? h('button', { class: 'btn btn-primary', type: 'button', onclick: function (e) { var el = e.currentTarget; if (el.disabled) return; el.disabled = true; tapConfirm(n, rec).then(function () { el.disabled = false; }); } }, '입금 확인')
             : h('button', { class: 'btn btn-primary', type: 'button', onclick: function () { openNotice(n); } }, chk ? '확인하러 가기' : '주문 고르기'),
@@ -86,7 +104,7 @@
   function announceArrival(n, d) {
     if (SC.prefs.get('alertDeposit')) SC.attention('deposit'); else SC.flash();
     var rec = recOf(n);
-    if (SC.prefs.get('alertDeposit')) SC.notif.show('입금 문자 도착', (rec ? rec.table + '번 테이블 · ' : '') + (!rec && needsCheck(n) ? '금액 확인 필요' : amountText(n)) + ' · [' + (SC.safeText(n.depositor, 12) || '이름 없음') + ']', 'dep-' + n.id + '-' + (n.repeatCount || 1));
+    if (SC.prefs.get('alertDeposit')) SC.notif.show('입금 문자 도착', (rec ? rec.table + '번 테이블 · ' : '') + (!rec && needsCheck(n) && amountDoubt(n) ? '금액 확인 필요' : amountText(n)) + ' · [' + (SC.safeText(n.depositor, 12) || '이름 없음') + ']', 'dep-' + n.id + '-' + (n.repeatCount || 1));
   }
   // hint from SSE: refresh state; a repeated text re-alerts
   PW.hintDeposit = function (ev) {

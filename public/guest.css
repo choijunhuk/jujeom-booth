@@ -251,20 +251,19 @@ a.kk{background:#fee500;color:#000;font-weight:700}
 .cl .n b{font:800 17px var(--y-font-ui)}
 .sum.tot{font:800 20px var(--y-font-ui)}
 .acct .no{font:800 24px var(--y-font-ui);letter-spacing:.06em}
-.amt{font:400 32px/1.25 var(--y-font-pixel)}
+.amt{font:800 34px/1.25 var(--y-font-num);font-variant-numeric:tabular-nums;letter-spacing:0}
 .sw::before{font-size:14px;font-weight:800}
-.tsum .big{font:400 32px/1.2 var(--y-font-pixel)}
+.tsum .big{font:800 30px/1.2 var(--y-font-num);font-variant-numeric:tabular-nums;letter-spacing:0}
 .tag{font-size:14px;font-weight:800;padding:1px 6px;border:1px solid #000}
 .tag.warn{background:#ffe94d;color:#000}
 .tag.ok{background:#b9ff3c;color:#000}
 .th{font-size:15px;font-weight:700}
 .gc h3{font:400 16px var(--y-font-pixel)}
 .badge{font-size:14px;font-weight:800;line-height:20px}
-.gover .score{font:400 64px/1 var(--y-font-pixel);text-shadow:4px 4px 0 #ff8cc6}
+.gover .score{font:800 72px/1 var(--y-font-num);font-variant-numeric:tabular-nums;letter-spacing:0;text-shadow:3px 3px 0 #ff8cc6}
 .gover .msg{font:800 20px/1.3 var(--y-font-ui)}
 .cp .lb{font:800 19px/1.3 var(--y-font-ui)}
-.cp .code{font:400 64px/1.1 var(--y-font-pixel);letter-spacing:.1em;text-indent:.1em;text-shadow:4px 4px 0 #ff8cc6}
-@media (max-width:370px){.cp .code{font-size:48px}}
+.cp .code{font:800 clamp(40px,14vw,60px)/1.1 var(--y-font-num);font-variant-numeric:tabular-nums;letter-spacing:.12em;text-indent:.12em;text-shadow:3px 3px 0 #ff8cc6}
 .stamp{font:400 16px var(--y-font-pixel)}
 .fatal h2{font:800 24px var(--y-font-ui)}
 .tb-head{font:400 16px/1.4 var(--y-font-pixel)}
@@ -325,7 +324,7 @@ a.kk{background:#fee500;color:#000;font-weight:700}
 .bigstep{display:grid;grid-template-columns:64px 1fr 64px;gap:10px;align-items:center;margin:8px 0}
 .bigstep .y2k-btn{min-height:64px;font:800 32px/1 var(--y-font-ui);padding:0}
 .bigstep output{display:flex;align-items:baseline;justify-content:center;gap:6px;background:#fff;box-shadow:var(--y-bevel-in);min-height:64px}
-.bigstep output .n{font-family:var(--y-font-pixel);font-size:48px;line-height:1.3;-webkit-font-smoothing:none;font-synthesis:none}
+.bigstep output .n{font:800 48px/1.3 var(--y-font-num);font-variant-numeric:tabular-nums}
 .bigstep output .u{font:800 18px var(--y-font-ui)}
 .cv{margin-bottom:14px}
 .cv .y2k-body{padding:14px;background:linear-gradient(#fff,#e3edff)}
@@ -354,3 +353,7 @@ a.kk{background:#fee500;color:#000;font-weight:700}
 .split{margin:10px 0;padding:8px 10px;background:#fff;box-shadow:var(--y-bevel-in);color:#000;font-size:15px}
 .split b{display:block;margin-bottom:6px}
 .split .two{margin-top:4px}
+
+/* coupon limits: inline text button inside game cards */
+.linkbtn{text-align:left;background:none;border:0;padding:0;margin:0;font:inherit;color:var(--y-link);text-decoration:underline;cursor:pointer;min-height:24px}
+#clim{margin:4px 0 0;color:#a00000;font-weight:700}

@@ -132,7 +132,7 @@
     function sprite(art, pal, x, y, s) {
       for (var r = 0; r < art.length; r++) for (var c = 0; c < art[r].length; c++) { var ch = art[r][c]; if (ch !== '.') { ctx.fillStyle = pal[ch]; ctx.fillRect(Math.round(x + c * s), Math.round(y + r * s), s, s); } }
     }
-    var MONO = '"NeoDgm", ui-monospace, Menlo, monospace';   // pixel font: 16px / 32px only
+    var MONO = '"YDigits", "NeoDgm", ui-monospace, Menlo, monospace';   // pixel font: 16px / 32px only
     var UI = 'system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif', CODEF = 'ui-monospace, Menlo, Consolas, monospace';
     function draw() {
       ctx.fillStyle = '#0000a8'; ctx.fillRect(0, 0, W, H);
@@ -188,7 +188,7 @@
       var pw = Math.min(W - 24, 300), ph = 58 + lines.length * 26, px = (W - pw) / 2, py = (H - ph) / 2 - 10;
       ctx.fillStyle = '#000'; ctx.fillRect(px + 4, py + 4, pw, ph); ctx.fillStyle = '#c0c0c0'; ctx.fillRect(px, py, pw, ph);
       ctx.fillStyle = '#000080'; ctx.fillRect(px + 3, py + 3, pw - 6, 24); ctx.fillStyle = '#fff'; ctx.font = '16px ' + MONO; ctx.textAlign = 'left'; ctx.fillText('debug.exe', px + 10, py + 16);
-      ctx.textAlign = 'center'; ctx.fillStyle = '#000'; ctx.font = '32px ' + MONO; ctx.fillText(title, W / 2, py + 52);
+      ctx.textAlign = 'center'; ctx.fillStyle = '#000'; ctx.font = /^\d+$/.test(title) ? '800 34px ' + UI : '32px ' + MONO; ctx.fillText(title, W / 2, py + 52); // the bitmap font has no usable digits
       ctx.font = '700 16px ' + UI; lines.forEach(function (l, i) { ctx.fillStyle = '#000'; ctx.fillText(l, W / 2, py + 82 + i * 26); });
       ctx.textAlign = 'left';
     }

@@ -390,11 +390,11 @@ body.xl-scale .tag { font-size: .95rem; }
 .top-brand .y2k-chrome-text { font-size: 32px; }
 .top-brand .brand-page { color: var(--y-lime); font-size: 16px; }
 @media (min-width: 1180px) { .top-brand { margin-right: 0; } }
-.tno .n, .tcard .n { font-family: var(--y-font-pixel); font-weight: 400; font-size: 48px; letter-spacing: 0; -webkit-font-smoothing: none; font-synthesis: none; }
+.tno .n, .tcard .n { font-family: var(--y-font-num); font-weight: 800; font-size: 48px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .tno .n { line-height: 1; }
 .tcard .n small { font-family: var(--y-font-ui); font-size: .9rem; }
 .ocard.xl .tno .n { font-size: 96px; }
-.dep-amt { font-family: var(--y-font-pixel); font-weight: 400; font-size: 32px; font-synthesis: none; -webkit-font-smoothing: none; }
+.dep-amt { font-family: var(--y-font-num); font-weight: 800; font-size: 32px; letter-spacing: 0; }
 .top .hub-link[aria-current="page"], .hub-link[aria-current="page"] { color: var(--y-lime); border-color: var(--y-lime); background: rgba(185, 255, 60, .08); }
 .login { background: radial-gradient(circle at 20% 15%, #1a1550 0, transparent 40%), radial-gradient(circle at 85% 90%, #0b3a4a 0, transparent 45%), #0a0820; }
 .login-card.y2k-window { width: min(400px, 100%); gap: 0; text-align: left; }

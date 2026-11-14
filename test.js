@@ -2450,7 +2450,7 @@ test('member settings persist across restarts; MEMBER_ORDER_MAX only seeds a fre
 });
 
 // ======================= B. reward management =======================
-const REWARD_KEYS = ['active', 'amount', 'game', 'id', 'issued', 'item', 'label', 'remaining', 'stock', 'threshold', 'type', 'used'];
+const REWARD_KEYS = ['active', 'amount', 'game', 'id', 'issued', 'item', 'label', 'perDevice', 'perSeat', 'remaining', 'stock', 'threshold', 'type', 'used'];
 async function rewardSetup(env = {}) {
   const srv = await boot({ env: { SEAT_PLAY_GAP_MS: '0', ...env } });
   const s = await staffLogin(srv);
@@ -2466,7 +2466,7 @@ test('rewards: staff list has live counts; games are read-only constants; unauth
     const r = (await s.get('/api/staff/rewards')).json;
     assert.deepEqual(r.rewards.map((x) => x.id), ['drink', 'd1000', 'dbig']);
     for (const x of r.rewards) assert.deepEqual(Object.keys(x).sort(), REWARD_KEYS);
-    assert.deepEqual(r.rewards[0], { id: 'drink', label: '음료 1잔', game: 'pour', threshold: 400, type: 'item', amount: null, item: '콜라', stock: 3, issued: 0, remaining: 3, used: 0, active: true });
+    assert.deepEqual(r.rewards[0], { id: 'drink', label: '음료 1잔', game: 'pour', threshold: 400, type: 'item', amount: null, item: '콜라', stock: 3, issued: 0, remaining: 3, used: 0, active: true, perSeat: { mode: 'people', count: 1, cap: 4 }, perDevice: 1 });
     assert.equal(r.games.pour.maxScore, 500);
     assert.equal(r.games.cheers.minDurationMs, 200);
     assert.deepEqual(r.hourly, { enabled: true, label: '안주 1개 서비스', type: 'item', amount: null, item: '안주' });
@@ -2534,7 +2534,7 @@ test('rewards: edits reach guests live; coupons keep the label/type/amount they 
     try {
       await gs.until((b) => b.includes('event: state'));
       const snap = (await E.get(`/api/t/${tk[4]}`)).json;
-      assert.deepEqual(snap.rewards.find((r) => r.id === id), { id, game: 'pour', label: '테스트 할인', type: 'discount', amount: 500, item: null, threshold: 100, soldOut: false, got: false });
+      assert.deepEqual(snap.rewards.find((r) => r.id === id), { id, game: 'pour', label: '테스트 할인', type: 'discount', amount: 500, item: null, threshold: 100, soldOut: false, got: false, seatIssued: 0, seatLimit: 1, limitSource: 'people', deviceIssued: 0, deviceLimit: 1, canEarn: true, seatCap: 4, headcountTrusted: false, moreWithHeadcount: false, moreWithStaffConfirm: true });
       assert.ok((await E.get('/api/board')).json.rewards.some((r) => r.id === id && r.remaining === 3 && r.stock === 3));
       assert.equal((await s.post(`/api/staff/rewards/${id}`, { label: '실시간 이름' })).status, 200);
       await gs.until((b) => b.includes('실시간 이름'));
@@ -3958,7 +3958,7 @@ test('deposit test endpoint: real parser and matcher, stores and changes nothing
     const call = (body) => s.post('/api/staff/deposit-hook/test', body);
     const r = await call({ text: sample });
     assert.equal(r.status, 200, r.text);
-    assert.deepEqual(r.json.parsed, { kind: 'deposit', amount: 18000, name: '홍길동', autoEligible: true, reasons: [] });
+    assert.deepEqual(r.json.parsed, { kind: 'deposit', amount: 18000, name: '홍길동', autoEligible: true, amountGuessed: false, reasons: [] });
     assert.deepEqual([r.json.wouldMatch.status, r.json.wouldMatch.orderId, r.json.wouldMatch.reasons], ['matched', o18.id, []]);
     // nothing happened
     assert.equal((await d.order(o18.id)).paid, false);
@@ -4000,7 +4000,7 @@ test('deposit notices carry reason codes and obey the auto-confirm ceiling', asy
     await d.place(tk[2], '김철수', 'fries');
     assert.deepEqual(await reasonsOf(await d.sms(6000, '김철수')), ['several_candidates']);
     // parse reasons are carried over; auto off; duplicate
-    assert.deepEqual(await reasonsOf(await d.notice('입금 6,000원 김철수 박다른')), ['several_names', 'several_candidates']);
+    assert.deepEqual(await reasonsOf(await d.notice('입금 6,000원 김철수 박다른')), ['several_names', 'amount_adjacent_to_name', 'several_candidates']); // R3e: the adjacency check no longer hides behind a name reason
     await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
     const o = await d.place(tk[3], '최단독', 'odeng');
     assert.deepEqual(await reasonsOf(await d.sms(9000, '최단독')), ['auto_off']);
@@ -4944,14 +4944,26 @@ function lcg(seed) { let x = seed >>> 0; return () => ((x = (Math.imul(x, 166452
 for (const seed of [11, 4242, 90210]) {
   test(`money invariants hold after every step of a random staff sequence (seed ${seed})`, async () => {
     const rnd = lcg(seed);
+    const rndRestart = lcg(seed ^ 0x5bd1e995); // its own stream: restarts do not change the operation sequence
     const pick = (a) => a[Math.floor(rnd() * a.length)];
-    await withBooth(async ({ srv, s }) => {
+    let srv = await boot(); let s = await staffLogin(srv); // restarts replace both
+    try {
       const ids = ['tteokbokki', 'odeng', 'fries', 'cola'];
       await s.post('/api/staff/cover/settings', { enabled: true, mode: 'per_person', amount: 3000 });
       const secret = (await s.get('/api/staff/deposit-hook')).json.secret;
       const gdev = {}; let seq = 0;
-      const tally = { sharepay: 0, void: 0, waive: 0, restore: 0, peopleUp: 0, peopleDown: 0, intentAssign: 0 }; // successes: the test fails if an operation never ran
+      const tally = { sharepay: 0, paybal: 0, void: 0, waive: 0, restore: 0, peopleUp: 0, peopleDown: 0, intentAssign: 0 }; // successes: the test fails if an operation never ran
       let refundsDoneByMe = 0;
+      let restarts = 0;
+      const snapshot = async () => ({ orders: (await s.get('/api/staff/state')).json.orders, refunds: (await s.get('/api/staff/state')).json.refunds, sales: (await s.get('/api/staff/sales')).json });
+      const restart = async (step) => { // stop the server and boot it again on the same DATA_DIR: nothing may differ
+        const before = await snapshot();
+        await srv.stop({ keep: true });
+        srv = await boot({ dir: srv.dir }); s = await staffLogin(srv);
+        for (const k of Object.keys(gdev)) delete gdev[k]; // guest devices are re-created against the new port
+        assert.deepEqual(await snapshot(), before, `restart at ${step}: orders, refunds and the full sales JSON are identical`);
+        restarts++;
+      };
       const check = async (step) => {
         const st = (await s.get('/api/staff/state')).json;
         const sale = (await s.get('/api/staff/sales')).json;
@@ -4995,7 +5007,7 @@ for (const seed of [11, 4242, 90210]) {
         assert.ok(doneSum <= sale.totals.refundsDone);
       };
       for (let step = 0; step < 220; step++) {
-        const kind = pick(['order', 'order', 'edit', 'pay', 'pay', 'overpay', 'cancel', 'refund', 'clear', 'unclear', 'service', 'unpay', 'party', 'party', 'sharepay', 'sharepay', 'sharepay', 'void', 'void', 'waive', 'restore', 'restore', 'intent', 'intent']);
+        const kind = pick(['order', 'order', 'edit', 'pay', 'pay', 'overpay', 'cancel', 'refund', 'clear', 'unclear', 'service', 'unpay', 'party', 'party', 'sharepay', 'sharepay', 'sharepay', 'paybal', 'void', 'void', 'waive', 'restore', 'restore', 'intent', 'intent']);
         const stNow = (await s.get('/api/staff/state')).json;
         const live = stNow.orders;
         const o = live.length ? pick(live) : null;
@@ -5030,7 +5042,13 @@ for (const seed of [11, 4242, 90210]) {
           if (r.status === 200 && was != null) { if (people > was) tally.peopleUp++; else if (people < was) tally.peopleDown++; }
         } else if (kind === 'sharepay') {
           const c = live.filter((x) => x.kind === 'cover' && x.status !== 'cancelled');
-          if (c.length) { const r = await s.post(`/api/staff/orders/${pick(c).id}/paid`, { paid: true, method: pick(['cash', 'transfer', 'other']), shares: 1 + Math.floor(rnd() * 3), payer: '가나' }); if (r.status === 200) tally.sharepay++; }
+          if (c.length) { // never more shares than are left AND payable from the balance (a share payment may not exceed it)
+            const t = pick(c); const maxShares = Math.min(3, t.shares.left, Math.floor(t.balanceDue / t.unitPrice));
+            if (maxShares >= 1) { const r = await s.post(`/api/staff/orders/${t.id}/paid`, { paid: true, method: pick(['cash', 'transfer', 'other']), shares: 1 + Math.floor(rnd() * maxShares), payer: '가나' }); if (r.status === 200) tally.sharepay++; }
+          }
+        } else if (kind === 'paybal') {
+          const c = live.filter((x) => x.status !== 'cancelled' && !x.paid && x.balanceDue > 0);
+          if (c.length) { const t = pick(c); const r = await s.post(`/api/staff/orders/${t.id}/paid`, { method: pick(['cash', 'transfer', 'other']), payBalance: true }); if (r.status === 200) { assert.equal(r.json.order.paid, true); assert.equal(r.json.order.payments.at(-1).amount, t.balanceDue, 'payBalance books exactly the balance'); tally.paybal++; } }
         } else if (kind === 'void') {
           const w = live.filter((x) => x.payments.length);
           if (w.length) { const r = await s.post(`/api/staff/payments/${pick(pick(w).payments).id}/void`, { reason: '입력 실수' }); if (r.status === 200) tally.void++; }
@@ -5053,11 +5071,14 @@ for (const seed of [11, 4242, 90210]) {
           await s.post(`/api/staff/tables/${1 + Math.floor(rnd() * 3)}/unclear`, {});
         }
         await check(label);
+        if (rndRestart() < 0.04) await restart(label);
       }
+      assert.ok(restarts >= 3, `at least 3 restarts per run (got ${restarts}): the boot path must be exercised`);
+      await check('after the last restart');
       const fin = (await s.get('/api/staff/sales')).json; // the sequence really moved money in every way
       assert.ok(fin.totals.paidAmount > 0 && fin.totals.refundsDone > 0 && fin.refunds.length > 0 && fin.totals.writtenOff > 0 && fin.byKind.cover.billed + fin.byKind.cover.received > 0, JSON.stringify([fin.totals, fin.byKind]));
       for (const [k, v] of Object.entries(tally)) assert.ok(v >= 1, `the random run never completed a '${k}' (counters ${JSON.stringify(tally)})`);
-    });
+    } finally { await srv.stop(); }
   });
 }
 
@@ -5381,6 +5402,8 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
       '/api/staff/test/rotate': ['/api/staff/test/rotate', {}],
       '/api/staff/test/reset': ['/api/staff/test/reset', {}],
       '/api/staff/tables/(\\d{1,4})/party': ['/api/staff/tables/11/party', { people: 3 }],
+      '/api/staff/coupon-limits': ['/api/staff/coupon-limits', { maxPerSeat: 5 }],
+      '/api/staff/tables/(\\d{1,4})/coupon-limit': ['/api/staff/tables/11/coupon-limit', { perSeat: 2 }],
       '/api/staff/tables/(\\d{1,4})/cover/waive': 'cover-waive',
       '/api/staff/tables/(\\d{1,4})/cover/restore': 'cover-restore',
       '/api/staff/payments/(\\d{1,9})/void': 'payment-void',
@@ -6101,12 +6124,21 @@ test('I3 share payments: amount = shares x unit price, payer cleaned, shares cou
     assert.deepEqual([b.paidAmount, b.shares.paid, b.shares.left, b.payments[1].payer], [9000, 3, 1, null]);
     const plain = (await pay({ method: 'other', amount: 1000 })).json.order; // a plain money payment has no shares
     assert.deepEqual([plain.paidAmount, plain.shares.paid, plain.payments[2].shares], [10000, 3, null]);
-    const last = (await pay({ method: 'cash', shares: 1 })).json.order; // default amount derived
-    assert.deepEqual([last.paid, last.paidAmount, last.shares.paid, last.overpaid, last.refundDue], [true, 13000, 4, 1000, 1000]);
+    // R3e: a share payment may never exceed the balance (10,000 held of 12,000: 2,000 left, a whole share is 3,000)
+    const exceeds = await pay({ method: 'cash', shares: 1 });
+    assert.deepEqual([exceeds.status, exceeds.json.error, exceeds.json.balance, exceeds.json.unitPrice, exceeds.json.left], [400, 'exceeds_balance', 2000, 3000, 1]);
+    assert.equal((await orderOf(s, c.id)).paidAmount, 10000, 'nothing was booked');
+    assert.equal((await pay({ method: 'cash', payBalance: true, amount: 2000 })).json.error, 'bad_pay_balance', 'payBalance excludes amount / shares');
+    assert.equal((await pay({ method: 'cash', payBalance: true, shares: 1 })).json.error, 'bad_pay_balance');
+    assert.equal((await pay({ method: 'cash', payBalance: 1 })).json.error, 'bad_pay_balance');
+    const dryBal = await s.post(`/api/staff/orders/${c.id}/paid`, { method: 'cash', payBalance: true, dryRun: true }); // `paid` may be left out
+    assert.deepEqual([dryBal.json.order.paidAmount, dryBal.json.order.paid], [12000, true]);
+    const last = (await s.post(`/api/staff/orders/${c.id}/paid`, { method: 'cash', payBalance: true })).json.order; // exactly the balance, no refund
+    assert.deepEqual([last.paid, last.paidAmount, last.shares.paid, last.overpaid, last.refundDue, last.payments.at(-1).amount, last.payments.at(-1).shares], [true, 12000, 4, 0, 0, 2000, null], 'a remainder smaller than a share is a plain money payment');
     const tooMany = await pay({ method: 'cash', shares: 1 }); // nothing is left: more shares than that are refused (a double tap on two phones)
     assert.deepEqual([tooMany.status, tooMany.json.error, tooMany.json.left], [400, 'too_many_shares', 0]);
-    const over = (await pay({ method: 'cash', amount: 3000 })).json.order; // over-payment by plain money works as always: the excess is owed back
-    assert.deepEqual([over.paidAmount, over.overpaid, over.refundDue, over.shares], [16000, 4000, 4000, { total: 4, paid: 4, left: 0, over: 0 }]);
+    const over = (await pay({ method: 'cash', amount: 3000 })).json.order; // deliberate over-payment stays possible with an explicit amount: the excess is owed back
+    assert.deepEqual([over.paidAmount, over.overpaid, over.refundDue, over.shares], [15000, 3000, 3000, { total: 4, paid: 4, left: 0, over: 0 }]);
     // only per-person cover orders take shares
     const food = (await staffOrder(s, 2, [{ id: 'tteokbokki', qty: 1 }])).json.order;
     assert.equal((await s.post(`/api/staff/orders/${food.id}/paid`, { paid: true, shares: 1 })).json.error, 'bad_shares');
@@ -7258,10 +7290,19 @@ test('R3b-2 a guessed amount is never recommended / one-tap / assigned silently;
     let n2 = (await d.notices()).find((x) => x.id === n2r.id);
     assert.equal(n2r.status, 'pending');
     assert.deepEqual([n2.amountGuessed, n2.oneTap, n2.candidates.filter((x) => x.recommended).length, n2.reasons.includes('several_candidates')], [false, false, 0, true], 'table 6 also owes exactly 3,000 -> no recommendation');
-    // table 6 gets a plain 3,000 paid by hand: no such candidate any more -> the intent on table 7 is the one recommended
-    await s.post(`/api/staff/orders/${(await coverIn(s, 6)).id}/paid`, { paid: true, method: 'cash' });
+    // table 6 gets a plain 3,000 paid by hand: R3e makes that block one-tap (the transfer may be that hand payment), see the R3e tests
+    const c6 = await coverIn(s, 6);
+    await s.post(`/api/staff/orders/${c6.id}/paid`, { paid: true, method: 'cash' });
     n2 = (await d.notices()).find((x) => x.id === n2r.id);
-    assert.deepEqual([n2.oneTap, n2.candidates.filter((x) => x.recommended).map((x) => x.intent && x.intent.id)], [true, [i2.id]]);
+    assert.deepEqual([n2.oneTap, n2.oneTapBlockedBy.includes('maybe_already_handled')], [false, true]);
+    await s.post(`/api/staff/orders/${c6.id}/paid`, { paid: false });
+    // table 6's cover is waived instead: no such candidate any more -> the intent on table 7 is the one recommended
+    assert.equal((await s.post('/api/staff/tables/6/cover/waive', { reason: '무료' })).status, 200);
+    n2 = (await d.notices()).find((x) => x.id === n2r.id);
+    assert.deepEqual([n2.oneTap, n2.oneTapBlockedBy.includes('maybe_already_handled')], [false, true], 'R3e: the open notice stays blocked for good even though the hand payment was undone');
+    const n3r = await d.notice('입금 3,000원\n김철수'); // a notice that arrives afterwards: nothing was hand-paid any more
+    const n3 = (await d.notices()).find((x) => x.id === n3r.id);
+    assert.deepEqual([n3.oneTap, n3.candidates.filter((x) => x.recommended).map((x) => x.intent && x.intent.id)], [true, [i2.id]]);
   } finally { await d.srv.stop(); }
 });
 
@@ -7336,4 +7377,692 @@ test('R3b-5 small fixes: invisible characters leave the parsed name; an intent t
     assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents.map((i) => [i.table, i.test]), [[0, true]]);
     assert.equal(typeof (await s.get('/api/staff/state')).json.testTable.coverOrderId, 'number');
   });
+});
+
+// ---- R3e: amountGuessed means the AMOUNT is uncertain; oneTapBlockedBy; payBalance; waived guest cover ----
+test('R3e-1 parser: a missing or odd name never makes the amount a guess; an amount glued to sender text always does', () => {
+  const { parseDeposit } = require('./db');
+  const amountUncertain = (t) => { const p = parseDeposit(t); return p.amount != null && p.reasons.some((r) => ['ignore_word', 'multiple_amounts', 'no_amount', 'amount_range', 'amount_adjacent_to_name', 'text_too_long'].includes(r)); };
+  const nameless = parseDeposit('[Web발신]\n입금 6,000\n잔액 123,456');
+  assert.deepEqual([nameless.amount, nameless.reasons, nameless.autoEligible], [6000, ['no_name'], false]);
+  assert.equal(amountUncertain('[Web발신]\n입금 6,000\n잔액 123,456'), false);
+  assert.deepEqual(parseDeposit('입금 6,000\nKim-Chul').reasons, ['name_shape']);
+  assert.equal(amountUncertain('입금 6,000\nKim-Chul'), false);
+  for (const attack of ['[Web발신]\n입금 300\n잔액 123,456\n박지민 3,000', '입금 9000원김철', '입금\n김철16000잔액', '입금 9,000원김철 박다른']) {
+    assert.equal(amountUncertain(attack), true, attack);
+  }
+  assert.ok(parseDeposit('입금 9000원김철').reasons.includes('amount_adjacent_to_name'));
+});
+
+test('R3e-2 notices: nameless-but-certain notices are assigned with a plain assign; guessed ones still need force + typed amount; oneTapBlockedBy explains', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
+    const find = async (id) => (await d.notices()).find((x) => x.id === id);
+    // certain amount, no sender name
+    const o1 = await d.place(tk[0], '김철수', 'fries'); // 6,000
+    const nl = await find((await d.notice('[Web발신]\n입금 6,000\n잔액 123,456')).id);
+    assert.deepEqual([nl.amountGuessed, nl.oneTap, nl.reasons.includes('no_name')], [false, false, true]);
+    assert.ok(nl.oneTapBlockedBy.includes('name_missing') && !nl.oneTapBlockedBy.includes('amount_uncertain'), JSON.stringify(nl.oneTapBlockedBy));
+    assert.deepEqual(nl.candidates.map((c) => [c.id, c.recommended]), [[o1.id, false]]);
+    const mis = await find((await d.notice('[Web발신]\n입금 5,000\n잔액 123,456')).id);
+    assert.deepEqual([mis.amountGuessed, (await s.post(`/api/staff/deposits/${mis.id}/assign`, { orderId: o1.id })).json.error], [false, 'amount_mismatch'], 'a mismatch follows the existing rule');
+    const ok = await s.post(`/api/staff/deposits/${nl.id}/assign`, { orderId: o1.id });
+    assert.equal(ok.status, 200, ok.text);
+    assert.deepEqual([ok.json.order.paid, ok.json.order.paidAmount, ok.json.order.paidBy, ok.json.notice.status], [true, 6000, 'staff', 'matched']);
+    assert.deepEqual((await find(nl.id)).oneTapBlockedBy, ['notice_closed']);
+    // an odd name (shape), still a certain amount
+    const o2 = await d.place(tk[1], '김철수', 'fries');
+    const odd = await find((await d.notice('입금 6,000\nKim-Chul')).id);
+    assert.deepEqual([odd.amountGuessed, odd.oneTap, odd.reasons.includes('name_shape')], [false, false, true]);
+    assert.equal((await s.post(`/api/staff/deposits/${odd.id}/assign`, { orderId: o2.id })).status, 200);
+    // the reviewer's attacks: the amount is a guess -> never one-tap, force + note + typed amount
+    const o3 = await d.place(tk[2], '박지민', 'odeng'); // 9,000
+    const o4 = await d.place(tk[3], '김철', 'odeng');
+    for (const [text, order] of [['[Web발신]\n입금 300\n잔액 123,456\n박지민 3,000', null], ['입금 9000원김철', o4], ['입금\n김철16000잔액', o4]]) {
+      const n = await find((await d.notice(text)).id);
+      assert.equal(n.amountGuessed, true, text);
+      assert.deepEqual([n.oneTap, n.candidates.some((c) => c.recommended), n.oneTapBlockedBy.includes('amount_uncertain')], [false, false, true], text);
+      if (!order) continue;
+      assert.equal((await s.post(`/api/staff/deposits/${n.id}/assign`, { orderId: order.id })).json.error, 'amount_guessed', text);
+      assert.equal((await s.post(`/api/staff/deposits/${n.id}/assign`, { orderId: order.id, force: true, note: '확인' })).json.error, 'bad_amount', text);
+    }
+    // the other codes
+    const orphan = await find((await d.sms(1700, '김철수')).id);
+    assert.deepEqual(orphan.oneTapBlockedBy, ['no_candidate']);
+    const wrong = await find((await d.sms(9000, '아무개')).id); // o3 and o4 both owe 9,000
+    assert.ok(wrong.oneTapBlockedBy.includes('several_candidates'), JSON.stringify(wrong.oneTapBlockedBy));
+    await s.post(`/api/staff/orders/${o4.id}/paid`, { paid: true, method: 'cash', amount: 9000 });
+    const one = await find((await d.sms(9000, '박지민')).id); // only o3 still owes 9,000, but o4 was hand-paid for the same amount: the transfer may be o4's
+    assert.deepEqual([one.oneTap, one.candidates.some((c) => c.recommended), one.oneTapBlockedBy], [false, false, ['maybe_already_handled']]);
+    assert.deepEqual(one.handledOrders.map((x) => x.id), [o4.id], 'staff can attach it to the hand-paid order instead');
+    const mm = await find((await d.sms(9000, '아무개')).id);
+    assert.ok(mm.oneTapBlockedBy.includes('name_mismatch') && mm.oneTapBlockedBy.includes('maybe_already_handled'), JSON.stringify(mm.oneTapBlockedBy));
+    const rv = await find((await d.notice('입금 취소 6,000원\n김철수')).id);
+    assert.equal(rv.status, 'review');
+    assert.ok(rv.oneTapBlockedBy.includes('review_word'), JSON.stringify(rv.oneTapBlockedBy));
+    const pv = (await s.post('/api/staff/deposit-hook/test', { text: '입금 300\n잔액 123,456\n박지민 3,000' })).json;
+    assert.equal(pv.parsed.amountGuessed, true);
+  } finally { await d.srv.stop(); }
+});
+
+test('R3e-3 payBalance records exactly the balance; a share payment can never exceed it', async () => {
+  await withBooth(async ({ s }) => {
+    await coverOn(s); await partyOf(s, 1, 3);
+    const c = await coverIn(s, 1);
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', amount: 8500 })).status, 200); // 2 whole shares + 2,500... 9,000 total, 500 left
+    const before = await orderOf(s, c.id);
+    assert.deepEqual([before.balanceDue, before.shares.paid, before.shares.left], [500, 2, 1]);
+    const ex = await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 1 });
+    assert.deepEqual([ex.status, ex.json.error, ex.json.balance, ex.json.unitPrice, ex.json.left], [400, 'exceeds_balance', 500, 3000, 1]);
+    assert.equal((await orderOf(s, c.id)).paidAmount, 8500);
+    const done = (await s.post(`/api/staff/orders/${c.id}/paid`, { method: 'transfer', payBalance: true })).json.order;
+    assert.deepEqual([done.paid, done.paidAmount, done.refundDue, done.balanceDue, done.payments.at(-1).amount, done.payments.at(-1).shares, done.payments.at(-1).method], [true, 9000, 0, 0, 500, null, 'transfer']);
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { method: 'cash', payBalance: true })).json.error, 'stale', 'already settled');
+    // a balance that is a whole number of shares is booked as shares
+    await partyOf(s, 2, 3);
+    const c2 = await coverIn(s, 2);
+    const w = (await s.post(`/api/staff/orders/${c2.id}/paid`, { method: 'cash', payBalance: true })).json.order;
+    assert.deepEqual([w.paid, w.paidAmount, w.payments[0].shares, w.shares], [true, 9000, 3, { total: 3, paid: 3, left: 0, over: 0 }]);
+    // a food order: the plain balance
+    const f = (await staffOrder(s, 3, [{ id: 'tteokbokki', qty: 1 }])).json.order;
+    await s.post(`/api/staff/orders/${f.id}/paid`, { paid: true, method: 'cash', amount: 1000 });
+    const fp = (await s.post(`/api/staff/orders/${f.id}/paid`, { method: 'cash', payBalance: true })).json.order;
+    assert.deepEqual([fp.paid, fp.paidAmount, fp.payments.at(-1).amount, fp.payments.at(-1).shares], [true, f.total, f.total - 1000, null]);
+    assert.equal((await s.post(`/api/staff/orders/${f.id}/paid`, { paid: false, payBalance: true })).json.error, 'bad_pay_balance');
+  });
+});
+
+test('R3e-4 a guest on a waived seat gets cover.waived with cover.enabled even when the setting is off', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await coverOn(s); await partyOf(s, 1, 2);
+    const g = await guestWithDevice(srv);
+    assert.deepEqual(((x) => [x.enabled, x.waived, x.total])((await g.get(`/api/t/${tk[0]}`)).json.cover), [true, false, 6000]);
+    assert.equal((await s.post('/api/staff/tables/1/cover/waive', { reason: '임원' })).status, 200);
+    await s.post('/api/staff/cover/settings', { enabled: false });
+    const c = (await g.get(`/api/t/${tk[0]}`)).json.cover;
+    assert.deepEqual([c.enabled, c.settingEnabled, c.waived, c.total, c.left], [true, false, true, 0, 0]);
+    assert.equal((await g.get(`/api/t/${tk[1]}`)).json.cover.enabled, false, 'other seats are unaffected');
+  });
+});
+
+// ---- K: coupon / reward limits (per seat, per device, per table totals) ----
+const KENV = { SEAT_PLAY_GAP_MS: '0', SEAT_OPEN_MAX: '60' };
+async function kGuests(srv, token, n, game = 'pour') { // n fresh devices, each with a started play (they finish together later)
+  const out = [];
+  for (let i = 0; i < n; i++) { const g = await guestWithDevice(srv); const r = await startPlay(g, token, game); assert.equal(r.status, 200, r.text); out.push({ g, playId: r.json.playId }); }
+  await delay(260);
+  return out;
+}
+const kFinish = (token, list, score = 200) => Promise.all(list.map(({ g, playId }) => g.post(`/api/t/${token}/plays/finish`, { playId, score })));
+const kEarned = (res, id) => res.filter((r) => r.status === 200 && r.json.rewards.find((x) => x.id === id)?.earned).length;
+const kReward = async (s, body) => { const r = await s.post('/api/staff/rewards', { game: 'pour', threshold: 100, type: 'item', stock: 100, perDevice: 0, ...body }); assert.equal(r.status, 200, r.text); return r.json.reward; };
+const kSnap = async (g, tk) => (await g.get(`/api/t/${tk}`)).json;
+const kDb = (srv) => new DatabaseSync(path.join(srv.data, 'booth.db'), { readOnly: true });
+
+test('K1 validation: perSeat / perDevice / couponLimits / per-table override, defaults keep today\'s behaviour', async () => {
+  await withBooth(async ({ s }) => {
+    const def = await kReward(s, { label: '기본값', perDevice: undefined });
+    assert.deepEqual([def.perSeat, def.perDevice], [{ mode: 'people', count: 1, cap: 4 }, 1]);
+    const bad = (b) => s.post('/api/staff/rewards', { game: 'pour', threshold: 100, type: 'item', stock: 5, label: 'x', ...b });
+    for (const perSeat of [{ mode: 'x' }, { mode: 'fixed', count: 0 }, { mode: 'fixed', count: 21 }, { cap: 0 }, { cap: 21 }, { count: 1.5 }, { foo: 1 }, 3, null, []]) assert.equal((await bad({ perSeat })).json.error, 'bad_per_seat', JSON.stringify(perSeat));
+    for (const perDevice of [-1, 21, 1.5, '1', null]) assert.equal((await bad({ perDevice })).json.error, 'bad_per_device', JSON.stringify(perDevice));
+    const up = (await s.post(`/api/staff/rewards/${def.id}`, { perSeat: { mode: 'fixed', count: 5 }, perDevice: 3 })).json.reward;
+    assert.deepEqual([up.perSeat, up.perDevice], [{ mode: 'fixed', count: 5, cap: 4 }, 3], 'partial perSeat merges onto the current value');
+    assert.equal((await s.post(`/api/staff/rewards/${def.id}`, { perDevice: 0 })).json.reward.perSeat.count, 5);
+    const lim = async (b) => s.post('/api/staff/coupon-limits', b);
+    assert.deepEqual((await s.get('/api/staff/state')).json.couponLimits, { maxPerSeat: 0, maxDiscountUsesPerSeat: 0 });
+    for (const b of [{}, { maxPerSeat: -1 }, { maxPerSeat: 51 }, { maxDiscountUsesPerSeat: 1.5 }, { maxPerSeat: '3' }]) assert.equal((await lim(b)).json.error, b.maxPerSeat === undefined && b.maxDiscountUsesPerSeat === undefined ? 'nothing_to_update' : 'bad_coupon_limit', JSON.stringify(b));
+    assert.deepEqual((await lim({ maxPerSeat: 4 })).json.couponLimits, { maxPerSeat: 4, maxDiscountUsesPerSeat: 0 });
+    assert.deepEqual((await lim({ maxDiscountUsesPerSeat: 2 })).json.couponLimits, { maxPerSeat: 4, maxDiscountUsesPerSeat: 2 });
+    assert.deepEqual((await s.get('/api/staff/state')).json.couponLimits, { maxPerSeat: 4, maxDiscountUsesPerSeat: 2 });
+    const a = (await s.get('/api/staff/audit?limit=5')).json.entries.find((e) => e.action === 'coupon_limits');
+    assert.ok(a && /쿠폰 한도/.test(a.summaryKo), JSON.stringify(a));
+    for (const perSeat of [-1, 21, 1.5, '2', undefined]) assert.equal((await s.post('/api/staff/tables/1/coupon-limit', perSeat === undefined ? {} : { perSeat })).json.error, 'bad_per_seat', String(perSeat));
+    assert.equal((await s.post('/api/staff/tables/999/coupon-limit', { perSeat: 2 })).status, 404);
+    assert.equal((await s.post('/api/staff/tables/1/coupon-limit', { perSeat: 2 })).status, 200);
+    assert.equal((await tableIn(s, 1)).couponLimitOverride, 2);
+    assert.ok((await s.get('/api/staff/audit?limit=3')).json.entries.some((e) => e.action === 'coupon_limit_override' && /쿠폰 한도/.test(e.summaryKo)));
+    assert.equal((await s.post('/api/staff/tables/1/coupon-limit', { perSeat: 0 })).status, 200, '0 = no reward coupons for this seating');
+    assert.equal((await tableIn(s, 1)).couponLimitOverride, 0);
+    assert.equal((await s.post('/api/staff/tables/1/coupon-limit', { perSeat: null })).status, 200);
+    assert.equal((await tableIn(s, 1)).couponLimitOverride, null);
+  });
+});
+
+test('K2 races: 20 parallel finishes with perSeat 3 give exactly 3; one device at two tables with perDevice 1 gives exactly 1; stock never goes negative', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const A = await kReward(s, { label: '좌석3', perSeat: { mode: 'fixed', count: 3 } });
+    const list = await kGuests(srv, tk[0], 20);
+    const res = await kFinish(tk[0], list);
+    assert.ok(res.every((r) => r.status === 200));
+    assert.equal(kEarned(res, A.id), 3);
+    const refused = res.map((r) => r.json.rewards.find((x) => x.id === A.id)).filter((x) => !x.earned);
+    assert.ok(refused.length === 17 && refused.every((x) => x.reason === 'seat_limit'), JSON.stringify(refused[0]));
+    const g0 = await guestWithDevice(srv); const sn = (await kSnap(g0, tk[0])).rewards.find((r) => r.id === A.id);
+    assert.deepEqual([sn.seatIssued, sn.seatLimit, sn.limitSource, sn.canEarn, sn.blockedBy], [3, 3, 'fixed', false, 'seat_limit']);
+    assert.equal((await s.get('/api/staff/rewards')).json.rewards.find((r) => r.id === A.id).issued, 3);
+    const db = kDb(srv);
+    try { assert.deepEqual(db.prepare('SELECT limit_n, limit_source FROM coupons WHERE reward_id=?').all(A.id).map((r) => [r.limit_n, r.limit_source]), [[3, 'fixed'], [3, 'fixed'], [3, 'fixed']], 'the limit that applied is recorded on every coupon'); } finally { db.close(); }
+    // one device, two tables, at the same time
+    const B = await kReward(s, { label: '기기1', perSeat: { mode: 'fixed', count: 5 }, perDevice: 1 });
+    const dev = await guestWithDevice(srv);
+    const p1 = await startPlay(dev, tk[1], 'pour'); await delay(30);
+    const p2 = await startPlay(dev, tk[2], 'pour'); // waits out the per-device gap
+    await delay(260);
+    const two = await Promise.all([dev.post(`/api/t/${tk[1]}/plays/finish`, { playId: p1.json.playId, score: 200 }), dev.post(`/api/t/${tk[2]}/plays/finish`, { playId: p2.json.playId, score: 200 })]);
+    assert.equal(kEarned(two, B.id), 1);
+    assert.equal(two.map((r) => r.json.rewards.find((x) => x.id === B.id)).find((x) => !x.earned).reason, 'device_limit');
+    const snd = (await kSnap(dev, tk[3])).rewards.find((r) => r.id === B.id);
+    assert.deepEqual([snd.deviceIssued, snd.deviceLimit, snd.canEarn, snd.blockedBy], [1, 1, false, 'device_limit'], 'only this device\'s own count is shown');
+    assert.equal((await kSnap(await guestWithDevice(srv), tk[3])).rewards.find((r) => r.id === B.id).deviceIssued, 0);
+    // stock
+    const C = await kReward(s, { label: '재고2', stock: 2, perSeat: { mode: 'fixed', count: 20 } });
+    const l3 = await kGuests(srv, tk[3], 6);
+    const r3 = await kFinish(tk[3], l3);
+    assert.equal(kEarned(r3, C.id), 2);
+    assert.ok(r3.map((r) => r.json.rewards.find((x) => x.id === C.id)).filter((x) => !x.earned).every((x) => x.reason === 'stock_out'));
+    const cr = (await s.get('/api/staff/rewards')).json.rewards.find((r) => r.id === C.id);
+    assert.deepEqual([cr.issued, cr.remaining], [2, 0]);
+    assert.equal((await kSnap(await guestWithDevice(srv), tk[4])).rewards.find((r) => r.id === C.id).blockedBy, 'stock_out');
+  }, { env: KENV });
+});
+
+test('K3 table total (maxPerSeat) ignores manual coupons; maxDiscountUsesPerSeat rejects with coupon_limit and cancelling frees a use', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const A = await kReward(s, { label: 'A', perSeat: { mode: 'fixed', count: 5 } });
+    const B = await kReward(s, { label: 'B', perSeat: { mode: 'fixed', count: 5 } });
+    const C = await kReward(s, { label: 'C', perSeat: { mode: 'fixed', count: 5 } });
+    await s.post('/api/staff/coupon-limits', { maxPerSeat: 2 });
+    await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '직원 서비스' }); // does not count
+    const g = await guestWithDevice(srv); const st = await startPlay(g, tk[0], 'pour'); await delay(260);
+    const f = await g.post(`/api/t/${tk[0]}/plays/finish`, { playId: st.json.playId, score: 200 });
+    const by = Object.fromEntries(f.json.rewards.filter((x) => [A.id, B.id, C.id].includes(x.id)).map((x) => [x.label, [x.earned, x.reason]]));
+    assert.deepEqual(by, { A: [true, undefined], B: [true, undefined], C: [false, 'table_total_limit'] });
+    const snap = await kSnap(g, tk[0]);
+    assert.equal(snap.couponSeat.maxPerSeat, 2);
+    assert.equal(snap.couponSeat.couponsIssued, 2, 'two reward coupons (the manual one is not counted)');
+    assert.equal(snap.rewards.find((r) => r.id === C.id).blockedBy, 'table_total_limit');
+    // discount uses
+    await s.post('/api/staff/coupon-limits', { maxDiscountUsesPerSeat: 1 });
+    const c1 = (await s.post('/api/staff/tables/2/coupons', { type: 'discount', amount: 1000, label: '천원1' })).json.coupon;
+    const c2 = (await s.post('/api/staff/tables/2/coupons', { type: 'discount', amount: 1000, label: '천원2' })).json.coupon;
+    const g2 = await guestWithDevice(srv);
+    const o1 = await order(g2, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: c1.code });
+    assert.equal(o1.status, 201, o1.text);
+    const o2 = await order(g2, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: c2.code });
+    assert.deepEqual([o2.status, o2.json.error, o2.json.max, o2.json.used], [409, 'coupon_limit', 1, 1]);
+    assert.equal((await s.get('/api/staff/state')).json.coupons.find((c) => c.code === c2.code).status, 'issued', 'nothing was consumed');
+    assert.equal((await kSnap(g2, tk[1])).couponSeat.discountUses, 1);
+    assert.equal((await order(g2, tk[1], [{ id: 'fries', qty: 1 }])).status, 201, 'an order without a coupon is fine');
+    assert.equal((await s.post(`/api/staff/orders/${o1.json.order.id}/status`, { status: 'cancelled' })).status, 200);
+    assert.equal((await kSnap(g2, tk[1])).couponSeat.discountUses, 0, 'cancelling frees the use');
+    assert.equal((await order(g2, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: c2.code })).status, 201);
+  }, { env: KENV });
+});
+
+test('K4 per-seat limit follows the headcount up to the cap (mode people), fixed ignores it, staff override replaces it for the current seating only', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const P = await kReward(s, { label: '인원', perSeat: undefined });
+    const F = await kReward(s, { label: '고정', perSeat: { mode: 'fixed', count: 2 } });
+    const lim = async (id, n = 1) => { const x = (await kSnap(await guestWithDevice(srv), tk[n - 1])).rewards.find((r) => r.id === id); return [x.seatLimit, x.limitSource]; };
+    assert.deepEqual(await lim(P.id), [1, 'people'], 'headcount unknown: 1');
+    assert.deepEqual(await lim(F.id), [2, 'fixed']);
+    await partyOf(s, 1, 3);
+    assert.deepEqual([await lim(P.id), await lim(F.id)], [[3, 'people'], [2, 'fixed']]);
+    await partyOf(s, 1, 30); // a guest could type 30: still capped
+    assert.deepEqual([await lim(P.id), await lim(F.id)], [[4, 'people'], [2, 'fixed']]);
+    const list = await kGuests(srv, tk[0], 6);
+    const res = await kFinish(tk[0], list);
+    assert.equal(kEarned(res, P.id), 4, 'people 30 gets at most cap');
+    assert.equal(kEarned(res, F.id), 2);
+    assert.equal((await s.get('/api/staff/rewards')).json.rewards.find((r) => r.id === P.id).issued, 4, 'stock still counts');
+    await partyOf(s, 1, 2); // lowering never revokes, it only blocks further issues
+    assert.equal((await s.get('/api/staff/state')).json.coupons.filter((c) => c.rewardId === P.id).length, 4);
+    assert.deepEqual(await lim(P.id), [2, 'people']);
+    assert.equal((await kSnap(await guestWithDevice(srv), tk[0])).rewards.find((r) => r.id === P.id).blockedBy, 'seat_limit');
+    // raising the cap later
+    await s.post(`/api/staff/rewards/${P.id}`, { perSeat: { cap: 10 } });
+    assert.deepEqual(await lim(P.id), [2, 'people']);
+    await partyOf(s, 1, 7);
+    assert.deepEqual(await lim(P.id), [7, 'people']);
+    // override
+    assert.equal((await s.post('/api/staff/tables/1/coupon-limit', { perSeat: 1 })).status, 200);
+    assert.deepEqual([await lim(P.id), await lim(F.id)], [[1, 'override'], [1, 'override']]);
+    assert.equal((await tableIn(s, 1)).couponLimitOverride, 1);
+    assert.deepEqual(await lim(F.id, 2), [2, 'fixed'], 'other tables are untouched');
+    // clear: the new seating starts without it, undo restores the old seating's
+    assert.equal((await s.post('/api/staff/tables/1/clear', { force: true })).status, 200);
+    assert.equal((await tableIn(s, 1)).couponLimitOverride, null);
+    assert.deepEqual(await lim(F.id), [2, 'fixed']);
+    assert.equal((await s.post('/api/staff/tables/1/unclear', {})).status, 200);
+    assert.equal((await tableIn(s, 1)).couponLimitOverride, 1);
+    assert.equal((await s.post('/api/staff/tables/1/coupon-limit', { perSeat: null })).status, 200);
+    assert.deepEqual(await lim(F.id), [2, 'fixed']);
+    // changing people never changes a fixed reward
+    await partyOf(s, 1, 1); assert.deepEqual(await lim(F.id), [2, 'fixed']);
+  }, { env: KENV });
+});
+
+test('K5 the test table keeps its own unlimited coupons and never counts toward real device limits or stock', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const tt = (await s.get('/api/staff/state')).json.testTable.token;
+    const B = await kReward(s, { label: '기기1', stock: 1, perSeat: { mode: 'fixed', count: 2 }, perDevice: 1 });
+    const dev = await guestWithDevice(srv);
+    const st = await startPlay(dev, tt, 'pour'); await delay(260);
+    const f = await dev.post(`/api/t/${tt}/plays/finish`, { playId: st.json.playId, score: 200 });
+    assert.equal(kEarned([f], B.id), 1);
+    const st2 = await startPlay(dev, tt, 'pour'); await delay(260);
+    assert.equal(kEarned([await dev.post(`/api/t/${tt}/plays/finish`, { playId: st2.json.playId, score: 200 })], B.id), 1, 'test table: no device limit');
+    assert.deepEqual((await s.get('/api/staff/rewards')).json.rewards.find((r) => r.id === B.id).issued, 0, 'stock untouched');
+    const real = (await tablesOf(s))[0].token;
+    const st3 = await startPlay(dev, real, 'pour'); await delay(260);
+    assert.equal(kEarned([await dev.post(`/api/t/${real}/plays/finish`, { playId: st3.json.playId, score: 200 })], B.id), 1, 'the test coupons did not use up the real device allowance');
+  }, { env: KENV });
+});
+
+test('K6 migration: rewards that existed before K become fixed 1 / perDevice 1 ONCE (a live seating with headcount 3 holding 1 coupon cannot earn a second); later edits survive reboots; old coupons never block anyone', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-k-'));
+  let srv; let srv2; let srv3;
+  try {
+    srv = await boot({ dir, env: KENV });
+    const s = await staffLogin(srv); const tk = (await tablesOf(s)).map((t) => t.token);
+    const B = await kReward(s, { label: '기기1', perSeat: { mode: 'people', count: 1, cap: 4 }, perDevice: 1 });
+    await partyOf(s, 1, 3); // a live seating with headcount 3 ...
+    const dev = await guestWithDevice(srv); const dv = dev.jar.booth_d;
+    const st = await startPlay(dev, tk[0], 'pour'); await delay(260);
+    assert.equal(kEarned([await dev.post(`/api/t/${tk[0]}/plays/finish`, { playId: st.json.playId, score: 200 })], B.id), 1); // ... holding 1 coupon
+    await srv.stop({ keep: true });
+    const raw = new DatabaseSync(path.join(srv.data, 'booth.db')); // the pre-K schema: no limit columns
+    for (const c of ['per_seat_mode', 'per_seat_count', 'per_seat_cap', 'per_device']) raw.exec(`ALTER TABLE rewards DROP COLUMN ${c}`);
+    raw.exec('DROP INDEX coupons_dev');
+    for (const c of ['device', 'limit_n', 'limit_source']) raw.exec(`ALTER TABLE coupons DROP COLUMN ${c}`);
+    raw.exec('DROP TABLE seat_coupon_limit'); raw.exec("DELETE FROM settings WHERE k='coupon_limits'");
+    raw.close();
+    srv2 = await boot({ dir, env: KENV });
+    const s2 = await staffLogin(srv2);
+    const rw = (await s2.get('/api/staff/rewards')).json.rewards;
+    assert.ok(rw.every((r) => r.perSeat.mode === 'fixed' && r.perSeat.count === 1 && r.perSeat.cap === 4 && r.perDevice === 1), JSON.stringify(rw[0]));
+    assert.deepEqual((await s2.get('/api/staff/state')).json.couponLimits, { maxPerSeat: 0, maxDiscountUsesPerSeat: 0 });
+    const old = (await s2.get('/api/staff/state')).json.coupons.find((c) => c.rewardId === B.id);
+    assert.deepEqual([old.limit, old.limitSource], [null, null]);
+    // the reviewer's sequence: a NEW device at the same seating (headcount 3, 1 coupon already) must not get a second one
+    const g2 = await guestWithDevice(srv2);
+    const sn = (await kSnap(g2, tk[0])).rewards.find((r) => r.id === B.id);
+    assert.deepEqual([sn.seatLimit, sn.limitSource, sn.canEarn, sn.blockedBy, sn.seatCap, sn.moreWithHeadcount], [1, 'fixed', false, 'seat_limit', null, false]);
+    const st2 = await startPlay(g2, tk[0], 'pour'); await delay(260);
+    assert.equal(kEarned([await g2.post(`/api/t/${tk[0]}/plays/finish`, { playId: st2.json.playId, score: 200 })], B.id), 0);
+    // the same device (its old coupon has no device id and counts for nobody) earns on another table, then the new coupon counts
+    const g = new Client(srv2); g.jar.booth_d = dv;
+    const st3 = await startPlay(g, tk[1], 'pour'); await delay(260);
+    assert.equal(kEarned([await g.post(`/api/t/${tk[1]}/plays/finish`, { playId: st3.json.playId, score: 200 })], B.id), 1);
+    const st4 = await startPlay(g, tk[2], 'pour'); await delay(260);
+    assert.equal(kEarned([await g.post(`/api/t/${tk[2]}/plays/finish`, { playId: st4.json.playId, score: 200 })], B.id), 0, 'but the new coupon now counts');
+    // staff switches an old reward to people: the next boots must not reset it
+    assert.equal((await s2.post(`/api/staff/rewards/${B.id}`, { perSeat: { mode: 'people' } })).status, 200);
+    assert.ok((await s2.get('/api/staff/audit?limit=5')).json.entries.some((e) => e.action === 'reward_limits' && /보상 한도/.test(e.summaryKo)));
+    await srv2.stop({ keep: true });
+    srv3 = await boot({ dir, env: KENV });
+    const s3 = await staffLogin(srv3);
+    assert.equal((await s3.get('/api/staff/rewards')).json.rewards.find((r) => r.id === B.id).perSeat.mode, 'people');
+    const idx = new DatabaseSync(path.join(srv3.data, 'booth.db'), { readOnly: true });
+    try { assert.ok(idx.prepare("SELECT 1 FROM sqlite_master WHERE name='coupons_dev'").get(), 'per-device index'); } finally { idx.close(); }
+  } finally { if (srv3) await srv3.stop(); else if (srv2) await srv2.stop(); else if (srv) fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('K8 moving an order with a discount coupon into a seating at maxDiscountUsesPerSeat is refused; a whole-table move is not; guest hints seatCap / moreWithHeadcount; test table fields', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await s.post('/api/staff/coupon-limits', { maxDiscountUsesPerSeat: 1 });
+    const a = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: 'A' })).json.coupon;
+    const b = (await s.post('/api/staff/tables/2/coupons', { type: 'discount', amount: 1000, label: 'B' })).json.coupon;
+    const g1 = await guestWithDevice(srv); const g2 = await guestWithDevice(srv);
+    const o1 = (await order(g1, tk[0], [{ id: 'fries', qty: 1 }], { couponCode: a.code })).json.order;
+    await order(g2, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: b.code });
+    const mv = await s.post(`/api/staff/orders/${o1.id}/move`, { to: 2 });
+    assert.deepEqual([mv.status, mv.json.error, mv.json.max, mv.json.used], [409, 'coupon_limit', 1, 1]);
+    assert.equal((await orderOf(s, o1.id)).table, 1, 'nothing changed');
+    // an order without a coupon moves fine; a whole-table move is never refused (discountUses may then exceed the limit, further uses are blocked)
+    const plain = (await order(g1, tk[0], [{ id: 'cola', qty: 1 }])).json.order;
+    assert.equal((await s.post(`/api/staff/orders/${plain.id}/move`, { to: 2 })).status, 200);
+    assert.equal((await s.post('/api/staff/tables/move', { from: 1, to: 2 })).status, 200);
+    assert.equal((await kSnap(g2, tk[1])).couponSeat.discountUses, 2, 'the merged seating may exceed the limit');
+    const c = (await s.post('/api/staff/tables/2/coupons', { type: 'discount', amount: 1000, label: 'C' })).json.coupon;
+    assert.equal((await order(g2, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: c.code })).json.error, 'coupon_limit', 'and no further use is allowed');
+    // seatCap / moreWithHeadcount
+    const P = await kReward(s, { label: '인원', perSeat: undefined, stock: 1 });
+    const hint = async (n) => { const x = (await kSnap(await guestWithDevice(srv), tk[n - 1])).rewards.find((r) => r.id === P.id); return [x.seatCap, x.moreWithHeadcount, x.moreWithStaffConfirm]; };
+    assert.deepEqual(await hint(5), [4, false, true], 'unknown headcount, no per-person cover: only staff confirming helps');
+    await partyOf(s, 5, 2);
+    assert.deepEqual(await hint(5), [4, false, false], 'headcount known and trusted');
+    await s.post(`/api/staff/rewards/${P.id}`, { perSeat: { cap: 1 } });
+    assert.deepEqual(await hint(6), [1, false, false], 'cap 1: the headcount cannot help');
+    await s.post(`/api/staff/rewards/${P.id}`, { perSeat: { cap: 4 }, perDevice: 1 });
+    const dev = await guestWithDevice(srv); const st = await startPlay(dev, tk[6], 'pour'); await delay(260);
+    await dev.post(`/api/t/${tk[6]}/plays/finish`, { playId: st.json.playId, score: 200 }); // takes the only stock
+    assert.deepEqual(await hint(8), [4, false, false], 'blocked by stock: not a headcount problem');
+    await s.post(`/api/staff/rewards/${P.id}`, { perSeat: { mode: 'fixed' } });
+    assert.deepEqual(await hint(9), [null, false, false]);
+    // the test table carries the same fields and no discount-use limit
+    const tt = (await s.get('/api/staff/state')).json.testTable;
+    assert.deepEqual([tt.couponLimitOverride, tt.couponsIssued, tt.discountUses], [null, 0, 0]);
+    assert.equal((await s.post('/api/staff/tables/0/coupon-limit', { perSeat: 2 })).status, 200);
+    assert.equal((await s.get('/api/staff/state')).json.testTable.couponLimitOverride, 2);
+    assert.equal((await kSnap(await guestWithDevice(srv), tt.token)).couponSeat.maxDiscountUsesPerSeat, 0);
+  }, { env: KENV });
+});
+
+test('K7 consistency after a random sequence: issued <= stock, per seat count <= the limit recorded at issue, per device <= perDevice', async () => {
+  const rnd = lcg(777); const pick = (a) => a[Math.floor(rnd() * a.length)];
+  await withBooth(async ({ srv, s, tk }) => {
+    const rs = [await kReward(s, { label: 'R1', stock: 7, perSeat: { mode: 'people', count: 1, cap: 3 } }), await kReward(s, { label: 'R2', stock: 4, perSeat: { mode: 'fixed', count: 2 }, perDevice: 1 }), await kReward(s, { label: 'R3', stock: 50, perSeat: { mode: 'fixed', count: 3 } })];
+    await s.post('/api/staff/coupon-limits', { maxPerSeat: 6 });
+    const pool = []; for (let i = 0; i < 4; i++) pool.push(await guestWithDevice(srv));
+    for (let step = 0; step < 36; step++) {
+      const k = pick(['play', 'play', 'play', 'play', 'party', 'override', 'clear', 'cap']);
+      const n = 1 + Math.floor(rnd() * 3);
+      if (k === 'play') {
+        const g = rnd() < 0.5 ? pick(pool) : await guestWithDevice(srv);
+        const st = await startPlay(g, tk[n - 1], 'pour'); if (st.status !== 200) continue;
+        await delay(230);
+        await g.post(`/api/t/${tk[n - 1]}/plays/finish`, { playId: st.json.playId, score: 200 });
+      } else if (k === 'party') await partyOf(s, n, 1 + Math.floor(rnd() * 30));
+      else if (k === 'override') await s.post(`/api/staff/tables/${n}/coupon-limit`, { perSeat: rnd() < 0.4 ? null : 1 + Math.floor(rnd() * 4) });
+      else if (k === 'clear') await s.post(`/api/staff/tables/${n}/clear`, { force: true });
+      else await s.post(`/api/staff/rewards/${pick(rs).id}`, { perSeat: { cap: 1 + Math.floor(rnd() * 5) } });
+    }
+    const db = kDb(srv);
+    try {
+      for (const r of db.prepare('SELECT id, stock, issued, per_device FROM rewards').all()) {
+        assert.ok(r.issued <= r.stock && r.issued >= 0, `issued <= stock for ${r.id}`);
+        assert.equal(db.prepare('SELECT COUNT(*) n FROM coupons WHERE reward_id=? AND table_id>0').get(r.id).n, r.issued, `issued counter = coupons of ${r.id}`);
+        if (r.per_device > 0) for (const d of db.prepare('SELECT device, COUNT(*) n FROM coupons WHERE reward_id=? AND table_id>0 AND device IS NOT NULL GROUP BY device').all(r.id)) assert.ok(d.n <= r.per_device, `per device ${r.id}`);
+      }
+      const rows = db.prepare("SELECT reward_id, table_id, seat, limit_n FROM coupons WHERE source='score' ORDER BY created_at, rowid").all();
+      const seen = new Map();
+      for (const c of rows) { const key = `${c.reward_id}/${c.table_id}/${c.seat}`; const n = (seen.get(key) || 0) + 1; seen.set(key, n); assert.ok(n <= c.limit_n, `coupon #${n} of ${key} was issued under a limit of ${c.limit_n}`); }
+      const perSeat = new Map();
+      for (const c of db.prepare("SELECT table_id, seat FROM coupons WHERE source!='staff' AND table_id>0").all()) { const key = `${c.table_id}/${c.seat}`; perSeat.set(key, (perSeat.get(key) || 0) + 1); }
+      for (const [key, n] of perSeat) assert.ok(n <= 6, `maxPerSeat 6 at ${key}`);
+      assert.ok(rows.length > 3, 'the random run issued coupons');
+    } finally { db.close(); }
+  }, { env: KENV });
+});
+
+test('R3e-5 one transfer must not pay two orders: a hand-paid same-amount order blocks one-tap, and so does a repeated text', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
+    const x = await d.place(tk[0], '김철수', 'fries'); const y = await d.place(tk[1], '김철수', 'fries'); // X and Y both 6,000, same depositor
+    await s.post(`/api/staff/orders/${x.id}/paid`, { paid: true, method: 'cash' }); // staff hand-confirm X
+    const r = await d.sms(6000, '김철수'); // the SMS of that same transfer arrives later
+    const n = (await d.notices()).find((q) => q.id === r.id);
+    assert.deepEqual([n.oneTap, n.candidates.map((c) => [c.id, c.recommended]), n.oneTapBlockedBy, n.handledOrders.map((h) => h.id)], [false, [[y.id, false]], ['maybe_already_handled'], [x.id]]);
+    const att = await s.post(`/api/staff/deposits/${n.id}/attach`, { orderId: x.id });
+    assert.equal(att.status, 200, att.text);
+    assert.equal((await d.order(y.id)).paid, false, 'Y was not confirmed');
+    // a repeat of an earlier text (a closed duplicate) is blocked as well
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
+    const z = await d.place(tk[2], '박다른', 'odeng');
+    const text = smsText(9000, '박다른', 7);
+    const first = await d.notice(text); const fn = (await d.notices()).find((q) => q.id === first.id);
+    assert.deepEqual([fn.oneTap, fn.oneTapBlockedBy], [true, []]);
+    await s.post(`/api/staff/deposits/${first.id}/dismiss`, {});
+    await delay(5100); // past the 5 s forwarder-retry window
+    const again = await d.notice(text); // the identical text again (the first row is closed, so a new row is stored)
+    assert.equal(again.status, 'pending', JSON.stringify(again));
+    const an = (await d.notices()).find((q) => q.id === again.id);
+    assert.ok(an.oneTapBlockedBy.includes('duplicate') && !an.oneTap, JSON.stringify(an.oneTapBlockedBy));
+    assert.ok(z.id);
+  } finally { await d.srv.stop(); }
+});
+
+// ---- R4b: trusted headcount, sticky blocks, glued amounts, counter redeem ----
+test('L1 per-seat "people" limit counts only a TRUSTED headcount: guest-entered = 1, staff-confirmed = n, per-person cover = n; the stock-drain script gets at most 1 per reward per seating', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const P = await kReward(s, { label: '인원', perSeat: undefined, stock: 30 }); // new-reward defaults: people, cap 4
+    const lim = async (n) => { const x = (await kSnap(await guestWithDevice(srv), tk[n - 1])).rewards.find((r) => r.id === P.id); return [x.seatLimit, x.limitSource, x.headcountTrusted]; };
+    // cover OFF: a guest-entered 30 counts as 1
+    const g = await guestWithDevice(srv); const seat = (await kSnap(g, tk[0])).table.seat;
+    assert.equal((await g.post(`/api/t/${tk[0]}/party`, { people: 30, seat })).status, 200);
+    assert.deepEqual(await lim(1), [1, 'people', false]);
+    let sn = (await kSnap(await guestWithDevice(srv), tk[0])).rewards.find((r) => r.id === P.id);
+    assert.deepEqual([sn.moreWithHeadcount, sn.moreWithStaffConfirm], [false, true]);
+    // the reviewer's drain script: all tables, forged headcounts, fresh cookies -> at most 1 per reward per seating
+    for (let n = 2; n <= 6; n++) { const a = await guestWithDevice(srv); const sa = (await kSnap(a, tk[n - 1])).table.seat; await a.post(`/api/t/${tk[n - 1]}/party`, { people: 30, seat: sa }); }
+    for (let n = 1; n <= 6; n++) {
+      const list = await kGuests(srv, tk[n - 1], 5); const res = await kFinish(tk[n - 1], list);
+      assert.equal(kEarned(res, P.id), 1, `table ${n}`);
+    }
+    assert.equal((await s.get('/api/staff/rewards')).json.rewards.find((r) => r.id === P.id).issued, 6);
+    // staff confirming the same number makes it staff-set -> trusted
+    assert.equal((await partyOf(s, 1, 30)).status, 200);
+    assert.equal((await tableIn(s, 1)).partySetBy, 'staff');
+    assert.deepEqual(await lim(1), [4, 'people', true], 'capped at 4');
+    assert.equal((await partyOf(s, 1, 3)).status, 200);
+    assert.deepEqual(await lim(1), [3, 'people', true]);
+    // per-person cover ON: a guest entering 4 counts (each person pays)
+    await coverOn(s);
+    sn = (await kSnap(await guestWithDevice(srv), tk[7])).rewards.find((r) => r.id === P.id);
+    assert.deepEqual([sn.moreWithHeadcount, sn.moreWithStaffConfirm, sn.headcountTrusted], [true, false, false], 'the guest can still enter a headcount that counts');
+    const g8 = await guestWithDevice(srv); const seat8 = (await kSnap(g8, tk[7])).table.seat;
+    assert.equal((await g8.post(`/api/t/${tk[7]}/party`, { people: 4, seat: seat8 })).status, 200);
+    assert.deepEqual(await lim(8), [4, 'people', true]);
+    // a waitlist seat is trusted too
+    const w = (await (await guestWithDevice(srv)).post('/api/wait', { nick: '손님', size: 3 })).json.id;
+    assert.equal((await s.post(`/api/staff/wait/${w}/seat`, { table: 9 })).json.partySet, true);
+    assert.equal((await tableIn(s, 9)).partySetBy, 'waitlist');
+  }, { env: KENV });
+});
+
+test('L2 maybe_already_handled and duplicate are sticky: a blocked notice never becomes one-tap later (reviewer: table cleared, a new order with the same name and amount)', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
+    const t3 = await d.place(tk[2], '홍길동', 'fries');
+    await s.post(`/api/staff/orders/${t3.id}/paid`, { paid: true, method: 'cash' });
+    const r = await d.sms(6000, '홍길동');
+    const find = async () => (await d.notices()).find((q) => q.id === r.id);
+    assert.deepEqual([(await find()).oneTap, (await find()).oneTapBlockedBy.includes('maybe_already_handled')], [false, true]);
+    assert.equal((await s.post('/api/staff/tables/3/clear', { force: true })).status, 200);
+    const t5 = await d.place(tk[4], '홍길동', 'fries'); // the same name and amount on another seating, hours later
+    const n = await find();
+    assert.deepEqual([n.oneTap, n.candidates.some((c) => c.recommended), n.oneTapBlockedBy.includes('maybe_already_handled')], [false, false, true], 'still blocked');
+    assert.deepEqual(n.candidates.map((c) => c.id), [t5.id]);
+    const ok = await s.post(`/api/staff/deposits/${n.id}/assign`, { orderId: t5.id }); // staff can still decide explicitly
+    assert.equal(ok.status, 200, ok.text);
+  } finally { await d.srv.stop(); }
+});
+
+test('L3 a number glued to sender text or to a bare 입금 label line is a guessed amount; clean bank shapes stay strict; bounded fuzz: an unflagged parse always equals the true amount', () => {
+  const { parseDeposit } = require('./db');
+  const guessed = (t) => { const p = parseDeposit(t); return p.amount != null && p.reasons.some((r) => ['ignore_word', 'multiple_amounts', 'no_amount', 'amount_range', 'amount_adjacent_to_name', 'text_too_long'].includes(r)); };
+  assert.equal(guessed('[Web발신]\n하나 11/14 21:03\n입금\n16,000원'), true, 'the reviewer: sender "1" glued to 6,000원 after a bare label line');
+  assert.equal(guessed('[Web발신]\n입금\n1' + '6,000원'), true);
+  assert.equal(guessed('abc6,000원 입금'), true);
+  assert.equal(guessed('입금 6,000원을'), true);
+  for (const clean of ['[Web발신]\n신한 11/13 22:31\n110-639-***394\n입금 16,000\n잔액 123,456\n홍길동', '입금 16,000원\n홍길동 → 내 입출금통장', '[KB국민]\n11/13 22:31\n123456-**-***789\n홍길동\n입금 16,000원\n잔액 1,000,000원', '홍길동 입금 16,000원', '입금 5,000원\n잔액 999,999원\n김철수', '입금16,000원\n홍길동', '[Web발신]\n입금 6,000\n잔액 123,456']) {
+    assert.equal(guessed(clean), false, clean);
+  }
+  const rnd = lcg(31337);
+  const alphabet = '0123456789,.-:*/ 원님입금\n';
+  const sender = () => Array.from({ length: Math.floor(rnd() * 8) }, () => alphabet[Math.floor(rnd() * alphabet.length)]).join('');
+  const shapes = [
+    (x) => `[Web발신]\n신한 11/13 22:31\n110-639-***394\n입금 6,000\n잔액 123,456\n${x}`,
+    (x) => `입금 6,000원\n${x} → 내 입출금통장`,
+    (x) => `[KB국민]\n11/13 22:31\n123456-**-***789\n${x}\n입금 6,000원\n잔액 1,000,000원`,
+    (x) => `${x} 입금 6,000원`,
+    (x) => `입금 6,000원\n잔액 999,999원\n${x}`,
+    (x) => `입금\n${x}6,000원`,
+    (x) => `[Web발신]\n토스 11/13\n입금 6,000원\n${x}님`,
+  ];
+  let checked = 0; let strict = 0;
+  for (let i = 0; i < 3000; i++) {
+    const t = shapes[i % shapes.length](sender());
+    const p = parseDeposit(t); checked++;
+    if (p.kind === 'deposit' && p.amount != null && !guessed(t)) { strict++; assert.equal(p.amount, 6000, JSON.stringify(t)); }
+  }
+  assert.ok(checked === 3000 && strict > 300, `strict parses ${strict}`);
+});
+
+test('L4 counter redeem: a discount coupon is a use of its seating (409 coupon_limit at the limit), item coupons are unaffected; test coupons say 테스트; order moves keep discountUses consistent', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await s.post('/api/staff/coupon-limits', { maxDiscountUsesPerSeat: 1 });
+    const a = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: 'A' })).json.coupon;
+    const b = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: 'B' })).json.coupon;
+    const it = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '서비스' })).json.coupon;
+    const g = await guestWithDevice(srv);
+    const o1 = (await order(g, tk[0], [{ id: 'fries', qty: 1 }], { couponCode: a.code })).json.order;
+    const refused = await s.post('/api/staff/coupons/redeem', { code: b.code });
+    assert.deepEqual([refused.status, refused.json.error, refused.json.max, refused.json.used], [409, 'coupon_limit', 1, 1]);
+    assert.equal((await s.get('/api/staff/state')).json.coupons.find((c) => c.code === b.code).status, 'issued');
+    assert.equal((await s.post('/api/staff/coupons/redeem', { code: it.code })).status, 200, 'item coupons are unaffected');
+    assert.equal((await s.post(`/api/staff/orders/${o1.id}/status`, { status: 'cancelled' })).status, 200); // frees the use
+    assert.equal((await s.post('/api/staff/coupons/redeem', { code: b.code })).status, 200);
+    assert.equal((await tableIn(s, 1)).discountUses, 1, 'the counter redeem is the use now');
+    assert.equal((await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: 'C' })).status, 200);
+    // move: source frees, destination takes the use
+    await s.post('/api/staff/coupon-limits', { maxDiscountUsesPerSeat: 0 });
+    const c2 = (await s.post('/api/staff/tables/2/coupons', { type: 'discount', amount: 1000, label: 'D' })).json.coupon;
+    const g2 = await guestWithDevice(srv);
+    const o2 = (await order(g2, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: c2.code })).json.order;
+    assert.deepEqual([(await tableIn(s, 2)).discountUses, (await tableIn(s, 3)).discountUses], [1, 0]);
+    assert.equal((await s.post(`/api/staff/orders/${o2.id}/move`, { to: 3 })).status, 200);
+    assert.deepEqual([(await tableIn(s, 2)).discountUses, (await tableIn(s, 3)).discountUses], [0, 1]);
+    // test coupons
+    const tt = (await s.get('/api/staff/state')).json.testTable;
+    const tc = (await s.post('/api/staff/tables/0/coupons', { type: 'item', label: '테스트 서비스' })).json.coupon;
+    const rd = await s.post('/api/staff/coupons/redeem', { code: tc.code });
+    assert.deepEqual([rd.status, rd.json.coupon.test], [200, true]);
+    const ent = (await s.get('/api/staff/audit?limit=3')).json.entries.find((e) => e.action === 'coupon_redeem');
+    assert.ok(/테스트/.test(ent.summaryKo), ent.summaryKo);
+    assert.equal((await s.get('/api/staff/rewards')).json.rewards.every((r) => r.used === 0), true, 'real used counts untouched');
+    assert.ok(tt.token);
+  }, { env: KENV });
+});
+
+test('L5 per-seating override 0 gives no reward coupons to that seating only', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const A = await kReward(s, { label: 'A', perSeat: { mode: 'fixed', count: 3 } });
+    assert.equal((await s.post('/api/staff/tables/1/coupon-limit', { perSeat: 0 })).status, 200);
+    const l1 = await kGuests(srv, tk[0], 2); const r1 = await kFinish(tk[0], l1);
+    assert.equal(kEarned(r1, A.id), 0);
+    assert.ok(r1[0].json.rewards.find((x) => x.id === A.id).reason === 'seat_limit');
+    const l2 = await kGuests(srv, tk[1], 2); assert.equal(kEarned(await kFinish(tk[1], l2), A.id), 2);
+  }, { env: KENV });
+});
+
+// ---- R4d: atomic migration, merge trust, sticky hand-confirm on open notices, staff-side limits ----
+test('M1 migration: a database with only the first limit column applied (killed mid-step) still has every pre-existing reward fixed 1; new rewards are people', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-m-'));
+  let srv; let srv2; let srv3;
+  try {
+    srv = await boot({ dir, env: KENV });
+    const s = await staffLogin(srv);
+    await kReward(s, { label: '스태프 보상', perSeat: { mode: 'people', count: 1, cap: 4 } });
+    await srv.stop({ keep: true });
+    const raw = new DatabaseSync(path.join(srv.data, 'booth.db')); // the pre-K schema, then ONLY the first ALTER applied by hand
+    raw.exec('DROP INDEX coupons_dev');
+    for (const c of ['per_seat_mode', 'per_seat_count', 'per_seat_cap', 'per_device']) raw.exec(`ALTER TABLE rewards DROP COLUMN ${c}`);
+    for (const c of ['device', 'limit_n', 'limit_source']) raw.exec(`ALTER TABLE coupons DROP COLUMN ${c}`);
+    raw.exec("ALTER TABLE rewards ADD COLUMN per_seat_mode TEXT NOT NULL DEFAULT 'fixed'");
+    raw.close();
+    srv2 = await boot({ dir, env: KENV });
+    const s2 = await staffLogin(srv2);
+    const rw = (await s2.get('/api/staff/rewards')).json.rewards;
+    assert.ok(rw.length >= 4 && rw.every((r) => r.perSeat.mode === 'fixed' && r.perSeat.count === 1 && r.perDevice === 1), JSON.stringify(rw.map((r) => r.perSeat)));
+    const fresh = await kReward(s2, { label: '새 보상', perSeat: undefined });
+    assert.equal(fresh.perSeat.mode, 'people', 'a reward created after the upgrade defaults to people (written explicitly)');
+    await srv2.stop({ keep: true });
+    srv3 = await boot({ dir, env: KENV });
+    const rw3 = (await (await staffLogin(srv3)).get('/api/staff/rewards')).json.rewards;
+    assert.deepEqual(rw3.map((r) => r.perSeat.mode), [...rw.map(() => 'fixed'), 'people'], 'a second boot changes nothing');
+  } finally { if (srv3) await srv3.stop(); else if (srv2) await srv2.stop(); else if (srv) fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('M2 table move / merge never launders a guest-entered headcount into a trusted one', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const P = await kReward(s, { label: '인원', perSeat: undefined, stock: 50 });
+    const limOf = async (n) => { const x = (await kSnap(await guestWithDevice(srv), tk[n - 1])).rewards.find((r) => r.id === P.id); return [x.seatLimit, x.headcountTrusted]; };
+    const guestSets = async (n, people) => { const g = await guestWithDevice(srv); const seat = (await kSnap(g, tk[n - 1])).table.seat; assert.equal((await g.post(`/api/t/${tk[n - 1]}/party`, { people, seat })).status, 200); };
+    // reviewer: guest 30 at T12, staff 2 at T11, move T11 -> T12
+    await guestSets(12, 30); await partyOf(s, 11, 2);
+    assert.equal((await s.post('/api/staff/tables/move', { from: 11, to: 12 })).status, 200);
+    let t = await tableIn(s, 12);
+    assert.deepEqual([t.people, t.partySetBy, t.headcountTrusted], [32, 'guest', false]);
+    assert.deepEqual(await limOf(12), [1, false]);
+    assert.deepEqual(t.couponLimits.find((c) => c.rewardId === P.id), { rewardId: P.id, limit: 1, limitSource: 'people' });
+    // the reverse direction: guest-30 T13 merged into staff-2 T14
+    await guestSets(13, 30); await partyOf(s, 14, 2);
+    assert.equal((await s.post('/api/staff/tables/move', { from: 13, to: 14 })).status, 200);
+    t = await tableIn(s, 14);
+    assert.deepEqual([t.people, t.partySetBy, t.headcountTrusted], [32, 'guest', false]);
+    assert.deepEqual(await limOf(14), [1, false]);
+    // staff confirming afterwards makes it trusted
+    assert.equal((await partyOf(s, 14, 30)).status, 200);
+    assert.deepEqual(await limOf(14), [4, true]);
+    // both staff-set: stays trusted; a move into an empty seat keeps the source's trust either way
+    await partyOf(s, 15, 2); await partyOf(s, 16, 3);
+    assert.equal((await s.post('/api/staff/tables/move', { from: 15, to: 16 })).status, 200);
+    assert.deepEqual([(await tableIn(s, 16)).partySetBy, await limOf(16)], ['staff', [4, true]]);
+    await guestSets(17, 5);
+    assert.equal((await s.post('/api/staff/tables/move', { from: 17, to: 18 })).status, 200);
+    assert.deepEqual([(await tableIn(s, 18)).partySetBy, (await tableIn(s, 18)).people, await limOf(18)], ['guest', 5, [1, false]]);
+    await partyOf(s, 19, 5);
+    assert.equal((await s.post('/api/staff/tables/move', { from: 19, to: 20 })).status, 200);
+    assert.deepEqual([(await tableIn(s, 20)).partySetBy, await limOf(20)], ['staff', [4, true]]);
+  }, { env: KENV });
+});
+
+test('M3 hand-confirming an order marks every OPEN same-amount notice as maybe_already_handled for good (even after the table is cleared or the payment is undone)', async () => {
+  const d = await depositSetup();
+  try {
+    const { s, tk } = d;
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
+    const z = await d.place(tk[0], '김철수', 'fries'); // 6,000
+    const r = await d.sms(6000, '김철수');
+    const find = async (id) => (await d.notices()).find((q) => q.id === id);
+    let n = await find(r.id);
+    assert.deepEqual([n.oneTap, n.candidates.map((c) => c.id)], [true, [z.id]], 'step 1: clean and one-tap');
+    const y = await d.place(tk[1], '박다른', 'fries');
+    await s.post(`/api/staff/orders/${y.id}/paid`, { paid: true, method: 'cash' }); // staff hand-confirm another 6,000 order
+    n = await find(r.id);
+    assert.deepEqual([n.oneTap, n.oneTapBlockedBy.includes('maybe_already_handled'), n.reasons.includes('maybe_already_handled')], [false, true, true], 'step 2: blocked, and the reason is stored');
+    assert.equal((await s.post('/api/staff/tables/2/clear', { force: true })).status, 200);
+    n = await find(r.id);
+    assert.deepEqual([n.oneTap, n.oneTapBlockedBy.includes('maybe_already_handled'), n.handledCount], [false, true, 0], 'step 3: the table is cleared, still blocked');
+    assert.equal((await s.post(`/api/staff/deposits/${n.id}/assign`, { orderId: z.id })).status, 200, 'staff can still assign it explicitly');
+    // a partial hand payment: the notice for the order's earlier balance is marked too, undoing the payment keeps the reason
+    const q = await d.place(tk[2], '이영희', 'odeng'); // 9,000
+    const r9 = await d.sms(9000, '이영희');
+    await s.post(`/api/staff/orders/${q.id}/paid`, { paid: true, method: 'cash', amount: 1000 });
+    assert.ok((await find(r9.id)).reasons.includes('maybe_already_handled'), 'matches the order\'s previous balance');
+    await s.post(`/api/staff/orders/${q.id}/paid`, { paid: false });
+    assert.deepEqual([(await find(r9.id)).oneTap, (await find(r9.id)).oneTapBlockedBy.includes('maybe_already_handled')], [false, true]);
+    // unrelated amounts are not touched
+    const r2 = await d.sms(1700, '김철수'); await s.post(`/api/staff/orders/${(await d.place(tk[3], undefined, 'cola')).id}/paid`, { paid: true, method: 'cash' });
+    assert.equal((await find(r2.id)).reasons.includes('maybe_already_handled'), false);
+  } finally { await d.srv.stop(); }
+});
+
+test('M4 staff tables[] / testTable carry server-computed headcountTrusted and couponLimits (a waived per-person cover makes a guest-entered headcount untrusted again)', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const P = await kReward(s, { label: '인원', perSeat: undefined, stock: 50 });
+    await coverOn(s);
+    const g = await guestWithDevice(srv); const seat = (await kSnap(g, tk[0])).table.seat;
+    assert.equal((await g.post(`/api/t/${tk[0]}/party`, { people: 3, seat })).status, 200);
+    let t = await tableIn(s, 1);
+    assert.deepEqual([t.headcountTrusted, t.couponLimits.find((c) => c.rewardId === P.id)], [true, { rewardId: P.id, limit: 3, limitSource: 'people' }]);
+    assert.equal((await s.post('/api/staff/tables/1/cover/waive', { reason: '임원' })).status, 200);
+    t = await tableIn(s, 1);
+    assert.deepEqual([t.partySetBy, t.cover.waived, t.headcountTrusted, t.couponLimits.find((c) => c.rewardId === P.id)], ['guest', true, false, { rewardId: P.id, limit: 1, limitSource: 'people' }]);
+    const gv = (await kSnap(await guestWithDevice(srv), tk[0])).rewards.find((r) => r.id === P.id);
+    assert.deepEqual([gv.seatLimit, gv.headcountTrusted], [1, false], 'the guest view agrees with the staff view');
+    await s.post('/api/staff/tables/1/coupon-limit', { perSeat: 2 });
+    assert.deepEqual((await tableIn(s, 1)).couponLimits.find((c) => c.rewardId === P.id), { rewardId: P.id, limit: 2, limitSource: 'override' });
+    const tt = (await s.get('/api/staff/state')).json.testTable;
+    assert.deepEqual([tt.headcountTrusted, tt.couponLimits.find((c) => c.rewardId === P.id)], [false, { rewardId: P.id, limit: 1, limitSource: 'people' }]);
+  }, { env: KENV });
 });

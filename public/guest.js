@@ -360,9 +360,9 @@
   }
   function coverCard() {
     var c = S.cover, co = coverOrder();
+    if (c && c.waived) return '<p class="note cvw">' + esc(c.label || '입장료') + ' 면제</p>';   // the waived cover order is cancelled, so this must come before the order check
     if (!(c && co && co.status !== 'cancelled')) return '';   // driven by the cover order, not the setting: a cover still owed stays visible after staff turn the setting off
     var label = esc(c.label || '입장료');
-    if (c.waived || co.waived) return '<p class="note cvw">' + label + ' 면제</p>';
     var refund = co.refundDue > 0 ? '<div class="meta"><span class="tag bad">환불 예정</span> ' + won(co.refundDue) + ' · 직원에게 문의해 주세요</div>' : '';
     var h = '<section class="y2k-window cv" aria-label="' + label + '"><div class="y2k-title"><svg class="y2k-i y2k-i--2x" aria-hidden="true"><use href="' + ICO + '#i-ticket"/></svg><span class="y2k-title-t">' + label + '.dat</span></div><div class="y2k-body">';
     if (c.mode === 'per_table' || !c.shares) {
@@ -509,8 +509,20 @@
       var rws = S.rewards.filter(function (r) { return r.game === g; }).sort(function (a, b) { return a.threshold - b.threshold; });
       if (!rws.length) h += '<div class="rw"><span>재미로 한 판!</span><small>지금은 보상이 없어요</small></div>';
       rws.forEach(function (r) {
-        var st = r.got ? '<span class="badge ok">이미 받았어요</span>' : r.soldOut ? '<span class="badge bad">소진</span>' : '<span class="badge warn">받을 수 있어요</span>';
-        h += '<div class="rw"><span><b>' + esc(r.label) + '</b> <small>' + r.threshold + '점 이상</small></span>' + st + '</div>';
+        var K = r.seatLimit != null, why = '';
+        var st = K ? (r.canEarn ? '<span class="badge warn">받을 수 있어요</span>' : r.blockedBy === 'stock_out' ? '<span class="badge bad">소진</span>' : '<span class="badge ok">' + (r.blockedBy === 'seat_limit' ? '이미 받았어요' : '더 못 받아요') + '</span>')
+          : r.got ? '<span class="badge ok">이미 받았어요</span>' : r.soldOut ? '<span class="badge bad">소진</span>' : '<span class="badge warn">받을 수 있어요</span>';
+        if (K) {
+          why = '이 테이블 ' + r.seatIssued + '/' + r.seatLimit + '장 받음';
+          if (r.blockedBy === 'device_limit') why += ' · 이 폰으로는 이미 받았어요';
+          else if (r.blockedBy === 'table_total_limit') why += ' · 이 테이블이 받을 수 있는 쿠폰을 다 받았어요';
+          else if (r.blockedBy === 'stock_out') why += ' · 소진';
+          // only when the server says a headcount would change the limit (never for device / table-total / stock blocks or cap 1)
+          // server-decided hints only: a guest can raise the limit by typing a headcount only with a per-person cover charge; otherwise staff must confirm
+          if (r.moreWithHeadcount === true && S.party && S.party.people == null && S.party.canSet) why += '<br><button class="linkbtn" data-a="party-open">인원을 입력하면 이 테이블 한도가 정해져요' + (r.seatCap > 0 ? ' (최대 ' + r.seatCap + '장)' : '') + '</button>';
+          else if (r.moreWithStaffConfirm === true) why += '<br>직원이 인원을 확인하면 한도가 늘어요' + (r.seatCap > 0 ? ' (최대 ' + r.seatCap + '장)' : '');
+        }
+        h += '<div class="rw"><span><b>' + esc(r.label) + '</b> <small>' + r.threshold + '점 이상</small>' + (why ? '<br><small>' + why + '</small>' : '') + '</span>' + st + '</div>';
       });
       h += '<button class="y2k-btn big" style="margin-top:6px" data-a="play" data-v="' + g + '"' + (gameBusy ? ' disabled' : '') + '>&#9654; 실행</button></div></article>';
     });
@@ -531,7 +543,7 @@
   function openCart() {
     var sh = openSheet('장바구니',
       '<h2>장바구니</h2><ul class="cl" id="cl"></ul>' +
-      '<label class="fld">쿠폰<select id="cc"></select></label><div class="cmp" id="ccmp" hidden></div>' +
+      '<label class="fld">쿠폰<select id="cc"></select></label><p class="note" id="clim" hidden></p><div class="cmp" id="ccmp" hidden></div>' +
       '<label class="fld"><span id="cdpl">입금자명</span><input id="cdp" maxlength="10" autocomplete="name" enterkeyhint="done" placeholder="예: 홍길동"></label><p class="note" style="margin:4px 0 0">보내는 분 이름과 같아야 입금이 자동 확인돼요</p>' +
       '<label class="fld">요청사항 (선택)<input id="cn" maxlength="100" placeholder="예: 덜 맵게" autocomplete="off"></label>' +
       '<p class="note" id="cmin" hidden></p><div class="memrow" id="cnm" hidden><span id="cnmt"></span><span class="mr-btns"><a class="y2k-btn sm" href="/" target="_blank" rel="noopener noreferrer">COMS 로그인</a><button class="y2k-btn sm" data-a="mrecheck">다시 확인</button></span></div>' +
@@ -555,6 +567,10 @@
     var opts = '<option value="">쿠폰 사용 안 함</option>';
     S.coupons.forEach(function (c) { if (c.status === 'issued' && c.type === 'discount') opts += '<option value="' + esc(c.code) + '"' + (c.code === cart.coupon ? ' selected' : '') + '>' + esc(c.label) + ' (' + esc(c.code) + ')</option>'; });
     var sel = $('#cc'); if (sel.innerHTML !== opts) sel.innerHTML = opts;
+    var cs = S.couponSeat || {}, capped = cs.maxDiscountUsesPerSeat > 0 && cs.discountUses >= cs.maxDiscountUsesPerSeat;
+    if (capped && cart.coupon) { cart.coupon = ''; saveCart(); sel.value = ''; }
+    sel.disabled = capped;
+    var lim = $('#clim'); if (lim) { lim.hidden = !capped; lim.textContent = capped ? '이 테이블은 할인 쿠폰을 ' + cs.maxDiscountUsesPerSeat + '장까지 쓸 수 있어요 (이미 ' + cs.discountUses + '장 사용)' : ''; }
     $('#cm').textContent = t.mem ? '-' + won(t.mem) : '쿠폰과 함께 쓸 수 없어요'; $('#cmr').hidden = !(t.mem || t.sup);
     var rv = M && M.enabled && ruleVal() > 0;
     var nm = $('#cnm'); nm.hidden = !(rv && !M.member); if (rv) $('#cnmt').textContent = 'COMS 회원이면 ' + ruleText();
@@ -627,6 +643,7 @@
         api('').then(function (s) { if (s.ok) applyState(s.data); }, function () {});
       } else if (e === 'closed') { S.orderingOpen = false; }
       else if (e === 'too_many_orders') msg = '이 테이블의 주문 횟수 한도에 도달했어요. 스태프에게 말씀해 주세요.';
+      else if (e === 'coupon_limit') { cart.coupon = ''; saveCart(); msg = '이 테이블은 할인 쿠폰을 ' + (d.max != null ? d.max + '장까지 ' : '') + '쓸 수 있어요' + (d.used != null ? ' (이미 ' + d.used + '장 사용)' : '') + '. 쿠폰 없이 다시 주문해 주세요.'; api('').then(function (s) { if (s.ok) applyState(s.data); }, function () {}); }
       else if (e === 'coupon_used' || e === 'coupon_void' || e === 'bad_coupon' || e === 'coupon_not_discount') { cart.coupon = ''; saveCart(); }
       else if (e === 'unknown_item') { (d.ids || []).forEach(function (id) { delete cart.items[id]; }); saveCart(); }
       render(); if (sheetKind === '장바구니') cerr(msg); else toast(msg);
@@ -827,8 +844,13 @@
     if (low.length) h += '<div class="msg">' + (issued.length ? '다음 보상까지 ' : '아쉬워요! ') + esc(low[0].label) + (low[0].th ? '까지 ' + Math.max(1, low[0].th - score) + '점 남았어요' : '') + '</div><p class="note">' + (low[0].th ? low[0].th + '점 이상이면 받을 수 있어요. ' : '') + '다시 도전!</p>';
     else if (!issued.length && !(d.rewards || []).length) h += '<div class="msg">재미로 한 판, 수고했어요!</div>';
     (d.rewards || []).forEach(function (r) {
-      if (r.result === 'already_got') h += '<p class="note">' + esc(r.label) + '은(는) 이미 받았어요</p>';
-      else if (r.result === 'sold_out') h += '<p class="note">' + esc(r.label) + ' 재고가 모두 소진됐어요</p>';
+      var L = esc(r.label);
+      if (r.reason === 'seat_limit') h += '<p class="note">' + L + '은(는) 이 테이블이 받을 수 있는 만큼 이미 받았어요</p>';
+      else if (r.reason === 'device_limit') h += '<p class="note">' + L + '은(는) 이 폰으로는 이미 받았어요</p>';
+      else if (r.reason === 'table_total_limit') h += '<p class="note">이 테이블이 받을 수 있는 쿠폰을 다 받았어요. ' + L + '은(는) 받지 못했어요</p>';
+      else if (r.reason === 'stock_out') h += '<p class="note">' + L + ' 재고가 모두 소진됐어요</p>';
+      else if (r.result === 'already_got') h += '<p class="note">' + L + '은(는) 이미 받았어요</p>';
+      else if (r.result === 'sold_out') h += '<p class="note">' + L + ' 재고가 모두 소진됐어요</p>';
     });
     h += '<div class="row"><button class="y2k-btn" data-a="gagain" data-v="' + id + '">다시 도전</button>' + (issued.length ? '<button class="y2k-btn" data-a="gcoupon">쿠폰 보기</button>' : '<button class="y2k-btn" data-a="gexit">닫기</button>') + '</div>';
     var o = overlay(h);
@@ -848,6 +870,7 @@
     switch (a) {
       case 'tab': tab = v; render(); window.scrollTo(0, 0); break;
       case 'cat': cat = v; render(); break;
+      case 'party-open': openParty(); break;
       case 'add': setQty(v, 1); break;
       case 'inc': setQty(v, (cart.items[v] || 0) + 1); break;
       case 'dec': setQty(v, (cart.items[v] || 0) - 1); break;

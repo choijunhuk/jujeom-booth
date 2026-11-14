@@ -585,13 +585,14 @@
         var c = r.coupon;
         showResult(resultBox('ok', '✓ 사용 처리 완료', c.label, c.table + '번 테이블',
           (c.type === 'discount' ? '할인 쿠폰 · ' + won(c.amount) + ' 할인' : '상품 쿠폰 · ' + (c.item || c.label) + ' 지급') + ' · 코드 ' + c.code,
-          c.stale ? '이 쿠폰은 이전 손님 자리(정리된 자리)의 쿠폰이에요. 지급 여부는 직접 판단해 주세요.' : null));
+          c.table === 0 ? '테스트 쿠폰이에요. 실제 메뉴를 내주지 마세요.' : c.stale ? '이 쿠폰은 이전 손님 자리(정리된 자리)의 쿠폰이에요. 지급 여부는 직접 판단해 주세요.' : null));
         input.value = '';
         return refresh();
       }, function (e) {
         var sub = e.message;
+        if (e.code === 'coupon_limit') sub = '이 테이블의 쿠폰 한도 때문에 사용할 수 없어요' + (e.data && e.data.max != null ? ' (최대 ' + e.data.max + '장, 이미 ' + (e.data.used != null ? e.data.used : '?') + '장 사용)' : '') + '.';
         if (e.code === 'already_used') sub = '이미 사용된 쿠폰이에요' + (e.data.usedAt ? ' (' + SC.agoText(e.data.usedAt) + ' 사용)' : '') + (e.data.orderId ? ' · 주문 #' + e.data.orderId : '') + '.';
-        showResult(resultBox('bad', e.code === 'already_used' ? '이미 사용된 쿠폰' : e.code === 'no_coupon' ? '없는 코드예요' : '사용 처리 실패', null, null, sub));
+        showResult(resultBox('bad', e.code === 'already_used' ? '이미 사용된 쿠폰' : e.code === 'coupon_limit' ? '쿠폰 한도 초과' : e.code === 'no_coupon' ? '없는 코드예요' : '사용 처리 실패', null, null, sub));
         input.select();
       });
     }
@@ -633,6 +634,9 @@
       sub ? h('div', { class: 'muted' }, sub) : null, warn ? h('div', { class: 'tag warn', style: 'white-space:normal;justify-self:center' }, '! ' + warn) : null);
   }
   function gameLabel(id) { var g = S.data && S.data.games && S.data.games[id]; return g ? g.label : id; }
+  // coupon limits (addendum K): perSeat { mode: people|fixed, count, cap }, perDevice 0..20 (0 = none)
+  function perSeatText(ps) { ps = ps || { mode: 'people', cap: 4 }; return ps.mode === 'fixed' ? '테이블당 ' + ps.count + '장' : '테이블당 인원수만큼 (최대 ' + ps.cap + '장)'; }
+  function perDeviceText(n) { return n > 0 ? '폰당 ' + n + '장' : '폰 제한 없음'; }
   function rewardCard(r) {
     var pct = r.stock > 0 ? Math.max(0, Math.min(100, Math.round(r.remaining / r.stock * 100))) : 0;
     var card;
@@ -653,6 +657,7 @@
         r.active ? null : h('span', { class: 'tag mute' }, '비활성'),
         r.active && r.remaining <= 0 ? h('span', { class: 'tag bad solid' }, '재고 소진') : null),
       h('div', { class: 'muted' }, gameLabel(r.game) + ' · ' + r.threshold + '점 이상 · ' + typeText),
+      h('div', { class: 'muted' }, perSeatText(r.perSeat) + ' · ' + perDeviceText(r.perDevice)),
       h('div', { class: 'meter', role: 'img', 'aria-label': '남은 재고 ' + pct + '%' }, h('i', { style: 'width:' + pct + '%' })),
       h('div', null, h('b', { class: 'num', style: 'font-size:1.3rem' }, r.remaining + '개 남음'), h('span', { class: 'muted num' }, ' / 재고 ' + r.stock + ' · 발급 ' + r.issued + ' · 사용 ' + r.used)),
       h('div', { class: 'stockctl' }, h('span', { class: 'muted' }, '재고'), step(-5), step(-1), step(1), step(5)),
@@ -687,6 +692,25 @@
     var amtRow = h('label', { class: 'lab' }, '할인 금액 (100원 단위, 100~100,000원)', amt);
     var stock = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: editing ? String(r.issued) : '0', max: '10000', value: editing ? String(r.stock) : '10', 'aria-label': '재고' });
     var active = h('input', { type: 'checkbox', style: 'width:24px;height:24px' }); active.checked = editing ? !!r.active : true;
+    var ps0 = (editing && r.perSeat) || { mode: 'people', count: 1, cap: 4 };
+    var psMode = ps0.mode === 'fixed' ? 'fixed' : 'people';
+    var capIn = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '1', max: '20', step: '1', value: String(ps0.cap || 4), 'aria-label': '최대 장수' });
+    var cntIn = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '1', max: '20', step: '1', value: String(ps0.count || 1), 'aria-label': '고정 장수' });
+    var devIn = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '0', max: '20', step: '1', value: String(editing && r.perDevice != null ? r.perDevice : 1), 'aria-label': '폰 한 대당 장수' });
+    var rPeople = h('input', { type: 'radio', name: 'psmode', value: 'people', style: 'width:22px;height:22px' }), rFixed = h('input', { type: 'radio', name: 'psmode', value: 'fixed', style: 'width:22px;height:22px' });
+    rPeople.checked = psMode === 'people'; rFixed.checked = psMode === 'fixed';
+    function syncPs() { psMode = rFixed.checked ? 'fixed' : 'people'; capIn.disabled = psMode !== 'people'; cntIn.disabled = psMode !== 'fixed'; }
+    rPeople.addEventListener('change', syncPs); rFixed.addEventListener('change', syncPs); syncPs();
+    var limitBox = h('fieldset', { style: 'border:1px solid var(--line,#444);padding:10px;margin:8px 0' },
+      h('legend', { style: 'font-weight:800' }, '테이블당 받을 수 있는 장수'),
+      h('label', { style: 'display:flex;gap:10px;align-items:center;font-weight:800' }, rPeople, editing ? '인원수만큼' : '인원수만큼 (기본)'),
+      h('label', { class: 'lab' }, '최대 장수 (1~20장)', capIn),
+      h('p', { class: 'muted' }, '직원이 확인한 인원(또는 1인당 입장료가 있는 경우)만 인정해요. 손님이 혼자 적은 인원은 1장으로 계산해요. 인원을 넣지 않은 테이블도 1장이에요.'),
+      h('label', { style: 'display:flex;gap:10px;align-items:center;font-weight:800' }, rFixed, '고정'),
+      h('label', { class: 'lab' }, '장수 (1~20장)', cntIn),
+      h('p', { class: 'muted' }, '인원과 상관없이 한 테이블이 이 보상을 받을 수 있는 장수예요.'),
+      h('label', { class: 'lab' }, '폰 한 대당 장수 (0 = 제한 없음)', devIn),
+      h('p', { class: 'muted' }, '같은 폰으로 여러 테이블에서 받는 것을 막아요. 브라우저 기준이라 완벽하지 않아요.'));
     var err = h('p', { role: 'alert', style: 'color:var(--danger);font-weight:800;min-height:1.4em' });
     function maxScore() { return games[game.value] ? games[game.value].maxScore : 0; }
     function sync() {
@@ -706,6 +730,10 @@
       if (thr.value.trim() === '' || !Number.isInteger(n) || n < 0 || n > maxScore()) return '기준 점수는 0~' + maxScore() + '점 사이 정수여야 해요.';
       if (type.value === 'discount' && !(Number.isInteger(am) && am >= 100 && am <= 100000 && am % 100 === 0)) return MENU_ERR.bad_amount;
       if (stock.value.trim() === '' || !Number.isInteger(st) || st < 0 || st > 10000) return MENU_ERR.bad_stock;
+      var cap = Number(capIn.value), cnt = Number(cntIn.value), dv = Number(devIn.value);
+      if (psMode === 'people' && !(Number.isInteger(cap) && cap >= 1 && cap <= 20)) return '최대 장수는 1~20 사이 정수예요.';
+      if (psMode === 'fixed' && !(Number.isInteger(cnt) && cnt >= 1 && cnt <= 20)) return '고정 장수는 1~20 사이 정수예요.';
+      if (!(Number.isInteger(dv) && dv >= 0 && dv <= 20)) return MENU_ERR.bad_per_device;
       if (editing && st < r.issued) return '이미 ' + r.issued + '장 발급되어 그보다 적게 줄일 수 없습니다.';
       return '';
     }
@@ -714,11 +742,17 @@
       if (err.textContent) return;
       var body = { label: label.value.trim(), game: game.value, threshold: Number(thr.value), type: type.value, stock: Number(stock.value), active: active.checked };
       if (body.type === 'discount') body.amount = Number(amt.value);
+      var wantPs = { mode: psMode, count: Number(cntIn.value) || (ps0.count || 1), cap: Number(capIn.value) || (ps0.cap || 4) }, wantDev = Number(devIn.value);
+      body.perSeat = wantPs; body.perDevice = wantDev;
       var call;
-      if (!editing) call = api('/api/staff/rewards', body);
+      if (!editing) call = api('/api/staff/rewards', body).then(function (res) {   // create may ignore the limits: set them with a follow-up update when they differ from what came back
+        var nr = res && res.reward;
+        if (nr && (JSON.stringify(nr.perSeat) !== JSON.stringify(wantPs) || nr.perDevice !== wantDev)) return api('/api/staff/rewards/' + nr.id, { perSeat: wantPs, perDevice: wantDev });
+        return res;
+      });
       else {
         var diff = {};
-        Object.keys(body).forEach(function (k) { if (body[k] !== r[k]) diff[k] = body[k]; });
+        Object.keys(body).forEach(function (k) { if (JSON.stringify(body[k]) !== JSON.stringify(r[k])) diff[k] = body[k]; });
         if (diff.type === 'discount' && diff.amount === undefined) diff.amount = body.amount;
         if (!Object.keys(diff).length) { close(); return; }
         call = api('/api/staff/rewards/' + r.id, diff);
@@ -737,6 +771,7 @@
       h('label', { class: 'lab' }, '기준 점수 (이 점수 이상이면 받아요)', thr, hint),
       h('label', { class: 'lab' }, '종류', type), amtRow,
       h('label', { class: 'lab' }, '재고 (총 발급 수량, 0~10,000' + (editing ? ', 이미 발급 ' + r.issued + '장 이상' : '') + ')', stock),
+      limitBox,
       h('label', { style: 'display:flex;gap:10px;align-items:center;font-weight:800' }, active, '사용 중 (끄면 더 이상 발급되지 않아요)'),
       h('p', { class: 'muted' }, '바꾼 내용은 이후에 발급되는 쿠폰부터 적용돼요. 이미 발급된 쿠폰은 그대로예요.'),
       err,
@@ -845,6 +880,9 @@
     bad_include_associate: '준회원 포함 값이 올바르지 않아요.',
     bad_per_member_limit: '1인당 횟수는 1~100 사이 정수예요.',
     bad_stack_with_coupon: '쿠폰 함께 사용 값이 올바르지 않아요.',
+    bad_per_seat: '테이블당 장수 설정이 올바르지 않아요.',
+    bad_per_device: '폰당 장수는 0~20 사이 정수예요. (0 = 제한 없음)',
+    bad_coupon_limit: '쿠폰 제한은 0 또는 1~50 사이 정수예요. (0 = 제한 없음)',
     too_many_rewards: '보상은 최대 12개까지 만들 수 있어요.',
     no_reward: '이미 삭제된 보상이에요. 화면을 새로 불러올게요.',
     hourly_disabled: '정시 시상이 꺼져 있어요. 아래 설정에서 켜 주세요.',
@@ -1352,6 +1390,12 @@
   function whyBlock(n) {
     var list = reasonList(n.reasons, n, n.candidates);
     if (n.amountGuessed) list.unshift('문자의 금액은 추정값이에요. 은행 앱에서 실제 입금액을 확인해야 해요');
+    // server's one-tap blockers that the parse reasons above do not already say
+    var SAME = { name_missing: 'no_name', review_word: 'ignore_word' };
+    (Array.isArray(n.oneTapBlockedBy) ? n.oneTapBlockedBy : []).forEach(function (c) {
+      if (!PW.blockText[c] || (n.reasons || []).indexOf(SAME[c] || c) >= 0 || (c === 'amount_uncertain' && n.amountGuessed)) return;
+      list.push(PW.blockText[c]);
+    });
     if (!list.length && n.status === 'pending') list.push('확실한 후보를 하나로 좁히지 못했어요. 직접 골라 주세요');
     if (!list.length) return null;
     return h('div', { class: 'why' }, h('b', null, '자동 확인하지 않은 이유'), h('ul', null, list.map(function (t) { return h('li', null, t); })));
@@ -1778,6 +1822,7 @@
       }, function (e) { SC.fill(result, h('p', { style: 'color:var(--danger);font-weight:800' }, menuMsg(e))); });
     });
     var guide = h('div', { class: 'guide' },
+      h('p', { class: 'sheet-note warn', style: 'font-weight:800' }, '꼭 설정하세요: 은행 발신 번호에서 온 문자만 전달하도록 필터를 거세요. 다른 번호의 문자까지 전달하면 가짜 입금 문자가 그대로 들어와요.'),
       h('p', { class: 'muted' }, '은행 앱에서 입금 문자 알림(SMS)을 받도록 설정돼 있어야 해요. 자동 확인을 켜도 한 줄짜리 은행 문자는 자동으로 확인하지 않고 "입금" 탭에 남겨요.'),
       h('details', null, h('summary', null, '안드로이드: 문자 전달 앱 쓰기'),
         h('ol', null,
@@ -1833,6 +1878,7 @@
   SETTINGS_SECTIONS.push({ id: 'member', title: '회원 할인', build: buildMemberRule });
   SETTINGS_SECTIONS.push({ id: 'test', title: '테스트', build: SO.testSection });
   SETTINGS_SECTIONS.push({ id: 'cover', title: '입장료', build: SO.coverSection });
+  SETTINGS_SECTIONS.push({ id: 'couponlimit', title: '쿠폰 제한', build: SO.couponLimitSection });
   SETTINGS_SECTIONS.push({ id: 'notice', title: '손님 공지', build: SO.noticeSection });
   SETTINGS_SECTIONS.push({ id: 'waittimeout', title: '대기 호출 노쇼 시간', build: SO.waitTimeoutSection });
   SETTINGS_SECTIONS.push({ id: 'audit', title: '작업 기록', build: SO.auditSection });

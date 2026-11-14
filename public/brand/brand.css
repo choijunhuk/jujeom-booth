@@ -3,7 +3,8 @@
    - The bitmap font (Neo둥근모, token --y-font-pixel) is ONLY for 16px or exact multiples (16/32/48/64). Never below 16px,
      never at 17-31px, never synthetic-bold. Use the .y2k-pixel utility to opt in deliberately.
    - Everything else (captions, hints, badges, table headers, paths, small buttons, anything 17-31px) uses --y-font-ui (system stack).
-   - Digits that state money, percentages, counts or codes: pixel font only at 16/32/64, otherwise system font. Check 0/8, 1/7, 3/8, 5/6.
+   - DIGITS are never drawn by the bitmap font (its "4" reads as "9"). Big numbers (money, table no., scores, queue no., codes) use .y2k-num / --y-font-num
+     (bold tabular system face). Digits that sit inside pixel text (16px titles, buttons) get a bold local face from the "YDigits" @font-face below.
    - Do not rename or remove classes/tokens: other pages depend on them. Only adjust values or add.
    Load with: <link rel="stylesheet" href="__BASE__/static/brand/brand.css">
    Hard pixel shadows only (no blur). Body copy stays on the system font; bitmap font for headings, buttons, numbers. */
@@ -14,6 +15,13 @@
   /* Digits are excluded on purpose: this font's "4" has a closed top and reads as "9"
      (14,000 vs 19,000, table 4 vs 9). U+0030-0039 fall through to the system font. */
   unicode-range: U+0000-002F, U+003A-10FFFF;
+}
+/* Bold digits for pixel-styled text (titles, buttons, tabs): weak regular system digits would sit next to 2px pixel strokes. Local faces only (no download);
+   if none exists the digits fall through to the next family in the stack unchanged. */
+@font-face {
+  font-family: "YDigits";
+  src: local("Helvetica Neue Bold"), local("HelveticaNeue-Bold"), local("Arial Bold"), local("Arial-BoldMT"), local("Roboto Bold"), local("Roboto-Bold"), local("Segoe UI Bold"), local("SegoeUI-Bold"), local("Noto Sans KR Bold"), local("NotoSansKR-Bold");
+  unicode-range: U+002C, U+0030-0039;
 }
 :root {
   --y-bg: #008080;            /* desktop teal; alt silver-blue #c9d6ea */
@@ -33,8 +41,9 @@
   --y-term-bg: #0000a8;
   --y-term-fg: #ffffff;
   --y-term-hi: #ffff55;
-  --y-font-pixel: "NeoDgm", "Apple SD Gothic Neo", "Noto Sans KR", ui-monospace, Menlo, monospace;  /* 16 / 32 / 48 / 64px only */
+  --y-font-pixel: "YDigits", "NeoDgm", "Apple SD Gothic Neo", "Noto Sans KR", ui-monospace, Menlo, monospace;  /* 16 / 32 / 48 / 64px only */
   --y-font-ui: system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --y-font-num: system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;  /* numbers: weight 800, tabular figures */
   --y-font: var(--y-font-pixel);          /* legacy alias, keep */
   --y-font-body: var(--y-font-ui);        /* legacy alias, keep */
   /* Win98 bevels as box-shadow lists */
@@ -46,6 +55,7 @@
 .y2k-pixel, .y2k-title, .y2k-menubar, .y2k-term, .y2k-marquee, .y2k-tab, .y2k-chrome-text { font-family: var(--y-font-pixel); -webkit-font-smoothing: none; font-smooth: never; text-rendering: optimizeSpeed; font-synthesis: none; }
 .y2k-pixel { font-size: 16px; font-weight: 400; }
 .y2k-pixel--2x { font-size: 32px; } .y2k-pixel--3x { font-size: 48px; } .y2k-pixel--4x { font-size: 64px; }
+.y2k-num { font-family: var(--y-font-num); font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: 0; -webkit-font-smoothing: auto; font-smooth: auto; text-rendering: auto; text-shadow: none; font-synthesis: none; }
 .y2k-desktop { background: var(--y-bg); color: var(--y-ink); font-family: var(--y-font-body); }
 
 /* ---- window ---- */

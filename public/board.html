@@ -36,7 +36,7 @@
   .cta { padding: .32rem 1rem; background: var(--y-hot); color: #000; font: var(--px)/1.25 var(--y-font-pixel); box-shadow: 0 0 0 2px #000, 5px 5px 0 #000; -webkit-font-smoothing: none; font-synthesis: none; }
   .clock { text-align: right; line-height: 1.1; }
   .clock small { display: block; color: var(--dim); font-size: .9rem; font-weight: 800; }
-  .clock b { font: 400 var(--px)/1.1 var(--y-font-pixel); color: var(--y-cyan); font-variant-numeric: tabular-nums; -webkit-font-smoothing: none; font-synthesis: none; }
+  .clock b { font: 800 var(--px)/1.1 var(--y-font-num); color: var(--y-cyan); font-variant-numeric: tabular-nums; }
   .b-main { max-width: none; margin: 0; padding: 0; display: grid; grid-template-columns: .9fr 2.1fr; gap: 1.3rem; min-height: 0; }
   .y2k-title { font-size: 16px; padding-top: 8px; padding-bottom: 8px; }
   @media (min-width: 1600px) { .y2k-title { font-size: 32px; min-height: 52px; line-height: 36px; } }
@@ -47,12 +47,12 @@
   .panel .y2k-title { padding-left: 10px; padding-right: 10px; }
   .hero .y2k-title { background: #a0006a; }
   .lead { display: flex; align-items: center; gap: 1.2rem; }
-  .lead .no { font: 400 var(--px-hero)/1 var(--y-font-pixel); color: var(--y-term-hi); min-width: 2.2ch; text-align: center; padding: .5rem .6rem; background: #000; box-shadow: var(--y-bevel-in); -webkit-font-smoothing: none; font-synthesis: none; }
+  .lead .no { font: 800 var(--px-hero)/1 var(--y-font-num); font-variant-numeric: tabular-nums; color: var(--y-term-hi); min-width: 2.2ch; text-align: center; padding: .5rem .6rem; background: #000; box-shadow: var(--y-bevel-in); }
   .lead .who { display: grid; gap: .15rem; min-width: 0; }
   .lead .tb { font-size: 1.3rem; font-weight: 800; color: var(--dim); }
   .lead .nk { font-size: 2.3rem; font-weight: 900; line-height: 1.1; overflow-wrap: anywhere; }
   .lead .pt { font-size: 1.4rem; font-weight: 800; color: var(--dim); }
-  .lead .pt b { font: 400 var(--px)/1 var(--y-font-pixel); color: #fff; -webkit-font-smoothing: none; font-synthesis: none; margin-right: .3rem; }
+  .lead .pt b { font: 800 var(--px)/1 var(--y-font-num); font-variant-numeric: tabular-nums; color: #fff; margin-right: .3rem; }
   .lead.swap .no, .lead.swap .who { animation: pop .8s steps(6) 1; }
   @keyframes pop { from { opacity: 0; transform: scale(.8); } }
   .prize { word-break: keep-all; padding: .5rem .8rem; background: #000; color: var(--y-term-hi); font-size: 1.15rem; font-weight: 800; box-shadow: var(--y-bevel-in); }
@@ -60,7 +60,7 @@
   .nobody span { color: var(--y-term-hi); }
   .rklist { list-style: none; margin: 0; padding: 0; display: grid; gap: .25rem; }
   .rk { display: grid; grid-template-columns: calc(var(--px) * .9) calc(var(--px) * 1.7) minmax(0, 1fr) auto; align-items: center; gap: .6rem; padding: 0 .6rem; background: rgba(255, 255, 255, .06); min-height: 0; will-change: transform; }
-  .rk .pos, .rk .tb, .rk .sc { font: 400 var(--px)/1 var(--y-font-pixel); white-space: nowrap; -webkit-font-smoothing: none; font-synthesis: none; font-variant-numeric: tabular-nums; }
+  .rk .pos, .rk .tb, .rk .sc { font: 800 var(--px)/1 var(--y-font-num); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .rk .pos { color: var(--dim); }
   .game .rk .pos { color: #fff; }
   .rk .nk { word-break: keep-all; font-size: 1.6rem; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -80,7 +80,7 @@
   .games.grid4 .game .rk, .games.grid4 .game .rk[data-r="1"] { background: none; }
   .games.grid4 .game h2 .top10 { font-size: 32px; }
   .games.grid4 .game { padding: .4rem .7rem .5rem; gap: .3rem; }
-  @media (min-width: 1600px) { .games.grid4 .rk .pos, .games.grid4 .rk .tb, .games.grid4 .rk .sc { font: 400 32px/1 var(--y-font-pixel); -webkit-font-smoothing: none; font-synthesis: none; } .games.grid4 .rk { grid-template-columns: 28px 70px minmax(0, 1fr) auto; } .games.grid4 .rk .nk { font-size: 1.55rem; } }
+  @media (min-width: 1600px) { .games.grid4 .rk .pos, .games.grid4 .rk .tb, .games.grid4 .rk .sc { font: 800 32px/1 var(--y-font-num); font-variant-numeric: tabular-nums; } .games.grid4 .rk { grid-template-columns: 28px 70px minmax(0, 1fr) auto; } .games.grid4 .rk .nk { font-size: 1.55rem; } }
   .game { background: var(--y-term-bg); color: #fff; border: 3px double #fff; padding: .6rem .8rem .7rem; display: flex; flex-direction: column; gap: .4rem; min-height: 0; box-shadow: 6px 6px 0 #000; overflow: hidden; }
   .game h2 { margin: 0; display: flex; align-items: baseline; justify-content: space-between; gap: .6rem; }
   .game h2 .top10 { font: 400 var(--px)/1.1 var(--y-font-pixel); color: var(--y-term-hi); -webkit-font-smoothing: none; font-synthesis: none; }

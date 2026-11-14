@@ -80,6 +80,10 @@
     bad_table: '테이블 번호가 올바르지 않아요.',
     no_intent: '이미 처리됐거나 만료된 "낼게요"예요. 화면을 새로 불러올게요.',
     too_many_shares: '남은 인원보다 많은 "낼게요"는 만들 수 없어요.',
+    coupon_limit: '이 테이블은 할인 쿠폰을 더 쓸 수 없어요.',
+    exceeds_balance: '남은 금액보다 많이 받을 수는 없어요. 화면을 새로 불러올게요.',
+    bad_coupon_limit: '쿠폰 제한은 0 또는 1~50 사이 정수예요. (0 = 제한 없음)',
+    bad_per_seat: '쿠폰 한도는 0~20장 사이 정수예요. (0 = 쿠폰 없음)',
     too_many_intents: '"낼게요" 요청이 너무 많아요.',
     bad_enabled: '켜기/끄기 값이 올바르지 않아요.',
     bad_mode: '방식을 1인당 또는 테이블당으로 골라 주세요.',
@@ -99,6 +103,8 @@
   };
   SC.errText = function (e) {
     if (e && e.code === 'too_many_shares' && e.data && e.data.left != null) return '남은 몫은 ' + e.data.left + '명분이에요. 화면을 새로 불러올게요.';
+    if (e && e.code === 'exceeds_balance' && e.data && e.data.balance != null) return '남은 금액은 ' + won(e.data.balance) + '이에요. 그보다 많이 받을 수 없어요. 화면을 새로 불러올게요.';
+    if (e && e.code === 'coupon_limit') return '옮기려는 테이블은 이미 할인 쿠폰을 ' + (e.data && e.data.used != null ? e.data.used : '') + '장 썼어요' + (e.data && e.data.max != null ? ' (최대 ' + e.data.max + '장)' : '') + '.';
     if (e && e.code === 'intent_stale') return '이 요청의 인원이 남은 몫보다 많아요.';
     if (e && e.code === 'cannot_undo') {
       var u = e.data && e.data.used;
@@ -132,7 +138,7 @@
       throw e;
     });
   };
-  function toastErr(e) { SC.toast(SC.errText(e), 'error'); if (e.code === 'stale' || e.code === 'no_order' || e.code === 'unknown_item' || e.code === 'no_wait' || e.code === 'no_coupon' || e.code === 'no_refund' || e.code === 'not_noshow') X.refresh(); }
+  function toastErr(e) { SC.toast(SC.errText(e), 'error'); if (e.code === 'stale' || e.code === 'no_order' || e.code === 'unknown_item' || e.code === 'no_wait' || e.code === 'no_coupon' || e.code === 'no_refund' || e.code === 'not_noshow' || e.code === 'exceeds_balance') X.refresh(); }
   SO.toastErr = toastErr;
   function menuItems(includeHidden) { return ((X.S.data.menu && X.S.data.menu.items) || []).filter(function (i) { return includeHidden || !i.hidden; }); }
   function catName(i) { return i.cat || ''; }
@@ -481,7 +487,9 @@
   function coverLabel() { return coverCfg().label || '입장료'; }
   // Korean particle by final consonant: jo('입장료','은','는')
   function jo(w, withFinal, without) { var c = String(w).charCodeAt(String(w).length - 1); return w + ((c >= 0xAC00 && c <= 0xD7A3) ? ((c - 0xAC00) % 28 === 0 ? without : withFinal) : without); }
-  function tableOf(n) { return ((X.S.data && X.S.data.tables) || []).filter(function (t) { return t.number === n; })[0] || { number: n, status: 'empty' }; }
+  // table 0 (the guest test table) is not in state.tables: build the same shape from state.testTable
+  function testAsTable(tt) { return Object.assign({}, tt, { number: 0, status: tt.people != null || tt.orderCount ? 'occupied' : 'empty', cover: tt.coverOrderId != null ? { orderId: tt.coverOrderId, status: 'served', waived: false } : null }); }
+  function tableOf(n) { if (n === 0 && X.S.data && X.S.data.testTable) return testAsTable(X.S.data.testTable); return ((X.S.data && X.S.data.tables) || []).filter(function (t) { return t.number === n; })[0] || { number: n, status: 'empty' }; }
   function coverOrderOf(n) { var t = tableOf(n); return t.cover && t.cover.orderId != null ? fresh(t.cover.orderId) : null; }
   function anyCover() { return ((X.S.data && X.S.data.tables) || []).some(function (t) { return !!t.cover; }); }
   SO.coverUIOn = function () { return !!(X.S.data && (coverCfg().enabled || anyCover())); };
@@ -508,16 +516,23 @@
     var closed = d && d.orderingOpen === false;
     var body = [h('div', { class: 'card tsum' },
       h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('span', { class: 'muted' }, '인원'), h('span', { class: 'big' }, partyOf(t) + (t.minutesSeated != null ? ' · ' + t.minutesSeated + '분째' : '')), partyWho(t) ? h('span', { class: 'muted' }, partyWho(t)) : null),
-        h('button', { class: 'btn', type: 'button', onclick: function () { partyView(s, n); } }, '인원 바꾸기')))];
+        h('div', { class: 'btns' },
+          t.people != null && typeof t.headcountTrusted === 'boolean' ? h('span', { class: 'tag ' + (t.headcountTrusted ? 'ok' : 'warn') }, t.headcountTrusted ? '확인됨' : '손님 입력 (미확인)') : null,
+          t.people != null && t.headcountTrusted === false ? X.abtn('btn btn-sm', '인원 확인', function () {   // re-posts the same number as staff: it then counts for the coupon limit
+            var b = { people: t.people }; if (n !== 0 || t.partyUpdatedAt != null) b.expectedUpdatedAt = t.partyUpdatedAt || 0;
+            return X.api('/api/staff/tables/' + n + '/party', b).then(function () { SC.toast(n + '번 인원 ' + t.people + '명을 확인했어요', 'ok'); return X.refresh(); }, toastErr);
+          }) : null,
+          h('button', { class: 'btn', type: 'button', onclick: function () { partyView(s, n); } }, '인원 바꾸기'))))];
     if (SO.coverUIOn()) body.push(coverSection(s, n, t, co));
-    var sig0 = X.sig([t, co, d.cover, (d.coverIntents || []).filter(function (i) { return i.table === n; })]);
+    body.push(couponLimitRow(s, n, t));
+    var sig0 = X.sig([t, co, d.cover, d.couponLimits, t.couponLimitOverride, t.couponLimits, t.headcountTrusted, (d.coverIntents || []).filter(function (i) { return i.table === n; })]);
     body.push(h('div', { class: 'bigacts' },
       act('직접 주문 넣기', closed ? '주문 마감 중에도 직원은 넣을 수 있어요' : '손님 대신 주문을 입력해요', function () { directView(s, n); }),
       act('쿠폰 직접 발급', '할인 쿠폰 · 상품 쿠폰을 이 자리에 바로 줘요', function () { couponView(s, n); }),
       act('손님 화면 열기', '새 탭으로 이 테이블의 손님 화면을 열어요', function () { openGuestScreen(n); })));
     s.nextOnState = function (nd) {
       var t2 = tableOf(n), co2 = coverOrderOf(n);
-      if (X.sig([t2, co2, nd.cover, (nd.coverIntents || []).filter(function (i) { return i.table === n; })]) !== sig0) tableHome(s, n);
+      if (X.sig([t2, co2, nd.cover, nd.couponLimits, t2.couponLimitOverride, (nd.coverIntents || []).filter(function (i) { return i.table === n; })]) !== sig0) tableHome(s, n);
     };
     s.show(view(s, n + '번 테이블 더보기', null, null, body));
   }
@@ -529,7 +544,7 @@
     var t = tableOf(n), co = coverOrderOf(n);
     var stamp = t.partyUpdatedAt || 0; // captured when the view opens
     var people = t.people != null ? t.people : 2, info = h('div');
-    function body(extra) { return Object.assign({ people: people, expectedUpdatedAt: stamp }, extra || {}); }
+    function body(extra) { return Object.assign(n === 0 && t.partyUpdatedAt == null ? { people: people } : { people: people, expectedUpdatedAt: stamp }, extra || {}); }   // test table: no stamp in state, so no stale check
     var dry = makeDry(function () { return X.api('/api/staff/tables/' + n + '/party', body({ dryRun: true })).then(function (r) { return { order: r.coverOrder || null }; }); }, draw);
     var go = X.abtn('btn btn-primary btn-block', '인원 저장', function () {
       var seen = dry.last && dry.last.order;
@@ -554,6 +569,30 @@
     s.show(view(s, '인원 바꾸기', n + '번 테이블 · 지금 ' + partyOf(t) + (partyWho(t) ? ' (' + partyWho(t) + ')' : ''), function () { tableHome(s, n); }, [h('div', { class: 'lab' }, '인원', st), info], go));
     s.onClose = dry.cancel;
     dry.schedule();
+  }
+
+  // ---- 쿠폰 한도 row of the table sheet: limit in force for this seating, per-seating override (cleared when the guests leave)
+  // trust and limits come from the server only (tables[] / testTable: headcountTrusted, couponLimits [{ rewardId, limit, limitSource }]); never computed here
+  var SRC_TXT = { people: ' (인원수 기준)', fixed: ' (고정)', override: ' (직접 지정)' };
+  function limitsInForce(t) {
+    if (!Array.isArray(t.couponLimits)) return null;
+    var rw = (X.S.data && X.S.data.rewards) || [], name = {};
+    rw.forEach(function (r) { name[r.id] = r.label; });
+    return t.couponLimits.map(function (l) { return (name[l.rewardId] || '보상') + ' ' + (l.limit === 0 ? '쿠폰 없음' : l.limit + '장') + (SRC_TXT[l.limitSource] || ''); });
+  }
+  function couponLimitRow(s, n, t) {
+    var ov = t.couponLimitOverride, box = h('div', { class: 'card' }), val = ov != null ? ov : 1;   // override 0 = no coupons for this seating
+    var lim = limitsInForce(t), cl = (X.S.data && X.S.data.couponLimits) || {};
+    box.appendChild(h('h3', { class: 'sec-title', style: 'margin:0' }, '쿠폰 한도'));
+    box.appendChild(lim ? h('p', null, h('b', null, lim.length ? lim.join(' · ') : '보상이 없어요')) : h('p', { class: 'muted' }, '한도 정보를 불러오지 못했어요'));
+    if (t.couponsIssued != null) box.appendChild(h('p', { class: 'muted num' }, '이번 손님이 받은 쿠폰 ' + t.couponsIssued + '장' + (cl.maxPerSeat ? ' / 총 ' + cl.maxPerSeat + '장까지' : '') + ' · 사용한 할인 쿠폰 ' + (t.discountUses || 0) + '장' + (cl.maxDiscountUsesPerSeat ? ' / ' + cl.maxDiscountUsesPerSeat + '장까지' : '')));
+    var st = stepper(function () { return val; }, function (v) { val = v; }, 0, 20, '쿠폰 한도');
+    box.appendChild(h('div', { class: 'stockctl' }, st, X.abtn('btn btn-sm', '이 자리만 적용', function () { return setOverride(val); }), ov != null ? X.abtn('btn btn-sm', '원래대로', function () { return setOverride(null); }) : null));
+    box.appendChild(h('p', { class: 'muted' }, '0장으로 정하면 이 손님은 쿠폰을 못 받아요. 이 손님이 나가면 원래대로 돌아가요.'));
+    function setOverride(v) {
+      return X.api('/api/staff/tables/' + n + '/coupon-limit', { perSeat: v }).then(function () { SC.toast(v == null ? '쿠폰 한도를 원래대로 되돌렸어요' : n + '번 테이블 쿠폰 한도를 ' + v + '장으로 정했어요', 'ok'); return X.refresh(); }, toastErr);
+    }
+    return box;
   }
 
   // ---- 입장료 section of the table sheet
@@ -586,14 +625,17 @@
     function qb(label, method, shares) {
       var b = X.abtn('btn', label, function () {
         var body = { paid: true, method: method };
-        if (shares) body.shares = shares;
-        return SO.omut(co, 'paid', body).then(function (r) { SC.toast(n + '번 · ' + METHOD[method] + ' ' + (shares ? shares + '명분 ' : '') + '받았어요' + (r.order && r.order.balanceDue > 0 ? ' (남은 ' + won(r.order.balanceDue) + ')' : ''), 'ok'); return X.refresh(); }, function (e) { if (e.code === 'too_many_shares') X.refresh(); throw e; });
+        if (shares === 'rest') body.payBalance = true; else if (shares) body.shares = shares;
+        return SO.omut(co, 'paid', body).then(function (r) { SC.toast(n + '번 · ' + METHOD[method] + ' ' + (shares > 0 ? shares + '명분 ' : shares === 'rest' ? '남은 ' + won(bal) + ' ' : '') + '받았어요' + (r.order && r.order.balanceDue > 0 ? ' (남은 ' + won(r.order.balanceDue) + ')' : ''), 'ok'); return X.refresh(); }, function (e) { if (e.code === 'too_many_shares' || e.code === 'exceeds_balance') X.refresh(); throw e; });
       });
       b.disabled = bal <= 0; quick.appendChild(b);
     }
     if (co.shares && left > 0) {
-      qb('1명분 현금 · ' + won(unit), 'cash', 1); qb('1명분 이체 · ' + won(unit), 'transfer', 1);
-      qb('남은 전부 현금 · ' + left + '명분', 'cash', left); qb('남은 전부 이체 · ' + left + '명분', 'transfer', left);
+      // never offer a share button that would book more than the balance (held money is not always a whole number of shares)
+      var fit = Math.min(left, unit > 0 ? Math.floor(bal / unit) : 0);
+      if (fit >= 1) { qb('1명분 현금 · ' + won(unit), 'cash', 1); qb('1명분 이체 · ' + won(unit), 'transfer', 1); }
+      if (fit >= 2 && fit === left) { qb('남은 전부 현금 · ' + left + '명분', 'cash', left); qb('남은 전부 이체 · ' + left + '명분', 'transfer', left); }
+      if (unit > 0 && bal % unit !== 0) { qb('남은 ' + won(bal) + ' 받기 (현금)', 'cash', 'rest'); qb('남은 ' + won(bal) + ' 받기 (이체)', 'transfer', 'rest'); }
     } else {
       qb('전액 현금 · ' + won(bal), 'cash', 0); qb('전액 이체 · ' + won(bal), 'transfer', 0);
     }
@@ -672,7 +714,7 @@
 
   // ---- 직접 입력: shares or money, method, payer (server dry run)
   function coverPayView(s, n, co) {
-    var perPerson = !!co.shares && co.shares.left > 0, byShares = perPerson, shares = perPerson ? co.shares.left : 0, method = 'cash', amount = String(Math.max(0, co.balanceDue || 0));
+    var maxSh = co.shares && co.unitPrice > 0 ? Math.min(co.shares.left, Math.floor((co.balanceDue || 0) / co.unitPrice)) : 0, perPerson = maxSh > 0, byShares = perPerson, shares = perPerson ? maxSh : 0, method = 'cash', amount = String(Math.max(0, co.balanceDue || 0));
     var payerIn = h('input', { class: 'field', type: 'text', maxlength: '10', placeholder: '이름 (선택, 10자)', 'aria-label': '낸 사람 이름', oninput: function () { dry.schedule(); } });
     var amountIn = h('input', { class: 'field amt', type: 'number', inputmode: 'numeric', min: '0', max: '10000000', value: amount, 'aria-label': '받은 금액(원)', oninput: function () { amount = amountIn.value; dry.schedule(); } });
     var preview = h('div'), segBtns = {}, modeBtns = {};
@@ -686,13 +728,13 @@
     var dry = makeDry(function () { return SO.omut(co, 'paid', body0({ dryRun: true })); }, draw);
     var go = X.abtn('btn btn-primary btn-block', '입금 받기', function () {
       var seen = dry.last && dry.last.order;
-      return SO.omut(co, 'paid', body0()).then(function (r) { return finishMoney(s, '입장료 받기', r, seen, n + '번 ' + coverLabel() + ' ' + (byShares ? shares + '명분 ' : '') + METHOD[method] + ' 받았어요'); }, function (e) { if (e.code === 'too_many_shares') { X.refresh().then(function () { tableHome(s, n); }); } throw e; });
+      return SO.omut(co, 'paid', body0()).then(function (r) { return finishMoney(s, '입장료 받기', r, seen, n + '번 ' + coverLabel() + ' ' + (byShares ? shares + '명분 ' : '') + METHOD[method] + ' 받았어요'); }, function (e) { if (e.code === 'too_many_shares' || e.code === 'exceeds_balance') { X.refresh().then(function () { tableHome(s, n); }); } throw e; });
     });
     var seg = h('div', { class: 'al-seg', role: 'group', 'aria-label': '받은 방법' }, ['cash', 'transfer', 'other'].map(function (m) { var b = h('button', { class: 'btn', type: 'button', 'aria-pressed': String(m === method), onclick: function () { method = m; dry.schedule(); syncSeg(); } }, METHOD[m]); segBtns[m] = b; return b; }));
     function syncSeg() { Object.keys(segBtns).forEach(function (m) { segBtns[m].setAttribute('aria-pressed', String(m === method)); }); Object.keys(modeBtns).forEach(function (m) { modeBtns[m].setAttribute('aria-pressed', String((m === 'shares') === byShares)); }); }
-    var st = perPerson ? stepper(function () { return shares; }, function (v) { shares = v; dry.schedule(); }, 1, co.shares.left, '명분') : null;
+    var st = perPerson ? stepper(function () { return shares; }, function (v) { shares = v; dry.schedule(); }, 1, maxSh, '명분') : null;
     var modeSeg = perPerson ? h('div', { class: 'al-seg' }, [['shares', '몇 명분'], ['money', '금액으로']].map(function (m) { var b = h('button', { class: 'btn', type: 'button', onclick: function () { byShares = m[0] === 'shares'; stWrap.hidden = !byShares; amtWrap.hidden = byShares; syncSeg(); dry.schedule(); } }, m[1]); modeBtns[m[0]] = b; return b; })) : null;
-    var stWrap = h('div', { class: 'lab' }, '몇 명분 (남은 ' + (co.shares ? co.shares.left : 0) + '명분까지)', st || ''), amtWrap = h('label', { class: 'lab' }, '받은 금액 (원)', amountIn);
+    var stWrap = h('div', { class: 'lab' }, '몇 명분 (' + maxSh + '명분까지)', st || ''), amtWrap = h('label', { class: 'lab' }, '받은 금액 (원)', amountIn);
     stWrap.hidden = !byShares; amtWrap.hidden = byShares;
     function draw() {
       var res = dry.last;
@@ -1136,6 +1178,35 @@
       cur = d.notice;
       state.textContent = cur ? '지금 올라가 있는 공지 (' + (cur.level === 'warn' ? '주의' : '안내') + '): ' + cur.text : '지금 올라가 있는 공지가 없어요.';
       if (!dirty && document.activeElement !== input) { input.value = cur ? cur.text : ''; level = cur ? cur.level : 'info'; mark(); count(); }
+    } };
+  };
+  // ---- settings: 쿠폰 제한 (addendum K)
+  SO.couponLimitSection = function () {
+    var dirty = false, cur = { maxPerSeat: 0, maxDiscountUsesPerSeat: 0 };
+    function inp(label) { return h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '0', max: '50', step: '1', 'aria-label': label, oninput: function () { dirty = true; } }); }
+    var totalIn = inp('한 테이블이 받을 수 있는 쿠폰 총 장수'), useIn = inp('한 테이블이 쓸 수 있는 할인 쿠폰 장수'), err = h('div');
+    var save = X.abtn('btn btn-primary', '쿠폰 제한 저장', function () {
+      var a = Number(totalIn.value), b = Number(useIn.value);
+      if (!(Number.isInteger(a) && a >= 0 && a <= 50 && Number.isInteger(b) && b >= 0 && b <= 50)) { SC.fill(err, note('bad', '0 또는 1~50 사이 정수로 입력해 주세요. (0 = 제한 없음)')); return Promise.resolve(); }
+      SC.fill(err);
+      var diff = {};
+      if (a !== cur.maxPerSeat) diff.maxPerSeat = a;
+      if (b !== cur.maxDiscountUsesPerSeat) diff.maxDiscountUsesPerSeat = b;
+      if (!Object.keys(diff).length) { SC.toast('바뀐 내용이 없어요.'); return Promise.resolve(); }
+      return X.api('/api/staff/coupon-limits', diff).then(function () { dirty = false; SC.toast('쿠폰 제한을 저장했어요', 'ok'); return X.refresh(); }, function (e) { SC.fill(err, note('bad', SC.errText(e))); });
+    });
+    var box = h('div', { class: 'card' },
+      h('label', { class: 'lab' }, '한 테이블이 받을 수 있는 쿠폰 총 장수 (0 = 제한 없음)', totalIn),
+      h('p', { class: 'muted' }, '게임으로 받는 보상 쿠폰과 정시 시상을 합친 장수예요. 직원이 직접 발급한 쿠폰은 세지 않아요. 보상마다 정한 장수와 별개로 적용돼요.'),
+      h('label', { class: 'lab' }, '한 테이블이 쓸 수 있는 할인 쿠폰 장수 (0 = 제한 없음)', useIn),
+      h('p', { class: 'muted' }, '주문에 할인 쿠폰을 쓴 횟수예요. 직원이 직접 발급한 쿠폰도 세요. 주문을 취소하면 다시 쓸 수 있어요.'),
+      note('info', '직원이 직접 발급한 쿠폰은 "받을 수 있는 쿠폰 총 장수"에는 세지 않지만, "쓸 수 있는 할인 쿠폰 장수"에는 세요.'),
+      note('info', '폰 단위 제한은 브라우저 기준이라 완벽하지 않아요. 테이블당 장수와 전체 수량이 실제 상한이에요.'),
+      note('info', '게임 점수는 손님 폰에서 계산돼요. 실제 상한은 테이블당 장수와 준비 수량이에요. 폰당 제한은 보조 장치예요.'),
+      err, save);
+    return { el: box, update: function (d) {
+      cur = Object.assign({ maxPerSeat: 0, maxDiscountUsesPerSeat: 0 }, d.couponLimits || {});
+      if (!dirty && !box.contains(document.activeElement)) { totalIn.value = String(cur.maxPerSeat); useIn.value = String(cur.maxDiscountUsesPerSeat); }
     } };
   };
   SO.waitTimeoutSection = function () {

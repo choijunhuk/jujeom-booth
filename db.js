@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS table_clears(id INTEGER PRIMARY KEY AUTOINCREMENT, ta
 CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, summary TEXT NOT NULL, summary_ko TEXT);
 CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, amount INTEGER NOT NULL, method TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS payments_o ON payments(order_id);
+CREATE TABLE IF NOT EXISTS seat_coupon_limit(table_id INTEGER NOT NULL, seat INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(table_id, seat)); -- per-seating staff override of every reward's per-seat limit
 CREATE TABLE IF NOT EXISTS seat_info(table_id INTEGER NOT NULL, seat INTEGER NOT NULL, people INTEGER, seated_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(table_id, seat));
 CREATE TABLE IF NOT EXISTS cover_intents(id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, device TEXT NOT NULL, payer TEXT NOT NULL, shares INTEGER NOT NULL, amount INTEGER NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open', payment_id INTEGER);
 CREATE INDEX IF NOT EXISTS cover_intents_ts ON cover_intents(table_id, seat);
@@ -156,11 +157,19 @@ function parseDeposit(rawText) {
   else if (/\p{Nd}/u.test(depositor)) reasons.push('name_has_digit');
   else if (!/^[가-힣A-Za-z]{2,10}$/.test(depositor)) reasons.push('name_shape');
   if (names.length > 1) reasons.push('several_names'); // template words next to the name: do not guess
-  // the name and the amount must be on different lines or be separated by the literal word 입금; otherwise the sender's text touches the amount
-  if (!reasons.length && nums.length === 1 && names.length === 1) {
-    const a = nums[0]; const nm = names[0];
+  // the name and the amount must be on different lines or be separated by the literal word 입금; otherwise the sender's text touches the amount.
+  // Checked for EVERY name candidate and independent of the name reasons: a missing / odd name must not hide an amount glued to sender text.
+  if (nums.length === 1 && names.some((nm) => {
+    const a = nums[0];
     const between = nm.start < a.start ? w.slice(nm.end, a.start) : w.slice(a.end, nm.start);
-    if (!between.includes('\n') && !between.includes('입금')) reasons.push('amount_adjacent_to_name');
+    return !between.includes('\n') && !between.includes('입금');
+  })) reasons.push('amount_adjacent_to_name');
+  // the number itself must not touch sender-typed text either (a name-less notice): before it only whitespace or 입금, after it only whitespace or closing punctuation;
+  // and a number that STARTS its own line (no `입금` label before it on that line) is the layout where a sender text of digits would be glued to the amount
+  if (nums.length === 1 && !reasons.includes('amount_adjacent_to_name')) {
+    const a = nums[0]; const before = w.slice(0, a.start); const prev = before.slice(-1); const next = w.slice(a.end, a.end + 1);
+    const glued = (prev && !/\s/.test(prev) && !before.endsWith('입금')) || (next && !/[\s.,:;)\]]/.test(next));
+    if (glued || /^[ \t]*$/.test(before.slice(before.lastIndexOf('\n') + 1))) reasons.push('amount_adjacent_to_name');
   }
   if (String(rawText).length > 300) reasons.push('text_too_long');
   const review = IGNORE_WORD_RE.test(text) || String(rawText).length > 300; // contains 입금 AND a reversal / correction / withdrawal word (or is oddly long): manual review, never auto
@@ -190,7 +199,9 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   for (const [col, ddl] of [['depositor', 'TEXT'], ['paid_by', 'TEXT'], ['notice_id', 'INTEGER']]) {
     if (!colsOf('orders').includes(col)) db.exec(`ALTER TABLE orders ADD COLUMN ${col} ${ddl}`);
   }
-  if (!colsOf('orders').includes('paid_amount')) {
+  // every multi-statement migration step runs in ONE transaction (DDL is transactional in SQLite): a kill in the middle leaves the old schema, and the next boot redoes the whole step
+  const migrate = (fn) => { db.exec('BEGIN'); try { fn(); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; } };
+  if (!colsOf('orders').includes('paid_amount')) migrate(() => {
     for (const [col, ddl] of [['created_by', 'TEXT'], ['member_rule', 'TEXT'], ['paid_amount', 'INTEGER NOT NULL DEFAULT 0'], ['paid_method', 'TEXT'], ['paid_at', 'INTEGER'],
       ['written_off', 'INTEGER NOT NULL DEFAULT 0'], ['written_off_at', 'INTEGER'], ['written_off_clear', 'INTEGER']]) {
       if (!colsOf('orders').includes(col)) db.exec(`ALTER TABLE orders ADD COLUMN ${col} ${ddl}`);
@@ -199,7 +210,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     db.exec("UPDATE orders SET paid_amount=total, paid_method=CASE WHEN paid_by='auto' THEN 'transfer' ELSE 'other' END, paid_at=updated_at WHERE paid=1 AND total>0");
     // orders from before member_rule existed keep their discount when edited: a fixed rule equal to what they got
     db.exec("UPDATE orders SET member_rule=json_object('mode','fixed','pct',0,'amount',member_discount,'maxDiscount',0,'minOrder',0,'legacy',1) WHERE member_discount>0 AND member_rule IS NULL");
-  }
+  });
   if (!colsOf('audit_log').includes('summary_ko')) db.exec('ALTER TABLE audit_log ADD COLUMN summary_ko TEXT');
   for (const [col, ddl] of [['set_by', 'TEXT'], ['set_at', 'INTEGER']]) if (!colsOf('seat_info').includes(col)) db.exec(`ALTER TABLE seat_info ADD COLUMN ${col} ${ddl}`);
   if (!colsOf('audit_log').includes('test')) db.exec('ALTER TABLE audit_log ADD COLUMN test INTEGER NOT NULL DEFAULT 0');
@@ -207,6 +218,12 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     ['payments', 'notice_id', 'INTEGER'], ['payments', 'voided_at', 'INTEGER'], ['payments', 'void_reason', 'TEXT'], ['waitlist', 'seated_table', 'INTEGER']]) {
     if (!colsOf(tbl).includes(col)) db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${ddl}`);
   }
+  // the column DEFAULTS carry the data: rewards that existed before the upgrade are 'fixed' 1 per seating the instant per_seat_mode exists (no follow-up UPDATE to lose); rewards created later write 'people' explicitly (createReward / seeding)
+  for (const [tbl, col, ddl] of [['rewards', 'per_seat_mode', "TEXT NOT NULL DEFAULT 'fixed'"], ['rewards', 'per_seat_count', 'INTEGER NOT NULL DEFAULT 1'], ['rewards', 'per_seat_cap', 'INTEGER NOT NULL DEFAULT 4'],
+    ['rewards', 'per_device', 'INTEGER NOT NULL DEFAULT 1'], ['coupons', 'device', 'TEXT'], ['coupons', 'limit_n', 'INTEGER'], ['coupons', 'limit_source', 'TEXT']]) {
+    if (!colsOf(tbl).includes(col)) db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${ddl}`); // existing coupons: device unknown (never blocks anyone)
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS coupons_dev ON coupons(device, reward_id)');
   if (!colsOf('order_items').includes('service')) db.exec('ALTER TABLE order_items ADD COLUMN service INTEGER NOT NULL DEFAULT 0');
   if (!colsOf('menu_items').includes('stock_left')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_left INTEGER');
   if (!colsOf('menu_items').includes('stock_auto')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_auto INTEGER NOT NULL DEFAULT 0');
@@ -318,15 +335,16 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const couponOut = (c) => ({
     code: c.code, rewardId: c.reward_id, source: c.source, type: c.type, amount: c.amount, item: c.item, label: c.label,
     status: c.status, table: c.table_id, seat: c.seat, orderId: c.order_id, usedAt: c.used_at, createdAt: c.created_at,
+    limit: c.limit_n ?? null, limitSource: c.limit_source ?? null, // the per-seat limit that applied when it was issued (null: manual / hourly / older coupons)
   });
 
-  function insertCoupon({ rewardId, source, type, amount = null, label, item = null, tableId, seat }) {
+  function insertCoupon({ rewardId, source, type, amount = null, label, item = null, tableId, seat, device = null, limitN = null, limitSource = null }) {
     for (let tries = 0; tries < 50; tries++) {
       let code = '';
       for (let i = 0; i < 6; i++) code += CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)];
       try {
-        run('INSERT INTO coupons(code,reward_id,source,type,amount,label,item,table_id,seat,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-          code, rewardId, source, type, amount, label, item, tableId, seat, now());
+        run('INSERT INTO coupons(code,reward_id,source,type,amount,label,item,table_id,seat,created_at,device,limit_n,limit_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          code, rewardId, source, type, amount, label, item, tableId, seat, now(), device, limitN, limitSource);
         return couponOut(get('SELECT * FROM coupons WHERE code=?', code));
       } catch (e) { if (!/constraint/i.test(e.message)) throw e; }
     }
@@ -774,6 +792,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       discount = Math.min(coupon.amount, subtotal - memberDiscount);
       if (discount <= 0) { coupon = null; discount = 0; couponIgnored = true; } // nothing to discount: do not burn the coupon
     }
+    if (coupon && tableId !== 0) {
+      const cl = couponLimits();
+      if (cl.maxDiscountUsesPerSeat > 0 && discountUsesOf(tableId, t.seat) >= cl.maxDiscountUsesPerSeat) fail(409, 'coupon_limit', `이 테이블에서는 할인 쿠폰을 ${cl.maxDiscountUsesPerSeat}번까지만 쓸 수 있어요.`, { max: cl.maxDiscountUsesPerSeat, used: discountUsesOf(tableId, t.seat) });
+    }
     const total = subtotal - memberDiscount - discount;
     if (!staff && body.expectedTotal != null && body.expectedTotal !== total) {
       fail(409, 'price_changed', '가격이 바뀌었습니다. 금액을 다시 확인해 주세요.', {
@@ -824,6 +846,16 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       return orderById(id);
     });
   }
+  // staff hand-confirmed an order (no notice attached): every OPEN notice of that amount (the payment or the order's earlier balance) in the matching window may be that very transfer.
+  // The stored reason is sticky (never removed, not even when the payment is voided): such a notice is never one-tap, staff can still assign it explicitly.
+  function markHandledNotices(amounts) {
+    for (const a of [...new Set(amounts)].filter((x) => x > 0)) {
+      for (const n of all("SELECT id, reasons FROM deposit_notices WHERE status IN ('pending','review','unparsed') AND amount=? AND received_at>?", a, now() - DEPOSIT_WINDOW_MS)) {
+        const rs = parseReasons(n.reasons);
+        if (!rs.includes('maybe_already_handled')) run('UPDATE deposit_notices SET reasons=? WHERE id=?', JSON.stringify([...rs, 'maybe_already_handled']), n.id);
+      }
+    }
+  }
   const PAY_METHODS = ['transfer', 'cash', 'other'];
   // paid:true adds a payment (amount defaults to the remaining balance); paid:false undoes all payments of the order
   function setPaid(id, paid, opts = {}) {
@@ -831,6 +863,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const method = opts.method ?? 'transfer';
     if (!PAY_METHODS.includes(method)) fail(400, 'bad_method', "method는 'transfer', 'cash', 'other' 중 하나여야 합니다.");
     if (opts.amount != null && (!Number.isInteger(opts.amount) || opts.amount < 0 || opts.amount > 10000000)) fail(400, 'bad_amount', 'amount는 0~10,000,000 사이 정수여야 합니다.');
+    if (opts.payBalance != null && opts.payBalance !== true) fail(400, 'bad_pay_balance', 'payBalance는 true만 쓸 수 있습니다.');
+    if (opts.payBalance === true && (!paid || opts.amount != null || opts.shares != null)) fail(400, 'bad_pay_balance', 'payBalance는 입금 확인(paid: true)에만 쓰며 amount·shares와 함께 쓸 수 없습니다.');
     return tx(() => {
       const o = freshOrder(id, opts.expectedUpdatedAt);
       if (o.status === 'cancelled') fail(409, 'order_cancelled', '취소된 주문입니다.');
@@ -847,12 +881,19 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
           const leftNow = Math.max(0, cu.qty - paidShares(o.id));
           if (opts.shares > leftNow) fail(400, 'too_many_shares', `남은 인원(${leftNow}명)보다 많이 받을 수 없습니다.`, { left: leftNow });
           const want = opts.shares * cu.unit_price;
+          if (want > balanceOf(o)) fail(400, 'exceeds_balance', `남은 금액(${W(balanceOf(o))})보다 많이 받을 수 없습니다. 금액으로 받거나 남은 금액만 받으세요.`, { balance: balanceOf(o), unitPrice: cu.unit_price, left: leftNow });
           if (opts.amount != null && opts.amount !== want) fail(400, 'bad_shares', `금액은 인원 수 x 1인 요금(${W(want)})과 같아야 합니다.`);
           amount = want; shares = opts.shares;
         }
+        if (opts.payBalance === true && o.kind === 'cover' && o.cover_mode === 'per_person') { // exactly the balance; a whole number of shares is booked as shares, a remainder as a plain money payment (never a fraction of a share)
+          const unit = coverUnit(o.id).unit_price;
+          if (unit > 0 && amount > 0 && amount % unit === 0) shares = amount / unit;
+        }
         const payer = opts.payer == null || opts.payer === '' ? null : cleanPayer(opts.payer);
         if (amount === 0 && o.total > 0) fail(400, 'bad_amount', '입금액은 0보다 커야 합니다.');
+        const balBefore = balanceOf(o);
         addPayment(o, amount, method, 'staff', ts, null, { shares, payer });
+        if (o.table_id > 0) markHandledNotices([amount, balBefore]);
         audit('order_paid', `order #${id}`, `${method} ${amount} won (total ${o.total})${shares ? `, ${shares} shares` : ''}`, `주문 #${id} 입금 확인 · ${MKO[method]} ${W(amount)}${shares ? ` · ${shares}명분` : ''}${payer ? ` · ${payer}` : ''} · 잔액 ${W(balanceOf(get('SELECT * FROM orders WHERE id=?', id)))}`);
       } else {
         if (refundDoneSum(id) > 0) fail(409, 'has_refunds', '환불이 완료된 주문은 입금 취소할 수 없습니다.');
@@ -957,6 +998,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (!orderVisible(o)) fail(404, 'no_order', '없는 주문입니다.');
       const B = tableRow(to);
       if (B.id === o.table_id) fail(400, 'same_table', '같은 테이블입니다.');
+      if (o.coupon_code) { const max = couponLimits().maxDiscountUsesPerSeat; if (max > 0 && discountUsesOf(B.id, B.seat) >= max) fail(409, 'coupon_limit', `이 테이블에서는 할인 쿠폰을 ${max}번까지만 쓸 수 있어요. 쿠폰을 쓴 주문은 옮길 수 없습니다.`, { max, used: discountUsesOf(B.id, B.seat) }); }
       run("UPDATE orders SET table_id=?, seat=?, key=? || '~m' || id, updated_at=? WHERE id=?", B.id, B.seat, o.key.replace(/~m\d+$/, ''), nextTs(o), id);
       // the coupon row is NOT moved: it stays recorded as received by its original table+seat (one reward per seat, stock accounting); it is tied to the order by order_id
       audit('order_move', `order #${id}`, `table ${o.table_id}→${B.id}`, `주문 #${id} 이동 · ${o.table_id}번 → ${B.id}번 테이블`);
@@ -1214,7 +1256,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const it = o ? coverUnit(o.id) : null;
     const f = o ? coverFields(o, 'guest') : null;
     return {
-      enabled: cs.enabled || live, settingEnabled: cs.enabled, label: it ? it.name : cs.label, mode: o ? o.cover_mode : cs.mode, unitPrice: it ? it.unit_price : cs.amount, requireBeforeOrder: cs.requireBeforeOrder,
+      enabled: cs.enabled || !!o, settingEnabled: cs.enabled, label: it ? it.name : cs.label, mode: o ? o.cover_mode : cs.mode, unitPrice: it ? it.unit_price : cs.amount, requireBeforeOrder: cs.requireBeforeOrder,
       people, total: live ? o.total : 0, paid: o ? Math.max(0, heldOf(o)) : 0, left: live ? balanceOf(o) : 0, waived: !!o && !live,
       shares: f ? f.shares : null,
       myIntents: openIntents(t.id, t.seat).filter((i) => i.device === device).map(intentOut),
@@ -1244,7 +1286,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function testTableView() {
     const t = get('SELECT * FROM tables WHERE id=0');
     const pr = seatRow(0, t.seat);
-    return { number: 0, label: '테스트', isTest: true, token: t.token, seat: t.seat, people: pr ? pr.people : null, coverOrderId: coverOrderOf(0, t.seat)?.id ?? null, ...testSettings(),
+    return { number: 0, label: '테스트', isTest: true, token: t.token, seat: t.seat, people: pr ? pr.people : null, coverOrderId: coverOrderOf(0, t.seat)?.id ?? null, ...seatCouponView(0, t.seat), couponLimitOverride: seatOverride(0, t.seat), couponsIssued: seatTotalOf(0, t.seat), discountUses: discountUsesOf(0, t.seat), ...testSettings(),
       openCalls: get('SELECT COUNT(*) n FROM calls WHERE table_id=0 AND seat=? AND resolved_at IS NULL', t.seat).n,
       orderCount: get("SELECT COUNT(*) n FROM orders WHERE table_id=0 AND seat=? AND kind!='cover'", t.seat).n };
   }
@@ -1274,7 +1316,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       const ids = all('SELECT id FROM orders WHERE table_id=0').map((r) => r.id);
       for (const id of ids) for (const tbl of ['order_items', 'payments', 'refunds']) run(`DELETE FROM ${tbl} WHERE order_id=?`, id);
       run('DELETE FROM orders WHERE table_id=0');
-      for (const tbl of ['coupons', 'plays', 'nicks', 'calls', 'cover_intents', 'seat_info', 'table_clears']) run(`DELETE FROM ${tbl} WHERE table_id=0`);
+      for (const tbl of ['coupons', 'plays', 'nicks', 'calls', 'cover_intents', 'seat_info', 'seat_coupon_limit', 'table_clears']) run(`DELETE FROM ${tbl} WHERE table_id=0`);
       run('UPDATE tables SET seat=seat+1 WHERE id=0');
       audit('test_reset', 'table 0', `${ids.length} test orders wiped`, `테스트 테이블 초기화 · 테스트 주문 ${ids.length}건 삭제`);
       return { ok: true, orders: ids.length, seat: get('SELECT seat FROM tables WHERE id=0').seat };
@@ -1434,7 +1476,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const p = parseDeposit(raw);
     const d = decideDeposit(p, !!sameTextRecent(normText(raw)));
     return {
-      parsed: { kind: p.kind, amount: p.amount ?? null, name: p.depositor ?? null, autoEligible: !!p.autoEligible, reasons: p.reasons ?? [] },
+      parsed: { kind: p.kind, amount: p.amount ?? null, name: p.depositor ?? null, autoEligible: !!p.autoEligible, amountGuessed: p.amount != null && (p.reasons || []).some((r) => AMOUNT_REASONS.has(r)), reasons: p.reasons ?? [] },
       wouldMatch: { status: d.status, reasons: d.reasons, ...(d.order ? { orderId: d.order.id } : {}), candidates: (d.candidates || []).map(candOut), handledOrders: (d.handled || []).map(candOut) },
     };
   }
@@ -1463,7 +1505,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         ts, raw.trim().slice(0, 300), norm, amount, p.depositor ?? null, status, JSON.stringify(d.reasons), guessed ? 1 : 0, ts).lastInsertRowid);
       // only dismissed / ignored rows are pruned beyond the cap: pending, review, unparsed and matched rows are what staff and the audit trail need
       run("DELETE FROM deposit_notices WHERE status IN ('dismissed','ignored') AND id NOT IN (SELECT id FROM deposit_notices ORDER BY id DESC LIMIT 2000)");
-      const guessed = !p.autoEligible && p.amount != null;
+      const guessed = p.amount != null && (p.reasons || []).some((r) => AMOUNT_REASONS.has(r));
       if (d.status === 'matched') {
         const id = ins('pending', p.amount, false);
         const row = get('SELECT * FROM orders WHERE id=? AND paid=0', d.order.id);
@@ -1480,8 +1522,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       return { status, id: ins(status, status === 'ignored' || status === 'unparsed' ? null : p.amount, guessed && (status === 'pending' || status === 'review')) };
     });
   }
-  const PARSE_REASONS = new Set(['ignore_word', 'multiple_amounts', 'no_amount', 'amount_range', 'no_name', 'name_has_digit', 'name_shape', 'several_names', 'amount_adjacent_to_name', 'text_too_long']);
-  const isStrictNotice = (n) => !n.amount_guessed && !parseReasons(n.reasons).some((r) => PARSE_REASONS.has(r)); // amount is certain: strict parser result
+  // amountGuessed = the AMOUNT is uncertain (these reasons); name reasons only block one-tap / auto-confirm and stay in `reasons`
+  const AMOUNT_REASONS = new Set(['ignore_word', 'multiple_amounts', 'no_amount', 'amount_range', 'amount_adjacent_to_name', 'text_too_long']);
+  const NAME_REASONS = new Set(['no_name', 'name_has_digit', 'name_shape', 'several_names']);
+  const isStrictNotice = (n) => !n.amount_guessed && !parseReasons(n.reasons).some((r) => AMOUNT_REASONS.has(r)); // amount is certain: strict parser result
   const parseReasons = (v) => { try { return JSON.parse(v || '[]'); } catch { return []; } };
   function noticeOut(n) {
     const open = n.status === 'pending' && n.amount != null;
@@ -1493,10 +1537,31 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         const c = open ? allCandidates(n.amount) : []; const h = open ? handPaidSame(n.amount) : [];
         const named = c.filter((x) => n.depositor && x.depositor && sameDepositor(n.depositor, x.depositor)); // the ONE candidate (orders and intents together) with the notice name
         const sameTable = named.length === 1 && c.every((x) => x.table_id === named[0].table_id); // a same-amount candidate on ANOTHER table makes the name a guess
-        const rec = open && isStrictNotice(n) && sameTable ? named[0] : null; // recommended / one-tap only for a strictly parsed amount: never a guessed one
-        const extra = (named.length > 1 || (named.length === 1 && !sameTable)) && !rs.includes('several_candidates') ? ['several_candidates'] : [];
+        const strict = isStrictNotice(n) && n.amount != null;
+        const nameOk = !!n.depositor && !rs.some((r) => NAME_REASONS.has(r));
+        const severalNamed = named.length > 1 || (named.length === 1 && !sameTable);
+        const extra = severalNamed && !rs.includes('several_candidates') ? ['several_candidates'] : [];
+        // why one-tap is NOT offered (empty exactly when oneTap is true); same decision as `rec`
+        const blocked = [];
+        if (!['pending', 'review', 'unparsed'].includes(n.status)) blocked.push('notice_closed');
+        else {
+          if (n.status === 'review' || rs.includes('ignore_word')) blocked.push('review_word');
+          if (!strict) blocked.push('amount_uncertain');
+          if (!nameOk) blocked.push('name_missing');
+          if (n.amount != null && n.status === 'pending') {
+            if (rs.includes('duplicate')) blocked.push('duplicate'); // a repeat of an earlier text: the same transfer may already be booked
+            if (h.length || rs.includes('maybe_already_handled')) blocked.push('maybe_already_handled'); // sticky: once blocked for this reason it stays blocked (the hand-paid order may have left the window) // staff hand-confirmed a same-amount order: this transfer may be theirs (attach instead; handledOrders lists them)
+            if (!c.length) blocked.push('no_candidate');
+            else {
+              if (severalNamed || (c.length > 1 && named.length === 0)) blocked.push('several_candidates');
+              if (nameOk && named.length === 0) blocked.push('name_mismatch');
+            }
+          }
+        }
+        const rec = blocked.length === 0 ? named[0] : null; // recommended / one-tap only for a strictly parsed amount with a good name and nothing in oneTapBlockedBy
+        if (blocked.length && blocked[0] !== 'notice_closed' && n.amount != null && n.amount > autoMax()) blocked.push('over_max_amount'); // informational only: never a one-tap blocker on its own
         const shown = rec && c.indexOf(rec) >= 10 ? [rec, ...c.filter((x) => x !== rec)] : c;
-        return { candidates: shown.slice(0, 10).map((x) => ({ ...candOut(x), recommended: x === rec })), oneTap: !!rec, ...(extra.length ? { reasons: [...rs, ...extra] } : {}), candidateCount: c.length, handledOrders: h.slice(0, 10).map(candOut), handledCount: h.length };
+        return { candidates: shown.slice(0, 10).map((x) => ({ ...candOut(x), recommended: x === rec })), oneTap: !!rec, oneTapBlockedBy: blocked, ...(extra.length ? { reasons: [...rs, ...extra] } : {}), candidateCount: c.length, handledOrders: h.slice(0, 10).map(candOut), handledCount: h.length };
       })(),
     };
   }
@@ -1598,15 +1663,88 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     id: r.id, label: r.label, game: r.game, threshold: r.threshold, type: r.type, amount: r.amount ?? null, item: r.item ?? null,
     stock: r.stock, issued: r.issued, remaining: r.stock - r.issued,
     used: get("SELECT COUNT(*) n FROM coupons WHERE reward_id=? AND status='used' AND table_id>0", r.id).n, active: !!r.active,
+    perSeat: { mode: r.per_seat_mode, count: r.per_seat_count, cap: r.per_seat_cap }, perDevice: r.per_device,
   });
   const listRewards = () => all('SELECT * FROM rewards ORDER BY sort, rowid').map(rewardOut);
-  function rewardsView(tableId, seat) {
-    if (tableId == null) return listRewards(); // staff: every reward incl. inactive, with live counts
-    return all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => ({
-      id: r.id, game: r.game, label: r.label, type: r.type, amount: r.amount ?? null, item: r.item ?? null, threshold: r.threshold,
-      soldOut: tableId !== 0 && r.issued >= r.stock, got: !!get("SELECT 1 FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tableId, seat, r.id),
-    }));
+  // ---- coupon limits (K) ----
+  const COUPON_LIMITS_DEFAULT = { maxPerSeat: 0, maxDiscountUsesPerSeat: 0 };
+  function couponLimits() { try { return { ...COUPON_LIMITS_DEFAULT, ...JSON.parse(setting('coupon_limits', '{}')) }; } catch { return { ...COUPON_LIMITS_DEFAULT }; } }
+  function setCouponLimits(body) {
+    const keys = ['maxPerSeat', 'maxDiscountUsesPerSeat'];
+    if (!body || typeof body !== 'object' || !keys.some((k) => Object.hasOwn(body, k))) fail(400, 'nothing_to_update', '바꿀 항목이 없습니다.');
+    const next = couponLimits();
+    for (const k of keys) {
+      if (!Object.hasOwn(body, k)) continue;
+      if (!Number.isInteger(body[k]) || body[k] < 0 || body[k] > 50) fail(400, 'bad_coupon_limit', `${k}는 0(제한 없음) 또는 1~50 사이 정수여야 합니다.`);
+      next[k] = body[k];
+    }
+    return tx(() => {
+      run("INSERT INTO settings(k,v) VALUES('coupon_limits',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", JSON.stringify(next));
+      audit('coupon_limits', 'coupons', JSON.stringify(next), `쿠폰 한도 변경 · 한 테이블 최대 ${next.maxPerSeat || '제한 없음'}장 · 할인 쿠폰 사용 최대 ${next.maxDiscountUsesPerSeat || '제한 없음'}회`);
+      invalidate();
+      return couponLimits();
+    });
   }
+  const seatOverride = (tid, seat) => get('SELECT n FROM seat_coupon_limit WHERE table_id=? AND seat=?', tid, seat)?.n ?? null;
+  function setSeatCouponLimit(n, perSeat) {
+    const t = tableRow(n);
+    if (perSeat !== null && (!Number.isInteger(perSeat) || perSeat < 0 || perSeat > 20)) fail(400, 'bad_per_seat', 'perSeat는 0(이 테이블은 쿠폰 없음)~20 사이 정수 또는 null(해제)이어야 합니다.');
+    return tx(() => {
+      if (perSeat === null) run('DELETE FROM seat_coupon_limit WHERE table_id=? AND seat=?', t.id, t.seat);
+      else run('INSERT INTO seat_coupon_limit(table_id,seat,n) VALUES(?,?,?) ON CONFLICT(table_id,seat) DO UPDATE SET n=excluded.n', t.id, t.seat, perSeat);
+      audit('coupon_limit_override', `table ${t.id}`, `perSeat ${perSeat ?? 'cleared'}`, `${t.id}번 테이블 쿠폰 한도 ${perSeat === null ? '해제' : `${perSeat}장으로 지정`}`);
+      invalidate();
+      return { table: t.id, seat: t.seat, couponLimitOverride: perSeat };
+    });
+  }
+  // the headcount counts for coupons only when it is trusted: set by staff / carried from the waitlist, or backed by a live per-person cover order (every person pays). A guest-entered or unknown headcount counts as 1.
+  const perPersonCover = (tid, seat) => { const o = coverOrderOf(tid, seat); return !!o && o.status !== 'cancelled' && o.cover_mode === 'per_person'; };
+  const headcountTrusted = (tid, seat) => { const r = seatRow(tid, seat); return !!r && r.people != null && (r.set_by === 'staff' || r.set_by === 'waitlist' || perPersonCover(tid, seat)); };
+  // the per-seat limit of ONE reward for a seating, evaluated from current values: staff override > people (min(headcount, cap), unknown = 1) > fixed count
+  function seatLimitOf(r, tid, seat) {
+    const o = seatOverride(tid, seat);
+    if (o != null) return { limit: o, source: 'override' };
+    if (r.per_seat_mode === 'fixed') return { limit: r.per_seat_count, source: 'fixed' };
+    return { limit: Math.min(headcountTrusted(tid, seat) ? seatPeople(tid, seat) : 1, r.per_seat_cap), source: 'people' };
+  }
+  const seatIssuedOf = (rid, tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tid, seat, rid).n;
+  const seatTotalOf = (tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND source!='staff'", tid, seat).n; // reward coupons of any kind; manual staff coupons are not counted
+  const discountUsesOf = (tid, seat) => get("SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=? AND coupon_code IS NOT NULL AND status!='cancelled'", tid, seat).n
+    + get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND type='discount' AND status='used' AND order_id IS NULL", tid, seat).n; // + discount coupons redeemed at the counter
+  const deviceIssuedOf = (rid, device) => (device ? get('SELECT COUNT(*) n FROM coupons WHERE reward_id=? AND device=? AND table_id>0', rid, device).n : 0);
+  // why a reward cannot be earned right now (null = it can); the order is the order of the checks in finishPlay. Stock is the last check.
+  function blockedBy(r, tid, seat, device, skipSeat = false) {
+    if (!r.active) return 'inactive';
+    if (!skipSeat && seatIssuedOf(r.id, tid, seat) >= seatLimitOf(r, tid, seat).limit) return 'seat_limit';
+    if (tid !== 0) {
+      if (r.per_device > 0 && (!device || deviceIssuedOf(r.id, device) >= r.per_device)) return 'device_limit';
+      const cl = couponLimits();
+      if (cl.maxPerSeat > 0 && seatTotalOf(tid, seat) >= cl.maxPerSeat) return 'table_total_limit';
+      if (r.issued >= r.stock) return 'stock_out';
+    }
+    return null;
+  }
+  // what the staff sheet shows per seating: the SAME functions the issuing code uses (headcountTrusted, seatLimitOf)
+  const seatCouponView = (tid, seat) => ({ headcountTrusted: headcountTrusted(tid, seat), couponLimits: all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => { const l = seatLimitOf(r, tid, seat); return { rewardId: r.id, limit: l.limit, limitSource: l.source }; }) });
+  function rewardsView(tableId, seat, device) {
+    if (tableId == null) return listRewards(); // staff: every reward incl. inactive, with live counts
+    const canSet = partyOut(tableRow(tableId)).canSet; const trusted = headcountTrusted(tableId, seat);
+    const cvs = coverSettings(); const guestCanMakeItTrusted = cvs.enabled && cvs.mode === 'per_person' && cvs.amount > 0 && canSet; const hasPpCover = perPersonCover(tableId, seat);
+    return all('SELECT * FROM rewards WHERE active=1 ORDER BY sort, rowid').map((r) => {
+      const sl = seatLimitOf(r, tableId, seat); const why = blockedBy(r, tableId, seat, device);
+      return {
+        id: r.id, game: r.game, label: r.label, type: r.type, amount: r.amount ?? null, item: r.item ?? null, threshold: r.threshold,
+        soldOut: tableId !== 0 && r.issued >= r.stock, got: !!get("SELECT 1 FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tableId, seat, r.id),
+        seatIssued: seatIssuedOf(r.id, tableId, seat), seatLimit: sl.limit, limitSource: sl.source,
+        deviceIssued: deviceIssuedOf(r.id, device), deviceLimit: tableId === 0 ? 0 : r.per_device, canEarn: !why, ...(why ? { blockedBy: why } : {}),
+        seatCap: sl.source === 'people' ? r.per_seat_cap : null,
+        headcountTrusted: trusted,
+        moreWithHeadcount: sl.source === 'people' && r.per_seat_cap > 1 && !trusted && guestCanMakeItTrusted && !blockedBy(r, tableId, seat, device, true), // the guest can still enter a headcount that counts (a per-person cover makes every person pay)
+        moreWithStaffConfirm: sl.source === 'people' && r.per_seat_cap > 1 && !trusted && !hasPpCover && !guestCanMakeItTrusted && !blockedBy(r, tableId, seat, device, true), // only staff confirming the headcount would raise the limit
+      };
+    });
+  }
+  const couponSeatView = (tid, seat) => { const cl = couponLimits(); return { couponsIssued: seatTotalOf(tid, seat), maxPerSeat: cl.maxPerSeat, discountUses: discountUsesOf(tid, seat), maxDiscountUsesPerSeat: tid === 0 ? 0 : cl.maxDiscountUsesPerSeat }; };
   // validates a create body (cur = null) or an update body merged onto the current row
   function normalizeReward(body, cur) {
     const has = (k) => Object.hasOwn(body, k);
@@ -1626,15 +1764,26 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (!Number.isInteger(stock) || stock < 0 || stock > 10000) fail(400, 'bad_stock', '재고는 0~10,000 사이 정수여야 합니다.');
     let active = cur ? !!cur.active : true;
     if (has('active')) { if (typeof body.active !== 'boolean') fail(400, 'bad_active', 'active는 true/false여야 합니다.'); active = body.active; }
-    return { label, game, threshold, type, amount, stock, active };
+    const curSeat = cur ? { mode: cur.per_seat_mode, count: cur.per_seat_count, cap: cur.per_seat_cap } : { mode: 'people', count: 1, cap: 4 };
+    let perSeat = curSeat;
+    if (has('perSeat')) {
+      const b = body.perSeat;
+      const okInt = (v) => Number.isInteger(v) && v >= 1 && v <= 20;
+      if (!b || typeof b !== 'object' || Array.isArray(b)) fail(400, 'bad_per_seat', 'perSeat는 { mode: "people"|"fixed", count: 1~20, cap: 1~20 } 이어야 합니다.');
+      perSeat = { ...curSeat, ...Object.fromEntries(['mode', 'count', 'cap'].filter((k) => Object.hasOwn(b, k)).map((k) => [k, b[k]])) };
+      if (!['people', 'fixed'].includes(perSeat.mode) || !okInt(perSeat.count) || !okInt(perSeat.cap) || Object.keys(b).some((k) => !['mode', 'count', 'cap'].includes(k))) fail(400, 'bad_per_seat', 'perSeat는 { mode: "people"|"fixed", count: 1~20, cap: 1~20 } 이어야 합니다.');
+    }
+    let perDevice = cur ? cur.per_device : 1;
+    if (has('perDevice')) { perDevice = body.perDevice; if (!Number.isInteger(perDevice) || perDevice < 0 || perDevice > 20) fail(400, 'bad_per_device', 'perDevice는 0(제한 없음)~20 사이 정수여야 합니다.'); }
+    return { label, game, threshold, type, amount, stock, active, perSeat, perDevice };
   }
-  const REWARD_FIELDS = ['label', 'game', 'threshold', 'type', 'amount', 'stock', 'active'];
+  const REWARD_FIELDS = ['label', 'game', 'threshold', 'type', 'amount', 'stock', 'active', 'perSeat', 'perDevice'];
   function createReward(body) {
     const n = normalizeReward(body, null);
     if (get('SELECT COUNT(*) n FROM rewards').n >= REWARD_MAX) fail(409, 'too_many_rewards', `보상은 ${REWARD_MAX}개까지 만들 수 있습니다.`);
     const id = 'r' + crypto.randomBytes(4).toString('hex');
-    run('INSERT INTO rewards(id,label,game,threshold,type,amount,item,stock,active,sort) VALUES(?,?,?,?,?,?,?,?,?,(SELECT COALESCE(MAX(sort), -1) + 1 FROM rewards))',
-      id, n.label, n.game, n.threshold, n.type, n.amount, n.type === 'item' ? n.label : null, n.stock, n.active ? 1 : 0);
+    run('INSERT INTO rewards(id,label,game,threshold,type,amount,item,stock,active,sort,per_seat_mode,per_seat_count,per_seat_cap,per_device) VALUES(?,?,?,?,?,?,?,?,?,(SELECT COALESCE(MAX(sort), -1) + 1 FROM rewards),?,?,?,?)',
+      id, n.label, n.game, n.threshold, n.type, n.amount, n.type === 'item' ? n.label : null, n.stock, n.active ? 1 : 0, n.perSeat.mode, n.perSeat.count, n.perSeat.cap, n.perDevice);
     invalidate();
     return rewardOut(get('SELECT * FROM rewards WHERE id=?', id));
   }
@@ -1645,7 +1794,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const n = normalizeReward(body, cur);
     if (n.stock < cur.issued) fail(400, 'stock_below_issued', '이미 발급한 수량보다 적게 설정할 수 없습니다.', { issued: cur.issued });
     const item = n.type === 'item' ? (Object.hasOwn(body, 'label') || cur.type !== 'item' ? n.label : (cur.item ?? n.label)) : null;
-    run('UPDATE rewards SET label=?, game=?, threshold=?, type=?, amount=?, item=?, stock=?, active=? WHERE id=?', n.label, n.game, n.threshold, n.type, n.amount, item, n.stock, n.active ? 1 : 0, id);
+    run('UPDATE rewards SET label=?, game=?, threshold=?, type=?, amount=?, item=?, stock=?, active=?, per_seat_mode=?, per_seat_count=?, per_seat_cap=?, per_device=? WHERE id=?', n.label, n.game, n.threshold, n.type, n.amount, item, n.stock, n.active ? 1 : 0, n.perSeat.mode, n.perSeat.count, n.perSeat.cap, n.perDevice, id);
+    if (Object.hasOwn(body, 'perSeat') || Object.hasOwn(body, 'perDevice')) audit('reward_limits', `reward ${id}`, `perSeat ${JSON.stringify(n.perSeat)}, perDevice ${n.perDevice}`, `보상 한도 변경 · ${n.label} · 테이블당 ${n.perSeat.mode === 'fixed' ? `${n.perSeat.count}장` : `인원수(최대 ${n.perSeat.cap}장)`} · 기기당 ${n.perDevice || '제한 없음'}`);
     invalidate();
     return rewardOut(get('SELECT * FROM rewards WHERE id=?', id));
   }
@@ -1721,16 +1871,22 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       invalidate();
       const results = [];
       const issued = [];
-      for (const r of all('SELECT * FROM rewards WHERE game=? AND active=1 ORDER BY sort, rowid', play.game)) {
-        const res = { rewardId: r.id, label: r.label };
-        if (score < r.threshold) res.result = 'low_score';
-        else if (get("SELECT 1 FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tableId, t.seat, r.id)) res.result = 'already_got';
-        else if (tableId !== 0 && run('UPDATE rewards SET issued=issued+1 WHERE id=? AND issued<stock AND active=1', r.id).changes !== 1) res.result = 'sold_out'; // the test table: unlimited, stock untouched
+      for (const r of all('SELECT * FROM rewards WHERE game=? AND active=1 ORDER BY sort, rowid', play.game)) { // inactive rewards are not offered at all (blockedBy() still names them 'inactive')
+        const res = { rewardId: r.id, id: r.id, label: r.label, earned: false };
+        if (score < r.threshold) { res.result = 'low_score'; res.reason = 'low_score'; }
         else {
-          const c = insertCoupon({ rewardId: r.id, source: 'score', type: r.type, amount: r.amount ?? null, label: r.label, item: r.type === 'item' ? (r.item ?? r.label) : null, tableId, seat: t.seat });
-          issued.push(c);
-          res.result = 'issued';
-          res.coupon = c;
+          // ONE decision, in this transaction, from current values; stock is consumed last so a refused reward never touches it
+          const why = blockedBy(r, tableId, t.seat, device);
+          if (why === 'stock_out' || !why) {
+            if (tableId !== 0 && run('UPDATE rewards SET issued=issued+1 WHERE id=? AND issued<stock AND active=1', r.id).changes !== 1) { res.result = 'sold_out'; res.reason = 'stock_out'; } // the test table: unlimited, stock untouched
+            else {
+              const sl = seatLimitOf(r, tableId, t.seat);
+              const c = insertCoupon({ rewardId: r.id, source: 'score', type: r.type, amount: r.amount ?? null, label: r.label, item: r.type === 'item' ? (r.item ?? r.label) : null, tableId, seat: t.seat, device, limitN: sl.limit, limitSource: sl.source });
+              issued.push(c);
+              res.result = 'issued'; res.earned = true;
+              res.coupon = c;
+            }
+          } else { res.result = why === 'seat_limit' ? 'already_got' : why; res.reason = why; }
         }
         results.push(res);
       }
@@ -1742,8 +1898,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const c = get('SELECT * FROM coupons WHERE code=?', String(code || '').trim().toUpperCase()) || fail(404, 'no_coupon', '없는 쿠폰 코드입니다.');
     if (c.status === 'void') fail(409, 'coupon_void', '무효 처리된 쿠폰입니다.');
     if (c.status !== 'issued') fail(409, 'already_used', '이미 사용된 쿠폰입니다.', { usedAt: c.used_at, orderId: c.order_id });
-    tx(() => { run("UPDATE coupons SET status='used', used_at=? WHERE code=?", now(), c.code); audit('coupon_redeem', `coupon ${c.code}`, `${c.type} ${c.label}`, `쿠폰 ${c.code} 사용 처리 · ${c.label}`); });
-    return { ...couponOut(get('SELECT * FROM coupons WHERE code=?', c.code)), stale: c.seat !== get('SELECT seat FROM tables WHERE id=?', c.table_id).seat };
+    const isTest = c.table_id === 0;
+    tx(() => {
+      if (c.type === 'discount' && !isTest) { const max = couponLimits().maxDiscountUsesPerSeat; if (max > 0 && discountUsesOf(c.table_id, c.seat) >= max) fail(409, 'coupon_limit', `이 테이블에서는 할인 쿠폰을 ${max}번까지만 쓸 수 있어요.`, { max, used: discountUsesOf(c.table_id, c.seat) }); }
+      run("UPDATE coupons SET status='used', used_at=? WHERE code=?", now(), c.code);
+      audit('coupon_redeem', `coupon ${c.code}`, `${c.type} ${c.label}${isTest ? ' (test)' : ''}`, isTest ? `테스트 쿠폰 ${c.code} 사용 처리 · ${c.label} · 실제 상품이나 할인이 아닙니다` : `쿠폰 ${c.code} 사용 처리 · ${c.label}`);
+    });
+    return { ...couponOut(get('SELECT * FROM coupons WHERE code=?', c.code)), ...(isTest ? { test: true } : {}), stale: c.seat !== get('SELECT seat FROM tables WHERE id=?', c.table_id).seat };
   }
 
   // coupons made by staff by hand: not tied to reward stock, at most 20 per hour server-wide
@@ -1934,7 +2095,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       cover: coverGuestView(t, device),
       calls: all('SELECT id, type, created_at FROM calls WHERE table_id=? AND seat=? AND resolved_at IS NULL ORDER BY id', tableId, t.seat).map((c) => ({ id: c.id, type: c.type, createdAt: c.created_at })),
       nick: get('SELECT nick FROM nicks WHERE device=? AND table_id=? AND seat=?', device, tableId, t.seat)?.nick ?? null,
-      rewards: rewardsView(tableId, t.seat),
+      rewards: rewardsView(tableId, t.seat, device),
+      couponSeat: couponSeatView(tableId, t.seat),
       games: games,
       callTypes: CALL_TYPES,
       pay: payInfo(),
@@ -1948,10 +2110,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       const p = get('SELECT MIN(started_at) first FROM plays WHERE table_id=? AND seat=?', t.id, t.seat);
       const firsts = [o.first, p.first].filter((x) => x != null);
       return {
-        number: t.id, seat: t.seat, status: firsts.length ? 'occupied' : 'empty', orderCount: o.n, unpaidTotal: o.unpaid,
+        number: t.id, seat: t.seat, status: firsts.length ? 'occupied' : 'empty', orderCount: o.n, unpaidTotal: o.unpaid, ...seatCouponView(t.id, t.seat), couponLimitOverride: seatOverride(t.id, t.seat),
         minutesSeated: firsts.length ? Math.floor((ts - Math.min(...firsts)) / 60000) : null,
         openCalls: get('SELECT COUNT(*) n FROM calls WHERE table_id=? AND seat=? AND resolved_at IS NULL', t.id, t.seat).n,
-        unclearUntil: unclearCheck(t).ok ? unclearCheck(t).until : null,
+        unclearUntil: unclearCheck(t).ok ? unclearCheck(t).until : null, couponsIssued: seatTotalOf(t.id, t.seat), discountUses: discountUsesOf(t.id, t.seat),
         ...(() => { const pr = seatRow(t.id, t.seat); const c = coverOrderOf(t.id, t.seat); return { people: pr ? pr.people : null, partySetBy: pr ? pr.set_by ?? null : null, partySetAt: pr ? pr.set_at ?? null : null, partyUpdatedAt: pr ? pr.updated_at : 0, seatedAt: pr ? pr.seated_at : null, cover: c ? { orderId: c.id, status: c.status, waived: c.status === 'cancelled' } : null }; })(),
       };
     });
@@ -1972,6 +2134,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       refunds: all('SELECT r.*, o.table_id, o.updated_at AS order_updated_at FROM refunds r JOIN orders o ON o.id=r.order_id ORDER BY (o.table_id=0), (r.done_at IS NULL) DESC, r.id DESC LIMIT 200').map(refundOut), // real refunds first: test ones can never push them out of the window
       coupons: all("SELECT c.* FROM coupons c JOIN tables t ON t.id=c.table_id AND t.seat=c.seat WHERE c.status='issued' AND t.id BETWEEN 1 AND ? ORDER BY c.created_at DESC", tableCount).map(couponOut),
       rewards: rewardsView(),
+      couponLimits: couponLimits(),
       games,
       hourly: hourlyReward(),
       hour: hourInfo(cur),
@@ -2078,6 +2241,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     invalidate();
     return tx(() => {
       run('DELETE FROM seat_info WHERE table_id=? AND seat=?', n, t.seat); // nothing of the abandoned seat may leak into the next one
+      run('DELETE FROM seat_coupon_limit WHERE table_id=? AND seat=?', n, t.seat);
       run('DELETE FROM cover_intents WHERE table_id=? AND seat=?', n, t.seat);
       run('UPDATE tables SET seat=? WHERE id=?', chk.clear.old_seat, n);
       const flags = run('UPDATE orders SET written_off=0, written_off_at=NULL, written_off_clear=NULL WHERE written_off_clear=?', chk.clear.id).changes;
@@ -2095,6 +2259,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (liveCover(a, A.seat) && liveCover(b, B.seat)) fail(409, 'cover_conflict', '두 테이블 모두 입장료가 있어 합칠 수 없습니다. 한쪽 입장료를 먼저 면제해 주세요.');
     invalidate();
     return tx(() => {
+      const trustedBoth = headcountTrusted(a, A.seat) && headcountTrusted(b, B.seat); // evaluated BEFORE anything moves
       const mv = (tbl, set = '') => run(`UPDATE ${tbl} SET table_id=?, seat=?${set} WHERE table_id=? AND seat=?`, b, B.seat, a, A.seat).changes;
       // moved orders get a derived key so equal idempotency keys in both seats cannot collide
       const moved = { orders: mv('orders', ", key=key||'~m'||id"), coupons: mv('coupons'), plays: mv('plays') };
@@ -2104,7 +2269,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         if (ar) {
           if (br) {
             const merged = br.people == null && ar.people == null ? null : (br.people ?? 0) + (ar.people ?? 0);
-            run("UPDATE seat_info SET people=?, seated_at=MIN(seated_at,?), updated_at=?, set_by='staff', set_at=? WHERE table_id=? AND seat=?", merged, ar.seated_at, Math.max(now(), br.updated_at + 1), now(), b, B.seat);
+            run("UPDATE seat_info SET people=?, seated_at=MIN(seated_at,?), updated_at=?, set_by=?, set_at=? WHERE table_id=? AND seat=?", merged, ar.seated_at, Math.max(now(), br.updated_at + 1), trustedBoth ? 'staff' : 'guest', now(), b, B.seat); // a merge never launders a guest-entered headcount into a trusted one
             run('DELETE FROM seat_info WHERE table_id=? AND seat=?', a, A.seat);
           } else run('UPDATE seat_info SET table_id=?, seat=? WHERE table_id=? AND seat=?', b, B.seat, a, A.seat);
         }
@@ -2231,7 +2396,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   // shared wipe of the day's data (reset and business-day close): menu, rewards, settings, tokens, audit log and day reports stay
   function wipeData() {
-    for (const t of ['order_items', 'orders', 'payments', 'seat_info', 'cover_intents', 'coupons', 'plays', 'nicks', 'calls', 'waitlist', 'deposit_notices', 'refunds', 'table_clears']) run(`DELETE FROM ${t}`); // notices go; the hook secret and pay settings stay
+    for (const t of ['order_items', 'orders', 'payments', 'seat_info', 'seat_coupon_limit', 'cover_intents', 'coupons', 'plays', 'nicks', 'calls', 'waitlist', 'deposit_notices', 'refunds', 'table_clears']) run(`DELETE FROM ${t}`); // notices go; the hook secret and pay settings stay
     run('UPDATE menu_items SET sold_out=0, stock_auto=0 WHERE 1'); // sold-out flags reset; stock counters keep their numbers
     run('UPDATE menu_items SET sold_out=1, stock_auto=1 WHERE stock_left=0'); // ...so an item that ran out by count stays sold out
     run("DELETE FROM sqlite_sequence WHERE name IN ('cover_intents','orders','plays','calls','waitlist','deposit_notices','refunds','table_clears')");
@@ -2358,8 +2523,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         tx(() => {
           rows.forEach(({ id, n, item }, idx) => {
             const lg = legacy.get(id); // an upgraded database keeps its live stock and issued counts
-            run('INSERT INTO rewards(id,label,game,threshold,type,amount,item,stock,issued,active,sort) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-              id, n.label, n.game, n.threshold, n.type, n.amount, n.type === 'item' ? (item ?? n.label) : null, lg ? lg.stock : n.stock, lg ? lg.issued : 0, n.active ? 1 : 0, idx);
+            run('INSERT INTO rewards(id,label,game,threshold,type,amount,item,stock,issued,active,sort,per_seat_mode,per_seat_count,per_seat_cap,per_device) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+              id, n.label, n.game, n.threshold, n.type, n.amount, n.type === 'item' ? (item ?? n.label) : null, lg ? lg.stock : n.stock, lg ? lg.issued : 0, n.active ? 1 : 0, idx, lg ? 'fixed' : n.perSeat.mode, lg ? 1 : n.perSeat.count, n.perSeat.cap, n.perDevice); // an upgraded old database keeps one per seating
           });
           const h = rewards.hourly;
           if (h && typeof h.label === 'string' && h.label.trim() && [...h.label.trim()].length <= 20 && !get("SELECT 1 FROM settings WHERE k='hourly_reward'")) {
@@ -2426,6 +2591,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   return {
     audit, dry, drainEvents, depositPipeline, purgeIntents, coverSettings, setCoverSettings, setPartyGuest, setPartyStaff, coverWaive, coverRestore, voidPayment, createIntent, cancelIntent, staffCancelIntent, editItems, addService, moveOrder, refundDone, unclearTable, setNotice, createManualCoupon, voidCoupon, setWaitTimeout, sweepWait, listAudit, closeCheck, closeDay, listDayReports, dayReport, dayReportCsv,
     createOrder, setStatus, setPaid, guestCancel, menuView, setSoldOut, setOrdering, orderingOpen,
+    setCouponLimits, setSeatCouponLimit, couponLimits,
     setTableCount, rotateToken, tableCountNow: () => tableCount, payInfo, staffPay: payAll, setPay, setDepositor, ingestDeposit, previewDeposit, listDeposits, depositCounts, assignDeposit, attachDeposit, dismissDeposit, setAutoConfirm, depositSecret, rotateDepositSecret, checkDepositSecret, deviceSecret, setPhoto, deletePhoto, photosDir, createReward, updateReward, deleteReward, hourlyReward, setHourlyReward, memberSettings, setMemberSettings, listRewards, createItem, updateItem, deleteItem, createCategory, renameCategory, deleteCategory, reorderMenu, memberPct,
     startPlay, finishPlay, redeem, awardHour, setStock, setNick, addCall, resolveCall,
     addWait, waitStatus, waitCancel, waitAction, setWaitOpen, clearWait, waitInfo,

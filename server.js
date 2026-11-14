@@ -510,7 +510,7 @@ const actionKo = (p, b) => {
   for (const [re, f] of rules) if (re.test(p)) return f();
   return `직원 작업 · ${p}`;
 };
-const DB_AUDITED = /^\/api\/staff\/(orders\/\d+\/(status|paid|items|service|move)|tables\/(\d+\/(clear|unclear|orders|coupons)|move)|refunds\/\d+\/done|coupons\/(redeem|[A-Za-z0-9]+\/void)|deposits\/(\d+\/(assign|dismiss|attach)|autoconfirm)|deposit-hook\/test|pay|member-discount|notice|reset|day\/close|ordering|test\/(reset|settings|rotate)|cover\/settings|cover\/intents\/\d+\/cancel|payments\/\d+\/void|tables\/\d+\/party|tables\/\d+\/cover\/(waive|restore)|tables\/count|tables\/\d+\/rotate|deposit-hook\/rotate|waitlist\/timeout|menu\/items(\/[A-Za-z0-9_-]+)?)$/; // routes whose store method writes its own (richer) audit row
+const DB_AUDITED = /^\/api\/staff\/(orders\/\d+\/(status|paid|items|service|move)|tables\/(\d+\/(clear|unclear|orders|coupons)|move)|refunds\/\d+\/done|coupons\/(redeem|[A-Za-z0-9]+\/void)|deposits\/(\d+\/(assign|dismiss|attach)|autoconfirm)|deposit-hook\/test|pay|member-discount|notice|reset|day\/close|ordering|test\/(reset|settings|rotate)|cover\/settings|cover\/intents\/\d+\/cancel|payments\/\d+\/void|tables\/\d+\/party|tables\/\d+\/cover\/(waive|restore)|coupon-limits|tables\/\d+\/coupon-limit|tables\/count|tables\/\d+\/rotate|deposit-hook\/rotate|waitlist\/timeout|menu\/items(\/[A-Za-z0-9_-]+)?)$/; // routes whose store method writes its own (richer) audit row
 route('GET', '/api/staff/state', () => staffSnap(), S);
 route('GET', '/api/staff/events', (c) => sse(c, 'staff', () => staffSnap(), true), S);
 route('GET', '/api/staff/tables', () => ({
@@ -526,7 +526,7 @@ route('POST', '/api/staff/orders/(\\d{1,9})/status', (c) => {
   return { order };
 }, S);
 route('POST', '/api/staff/orders/(\\d{1,9})/paid', (c) => {
-  const go = () => store.setPaid(int(c.m[1]), c.body.paid, { method: c.body.method, amount: c.body.amount, shares: c.body.shares, payer: c.body.payer, expectedUpdatedAt: c.body.expectedUpdatedAt });
+  const go = () => store.setPaid(int(c.m[1]), c.body.paid ?? (c.body.payBalance === true ? true : undefined), { method: c.body.method, payBalance: c.body.payBalance, amount: c.body.amount, shares: c.body.shares, payer: c.body.payer, expectedUpdatedAt: c.body.expectedUpdatedAt });
   if (c.body.dryRun === true) return { dryRun: true, order: store.dry(go) }; // preview: runs the real code in a rolled-back transaction
   const order = go(); touchTable(order.table); return { order };
 }, S);
@@ -616,6 +616,9 @@ route('GET', '/api/staff/rewards', () => ({ rewards: store.listRewards(), hourly
 const rewardsDone = (extra = {}) => { touchAll(); return { ok: true, ...extra, rewards: store.listRewards() }; };
 route('POST', '/api/staff/rewards', (c) => rewardsDone({ reward: store.createReward(c.body) }), { staff: true });
 route('POST', '/api/staff/rewards/([A-Za-z0-9_-]{1,40})', (c) => rewardsDone({ reward: store.updateReward(c.m[1], c.body) }), { staff: true });
+route('GET', '/api/staff/coupon-limits', () => ({ couponLimits: store.couponLimits() }), { staff: true });
+route('POST', '/api/staff/coupon-limits', (c) => { const couponLimits = store.setCouponLimits(c.body); touchAll(); return { ok: true, couponLimits }; }, { staff: true });
+route('POST', '/api/staff/tables/(\\d{1,4})/coupon-limit', (c) => { need(Object.hasOwn(c.body, 'perSeat'), 'bad_per_seat', 'perSeat가 필요합니다.'); const r = store.setSeatCouponLimit(int(c.m[1]), c.body.perSeat); touchAll(); return { ok: true, ...r }; }, { staff: true });
 route('POST', '/api/staff/rewards/([A-Za-z0-9_-]{1,40})/delete', (c) => { store.deleteReward(c.m[1]); return rewardsDone(); }, { staff: true });
 route('POST', '/api/staff/hourly-reward', (c) => { const hourly = store.setHourlyReward(c.body); touchAll(); return { ok: true, hourly }; }, { staff: true });
 // photo upload: the body is the raw image (not JSON), max 400 KB

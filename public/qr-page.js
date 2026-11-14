@@ -49,7 +49,7 @@
     if (logoImg) return Promise.resolve(logoImg);
     return new Promise(function (res) { var i = new Image(); i.onload = function () { logoImg = i; res(i); }; i.onerror = function () { res(null); }; i.src = SC.BASE + '/static/brand/coms-logo.svg'; });
   }
-  // Card PNG: same layout as the printed card. The bitmap font is drawn only at multiples of 16px (brand rule).
+  // Card PNG: same layout as the printed card. The bitmap font is used only for the 16px title bar text (no digits in it).
   function cardCanvas(c) {
     var fontsReady = document.fonts && document.fonts.load ? Promise.all([document.fonts.load('16px NeoDgm'), document.fonts.ready]) : Promise.resolve();
     return Promise.all([fontsReady, loadLogo()]).then(function (r) {
@@ -77,8 +77,8 @@
         var cx = 26.5, cy = wy + tb + 20;
         ctx.textAlign = 'center'; ctx.fillStyle = '#000';
         ctx.font = '800 ' + Math.round(14 * k) + 'px ' + UI; ctx.fillText(c.label, cx * s, (wy + tb + 3.4) * s);
-        var css = c.cls === 'w' ? 64 : c.cls === 'd1' ? 128 : c.cls === 'd2' ? 96 : 64;
-        if (c.cls === 'w') ctx.font = '900 ' + Math.round(60 * k) + 'px ' + UI; else ctx.font = fpx(css) + 'px ' + PIX; // Korean words use the system font; only digits use the bitmap font
+        var css = c.cls === 'w' ? 60 : c.cls === 'd1' ? 128 : c.cls === 'd2' ? 96 : 64;
+        ctx.font = '900 ' + Math.round(css * k) + 'px ' + UI; // digits and Korean words both use the bold system face: the bitmap font's 4 reads as 9
         ctx.fillText(c.big, cx * s, (oy + 33.5) * s);
         drawQR(ctx, c.url, 48 * s, (wy + tb + 2.2) * s, 42 * s, 4);
         ctx.font = '900 ' + Math.round(5.4 * s) + 'px ' + UI; ctx.fillText(c.caption, (wx + ww / 2) * s, (oy + 58.4) * s);
