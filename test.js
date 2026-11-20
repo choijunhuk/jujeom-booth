@@ -3512,12 +3512,32 @@ test('deposit matching (strict): exactly ONE unpaid order with that amount, equa
     const n = (await d.notices()).find((x) => x.id === steal.id);
     assert.deepEqual(n.candidates.map((c) => c.id).sort(), [A.id, B.id].sort());
     assert.deepEqual([await paid(A), await paid(B)], [false, false]);
-    // even an exactly matching name is not enough while another order has the same amount
+    // even an exactly matching name is not enough while a NAMELESS same-amount order sits on another table (it could be anyone's transfer)
     assert.equal((await d.sms(8000, '김철')).status, 'pending');
     assert.deepEqual([await paid(A), await paid(B)], [false, false]);
+    // several same-amount orders, every one named: the ONE with the sender name is confirmed (user decision 2026-11-21: same rule as one-tap)
     const C = await d.place(tk[2], '홍길동', 'odeng'); const E = await d.place(tk[3], '박철수', 'odeng'); // 9,000 each
-    assert.equal((await d.sms(9000, '홍길동')).status, 'pending');
-    assert.deepEqual([await paid(C), await paid(E)], [false, false]);
+    assert.equal((await d.sms(9000, '홍길동')).status, 'matched');
+    assert.deepEqual([await paid(C), await paid(E)], [true, false]);
+    // two orders with the sender name are a real tie
+    const C2 = await d.place(tk[2], '정우성', 'odeng'); const E2 = await d.place(tk[3], '정우성', 'odeng');
+    assert.equal((await d.sms(9000, '정우성')).status, 'pending');
+    assert.deepEqual([await paid(C2), await paid(E2), await paid(E)], [false, false, false]);
+    // a NAMELESS same-amount order at another table blocks the pick; at the winner's own table it does not
+    const P = await d.place(tk[4], '서지수', 'cola', 5); const Q = await d.place(tk[5], undefined, 'cola', 5); // 10,000 each
+    const blockedNotice = await d.sms(10000, '서지수');
+    assert.equal(blockedNotice.status, 'pending');
+    assert.ok((await d.notices()).find((x) => x.id === blockedNotice.id).reasons.includes('several_candidates'));
+    assert.deepEqual([await paid(P), await paid(Q)], [false, false]);
+    // a placeholder name ('ㅇ', '.', digits) can never be a bank sender name: it blocks like no name (auto AND one-tap)
+    const P2 = await d.place(tk[7], 'ㅇ', 'cola', 8); const Q2 = await d.place(tk[8], '윤아름', 'cola', 8); // 16,000 each
+    const ph = await d.sms(16000, '윤아름');
+    assert.equal(ph.status, 'pending');
+    const phn = (await d.notices()).find((x) => x.id === ph.id);
+    assert.deepEqual([phn.reasons.includes('several_candidates'), phn.oneTap, await paid(P2), await paid(Q2)], [true, false, false, false]);
+    const R = await d.place(tk[6], '한별', 'cola', 7); const R2 = await d.place(tk[6], undefined, 'cola', 7); // 14,000 each, same table
+    assert.equal((await d.sms(14000, '한별')).status, 'matched');
+    assert.deepEqual([await paid(R), await paid(R2)], [true, false]);
     // exactly one order at the amount and an equal name -> confirmed (case / width / spaces normalised)
     const F = await d.place(tk[4], '이 영희', 'fries'); // 6,000 (the order's name has a space)
     assert.equal((await d.sms(6000, '이영희')).status, 'matched');
@@ -6331,6 +6351,24 @@ test('I3 payment intents: guest-only, device-bound, limited by the shares left a
   });
 });
 
+test('two same-amount share intents at one table with different payers: auto-confirm pays the one with the sender name', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    await coverOn(s);
+    await partyOf(s, 1, 4);
+    const gA = await guestWithDevice(srv); const gB = await guestWithDevice(srv);
+    const iA = (await gA.post(`/api/t/${tk[0]}/cover/intents`, { payer: '김철수', shares: 1 })).json;
+    const iB = (await gB.post(`/api/t/${tk[0]}/cover/intents`, { payer: '이영희', shares: 1 })).json;
+    const n = await d.sms(3000, '이영희');
+    assert.equal(n.status, 'matched', JSON.stringify(n));
+    const c = await coverIn(s, 1);
+    assert.deepEqual([c.paidAmount, c.payments.map((p) => [p.payer, p.shares])], [3000, [['이영희', 1]]]);
+    assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents.map((i) => i.id), [iA.id]);
+    assert.ok(iB.id);
+  } finally { await d.srv.stop(); }
+});
+
 test('I3 deposit notices match share intents: candidates, recommended payer, assign with intentId, strict auto-confirm', async () => {
   const d = await depositSetup();
   try {
@@ -6340,11 +6378,12 @@ test('I3 deposit notices match share intents: candidates, recommended payer, ass
     const gA = await guestWithDevice(srv); const gB = await guestWithDevice(srv);
     const iA = (await gA.post(`/api/t/${tk[0]}/cover/intents`, { payer: '김철수', shares: 1 })).json;
     const iB = (await gB.post(`/api/t/${tk[0]}/cover/intents`, { payer: '이영희', shares: 1 })).json;
-    // two intents with the same amount: never automatic
+    // two same-amount intents with different names: the name picks one (one-tap here; with auto on it would be automatic, same rule)
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: false });
     const n1 = await d.sms(3000, '김철수');
     assert.equal(n1.status, 'pending');
     const notice1 = (await d.notices()).find((n) => n.id === n1.id);
-    assert.ok(notice1.reasons.includes('several_candidates'));
+    assert.deepEqual([notice1.reasons.includes('several_candidates'), notice1.reasons.includes('auto_off'), notice1.oneTap], [false, true, true]);
     assert.deepEqual(notice1.candidates.map((x) => [x.intent && x.intent.id, x.intent && x.intent.payer, x.intent && x.intent.shares, x.table, x.recommended]).sort(), [[iA.id, '김철수', 1, 1, true], [iB.id, '이영희', 1, 1, false]].sort());
     // assign to the recommended intent: a share payment with the payer, the intent is closed
     const c = await coverIn(s, 1);
@@ -6354,6 +6393,7 @@ test('I3 deposit notices match share intents: candidates, recommended payer, ass
     assert.deepEqual([as.json.order.paidAmount, as.json.order.shares, as.json.order.payments[0].payer, as.json.order.payments[0].shares, as.json.order.payments[0].method], [3000, { total: 4, paid: 1, left: 3, over: 0 }, '김철수', 1, 'transfer']);
     assert.equal((await s.post(`/api/staff/deposits/${(await d.sms(3000, '김철수')).id}/assign`, { orderId: c.id, intentId: iA.id })).json.error, 'no_intent', 'a closed intent cannot be used again');
     // now exactly one open intent (이영희) and no other unpaid order with a 3,000 balance: the notice with the same name is automatic
+    await s.post('/api/staff/deposits/autoconfirm', { autoConfirm: true });
     const n2 = await d.sms(3000, '이영희');
     assert.equal(n2.status, 'matched', JSON.stringify(n2));
     const after = await coverIn(s, 1);

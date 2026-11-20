@@ -1552,6 +1552,15 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const candOut = (o) => ({ id: o.id, table: o.table_id, total: o.total, balance: o.balance ?? 0, depositor: o.depositor ?? null, createdAt: o.created_at, intent: o.intent ?? null });
   // the one decision function: used for real notices and for the staff "test" preview (which stores nothing)
   const SAME_DEPOSIT_MS = 10 * 60 * 1000;
+  // several same-amount candidates: the ONE whose name equals the notice name, when no other one could be the sender's
+  // (every other candidate sits at the winner's table or carries a different, non-empty name; a nameless or placeholder-named candidate on another table could be anyone's transfer)
+  function nameWinner(cands, name) {
+    const named = name ? cands.filter((x) => x.depositor && sameDepositor(name, x.depositor)) : [];
+    if (named.length !== 1) return null;
+    return cands.every((x) => x === named[0] || x.table_id === named[0].table_id || couldBeSender(x.depositor)) ? named[0] : null;
+  }
+  // an order name a bank notice could carry (the strict notice shape, after normalisation); 'ㅇ', '.', '3번' etc. count as NO name
+  const couldBeSender = (v) => !!v && /^[가-힣a-z]{2,10}$/.test(depKey(v));
   function decideDeposit(p, sameRecent) {
     if (p.kind === 'ignore') return { status: 'ignored', reasons: [] };
     if (p.kind === 'review') return { status: 'review', reasons: p.reasons };
@@ -1570,12 +1579,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const handled = handPaidSame(p.amount);
     if (handled.length) reasons.push('maybe_already_handled');
     if (cands.length === 0) reasons.push('no_candidate');
-    else if (cands.length > 1) reasons.push('several_candidates');
     let order = null;
     if (cands.length === 1) {
       if (!cands[0].depositor) reasons.push('no_depositor_on_order');
       else if (!p.depositor || !sameDepositor(p.depositor, cands[0].depositor)) reasons.push('name_mismatch');
       else order = cands[0];
+    } else if (cands.length > 1) {
+      order = nameWinner(cands, p.depositor); // same rule as staff one-tap
+      if (!order) reasons.push('several_candidates');
     }
     if (reasons.length) return { status: 'pending', reasons, candidates: cands, handled };
     return { status: 'matched', reasons: [], order };
@@ -1647,10 +1658,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         const rs = parseReasons(n.reasons);
         const c = open ? allCandidates(n.amount) : []; const h = open ? handPaidSame(n.amount) : [];
         const named = c.filter((x) => n.depositor && x.depositor && sameDepositor(n.depositor, x.depositor)); // the ONE candidate (orders and intents together) with the notice name
-        const sameTable = named.length === 1 && c.every((x) => x.table_id === named[0].table_id); // a same-amount candidate on ANOTHER table makes the name a guess
+        const win = nameWinner(c, n.depositor); // same rule as auto-confirm
         const strict = isStrictNotice(n) && n.amount != null;
         const nameOk = !!n.depositor && !rs.some((r) => NAME_REASONS.has(r));
-        const severalNamed = named.length > 1 || (named.length === 1 && !sameTable);
+        const severalNamed = named.length > 1 || (named.length === 1 && !win);
         const extra = severalNamed && !rs.includes('several_candidates') ? ['several_candidates'] : [];
         // why one-tap is NOT offered (empty exactly when oneTap is true); same decision as `rec`
         const blocked = [];
@@ -1660,6 +1671,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
           if (!strict) blocked.push('amount_uncertain');
           if (!nameOk) blocked.push('name_missing');
           if (n.amount != null && n.status === 'pending') {
+            for (const r of ['other_account', 'possible_same_deposit']) if (rs.includes(r)) blocked.push(r); // another account / maybe the same transfer twice: never one-tap
             if (rs.includes('duplicate')) blocked.push('duplicate'); // a repeat of an earlier text: the same transfer may already be booked
             if (h.length || rs.includes('maybe_already_handled')) blocked.push('maybe_already_handled'); // sticky: once blocked for this reason it stays blocked (the hand-paid order may have left the window) // staff hand-confirmed a same-amount order: this transfer may be theirs (attach instead; handledOrders lists them)
             if (!c.length) blocked.push('no_candidate');
