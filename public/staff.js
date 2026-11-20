@@ -1022,7 +1022,7 @@
           if (!i.soldOut && !i.hidden) b.push(h('span', { class: 'tag ok' }, '판매 중'));
           return h('div', { class: 'menu-item' + (i.soldOut ? ' out' : '') + (i.hidden ? ' hid' : '') },
             i.photo ? h('img', { class: 'thumb', src: SC.BASE + i.photo, alt: '', width: '64', height: '48', loading: 'lazy' }) : null,
-            h('div', { class: 'grow' }, h('span', { class: 'nm' }, i.name), h('span', { class: 'muted' }, won(i.price) + (i.desc ? ' · ' + i.desc : '')), i.stockAuto ? h('span', { class: 'muted' }, '재고가 0이 돼서 자동으로 품절됐어요. 주문이 취소되면 풀려요.') : null),
+            h('div', { class: 'grow' }, h('span', { class: 'nm' }, i.name), h('span', { class: 'muted' }, won(i.price) + (i.desc ? ' · ' + i.desc : '')), i.stockAuto ? h('span', { class: 'muted' }, '재고가 0이 돼서 자동으로 품절됐어요. 주문이 취소되면 풀려요.') : null, i.components ? h('span', { class: 'muted' }, '구성: ' + i.components.map(function (c) { return c.name + '×' + c.qty; }).join(', ')) : null),
             h('div', { class: 'line', style: 'display:flex;gap:6px;flex-wrap:wrap' }, b),
             i.stockLeft != null ? h('div', { class: 'stockctl' }, h('span', { class: 'muted' }, '남은 수량'),
               abtn('btn btn-sm', '−1', guard(function () { return setStockLeft(i, i.stockLeft - 1); })), abtn('btn btn-sm', '+1', guard(function () { return setStockLeft(i, i.stockLeft + 1); })), abtn('btn btn-sm', '+5', guard(function () { return setStockLeft(i, i.stockLeft + 5); }))) : null,

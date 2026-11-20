@@ -238,6 +238,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   if (!colsOf('order_items').includes('service')) db.exec('ALTER TABLE order_items ADD COLUMN service INTEGER NOT NULL DEFAULT 0');
   if (!colsOf('menu_items').includes('stock_left')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_left INTEGER');
   if (!colsOf('menu_items').includes('stock_auto')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_auto INTEGER NOT NULL DEFAULT 0');
+  if (!colsOf('menu_items').includes('components')) db.exec('ALTER TABLE menu_items ADD COLUMN components TEXT'); // set menu: JSON [{id, qty}] of items whose stock the set consumes
   if (!colsOf('waitlist').includes('recalled')) db.exec('ALTER TABLE waitlist ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0');
   for (const [col, ddl] of [['duplicate_of', 'INTEGER'], ['reasons', 'TEXT'], ['amount_guessed', 'INTEGER NOT NULL DEFAULT 0'], ['repeat_count', 'INTEGER NOT NULL DEFAULT 1'], ['last_at', 'INTEGER']]) {
     if (!colsOf('deposit_notices').includes(col)) db.exec(`ALTER TABLE deposit_notices ADD COLUMN ${col} ${ddl}`);
@@ -273,6 +274,21 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   // "seeded" is remembered in settings: once set, the menu is never re-seeded, even if staff later delete every item and category.
   // (A DB whose menu tables are already filled but has no flag yet just gets the flag.)
   const menuEmpty = !get('SELECT 1 FROM menu_categories LIMIT 1') && !get('SELECT 1 FROM menu_items LIMIT 1');
+  // a set's component list [{id, qty}]: <=6 entries, qty 1..10, no duplicates, no self, each must exist and not be a set itself. look(id) -> {hasComponents} | undefined
+  const componentProblem = (list, selfId, look) => {
+    if (!Array.isArray(list) || list.length > 6) return '구성은 6개 이하의 목록이어야 합니다.';
+    const seenC = new Set();
+    for (const c of list) {
+      if (!c || typeof c.id !== 'string' || !Number.isInteger(c.qty) || c.qty < 1 || c.qty > 10) return '구성 수량은 1~10 사이 정수여야 합니다.';
+      if (c.id === selfId) return '자기 자신을 구성에 넣을 수 없습니다.';
+      if (seenC.has(c.id)) return '같은 메뉴가 구성에 중복되었습니다.';
+      seenC.add(c.id);
+      const x = look(c.id);
+      if (!x) return '없는 메뉴가 구성에 있습니다.';
+      if (x.hasComponents) return '세트 메뉴는 다른 세트의 구성이 될 수 없습니다.';
+    }
+    return null;
+  };
   const seedProblem = () => {
     if (!menu || !Array.isArray(menu.items) || !Array.isArray(menu.categories || [])) return 'menu.json must have "items" (array) and "categories" (array)';
     if (menu.items.length > MENU_MAX_ITEMS) return `more than ${MENU_MAX_ITEMS} items`;
@@ -295,6 +311,11 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (i.desc != null && (typeof i.desc !== 'string' || [...i.desc].length > 60)) return `bad desc for ${JSON.stringify(i.name)}`;
       if (i.stock != null && (!Number.isInteger(i.stock) || i.stock < 1 || i.stock > 9999)) return `bad stock for ${JSON.stringify(i.name)} (integer 1..9999, omit for unlimited)`;
     }
+    for (const i of menu.items) {
+      if (i.components == null) continue;
+      const p = componentProblem(i.components, i.id, (id) => { const x = menu.items.find((y) => y.id === id); return x && { hasComponents: Array.isArray(x.components) && x.components.length > 0 }; });
+      if (p) return `bad components for ${JSON.stringify(i.name)}: ${p}`;
+    }
     return null;
   };
   const problem = !get("SELECT 1 FROM settings WHERE k='menu_seeded'") && menuEmpty ? seedProblem() : null;
@@ -310,8 +331,9 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       };
       for (const c of menu.categories || []) ensureCat(c);
       menu.items.forEach((i, idx) => {
-        run('INSERT INTO menu_items(id,name,price,category_id,descr,sold_out,sort,stock_left) VALUES(?,?,?,?,?,?,?,?)',
-          i.id, i.name, i.price, ensureCat(i.cat), i.desc || '', legacySoldOut.has(i.id) ? 1 : 0, idx, i.stock ?? null);
+        run('INSERT INTO menu_items(id,name,price,category_id,descr,sold_out,sort,stock_left,components) VALUES(?,?,?,?,?,?,?,?,?)',
+          i.id, i.name, i.price, ensureCat(i.cat), i.desc || '', legacySoldOut.has(i.id) ? 1 : 0, idx, i.stock ?? null,
+          i.components && i.components.length ? JSON.stringify(i.components.map(({ id, qty }) => ({ id, qty }))) : null);
       });
     });
   }
@@ -364,7 +386,23 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
 
   // ---------- menu / ordering ----------
-  const itemRow = (id) => get('SELECT i.*, c.name cat FROM menu_items i JOIN menu_categories c ON c.id=i.category_id WHERE i.id=?', id);
+  const dbItem = (id) => get('SELECT name, stock_left, sold_out, components FROM menu_items WHERE id=?', id);
+  const compsOf = (r) => (r && r.components ? JSON.parse(r.components) : []);
+  const compView = (r, look = dbItem) => compsOf(r).map((c) => ({ id: c.id, qty: c.qty, name: look(c.id)?.name ?? c.id }));
+  // a set is blocked when any component is sold out (manual or auto) or has fewer left than one set needs
+  const setBlocked = (r, look = dbItem) => compsOf(r).some((c) => { const x = look(c.id); return !x || x.sold_out || (x.stock_left != null && x.stock_left < c.qty); });
+  // how many of this item can still be ordered: own counter and every component counter (null = unlimited)
+  const stockAvail = (r, look = dbItem) => {
+    let a = r.stock_left;
+    for (const c of compsOf(r)) { const s = look(c.id)?.stock_left; if (s != null) a = Math.min(a ?? Infinity, Math.floor(s / c.qty)); }
+    return a;
+  };
+  const usedAsComponent = (id) => all('SELECT name, components FROM menu_items WHERE components IS NOT NULL').find((r) => compsOf(r).some((c) => c.id === id));
+  const itemRow = (id) => {
+    const r = get('SELECT i.*, c.name cat FROM menu_items i JOIN menu_categories c ON c.id=i.category_id WHERE i.id=?', id);
+    if (r && r.components && setBlocked(r)) r.sold_out = 1; // ordering checks see the effective sold-out state
+    return r;
+  };
   // append-only log of staff actions (never PINs, tokens, secrets or account numbers); kept to the newest 5000 rows.
   // Money-moving actions call this INSIDE their transaction.
   const W = (n) => `${Number(n).toLocaleString('en-US')}원`;
@@ -397,20 +435,30 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return o;
   }
   // per-item stock counter (null = unlimited). Both helpers run inside the order transaction.
+  // a set (components) also takes/gives each component's qty x n; its own counter, if any, still applies
   function takeStock(itemId, qty) {
-    const r = get('SELECT name, stock_left, sold_out FROM menu_items WHERE id=?', itemId);
-    if (!r || r.stock_left == null) return;
-    if (r.stock_left < qty) fail(409, 'insufficient_stock', `${r.name}은(는) ${r.stock_left}개만 남았습니다.`, { id: itemId, left: r.stock_left, ids: [itemId], names: [r.name], items: [{ id: itemId, name: r.name, left: r.stock_left }] });
-    const left = r.stock_left - qty;
-    run('UPDATE menu_items SET stock_left=? WHERE id=?', left, itemId);
-    if (left === 0 && !r.sold_out) run('UPDATE menu_items SET sold_out=1, stock_auto=1 WHERE id=?', itemId); // automatic sold-out
+    const r = get('SELECT name, stock_left, sold_out, components FROM menu_items WHERE id=?', itemId);
+    if (!r) return;
+    const short = (left, msg) => fail(409, 'insufficient_stock', msg, { id: itemId, left, ids: [itemId], names: [r.name], items: [{ id: itemId, name: r.name, left }] });
+    if (r.stock_left != null && r.stock_left < qty) short(r.stock_left, `${r.name}은(는) ${r.stock_left}개만 남았습니다.`);
+    const comps = compsOf(r);
+    for (const c of comps) { const x = dbItem(c.id); if (x && x.stock_left != null && x.stock_left < c.qty * qty) short(Math.floor(x.stock_left / c.qty), `${r.name}의 구성 ${x.name}이(가) ${x.stock_left}개만 남았습니다.`); }
+    if (r.stock_left != null) {
+      const left = r.stock_left - qty;
+      run('UPDATE menu_items SET stock_left=? WHERE id=?', left, itemId);
+      if (left === 0 && !r.sold_out) run('UPDATE menu_items SET sold_out=1, stock_auto=1 WHERE id=?', itemId); // automatic sold-out
+    }
+    for (const c of comps) takeStock(c.id, c.qty * qty);
   }
   function giveStock(itemId, qty) {
-    const r = get('SELECT stock_left, stock_auto FROM menu_items WHERE id=?', itemId);
-    if (!r || r.stock_left == null) return;
-    const left = Math.min(9999, r.stock_left + qty);
-    run('UPDATE menu_items SET stock_left=? WHERE id=?', left, itemId);
-    if (left > 0 && r.stock_auto) run('UPDATE menu_items SET sold_out=0, stock_auto=0 WHERE id=?', itemId); // only an AUTOMATIC sold-out is lifted
+    const r = get('SELECT stock_left, stock_auto, components FROM menu_items WHERE id=?', itemId);
+    if (!r) return;
+    if (r.stock_left != null) {
+      const left = Math.min(9999, r.stock_left + qty);
+      run('UPDATE menu_items SET stock_left=? WHERE id=?', left, itemId);
+      if (left > 0 && r.stock_auto) run('UPDATE menu_items SET sold_out=0, stock_auto=0 WHERE id=?', itemId); // only an AUTOMATIC sold-out is lifted
+    }
+    for (const c of compsOf(r)) giveStock(c.id, c.qty * qty);
   }
   // refund bookkeeping: the open refund entries of an order always add up to what is still owed to the guest
   const refundDoneSum = (oid) => get('SELECT COALESCE(SUM(amount),0) s FROM refunds WHERE order_id=? AND done_at IS NOT NULL', oid).s;
@@ -455,11 +503,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const cats = all('SELECT id, name, sort FROM menu_categories ORDER BY sort, id');
     const rows = all(`SELECT i.*, c.name cat${admin ? ', (SELECT COUNT(*) FROM order_items oi JOIN orders oo ON oo.id=oi.order_id WHERE oi.item_id=i.id AND oo.table_id>0) used' : ''} FROM menu_items i JOIN menu_categories c ON c.id=i.category_id ORDER BY c.sort, c.id, i.sort, i.rowid`);
     const vis = admin ? rows : rows.filter((r) => !r.hidden);
+    const look = (id) => rows.find((r) => r.id === id);
     const out = {
       categories: (admin ? cats : cats.filter((c) => vis.some((r) => r.category_id === c.id))).map((c) => c.name),
       items: vis.map((r) => ({
-        id: r.id, name: r.name, price: r.price, cat: r.cat, desc: r.descr, soldOut: !!r.sold_out, photo: r.photo ? '/photos/' + r.photo : null,
-        stockLeft: admin ? (r.stock_left ?? null) : (r.stock_left != null && r.stock_left <= 5 ? r.stock_left : null), // guests only see small counts ("N개 남음")
+        id: r.id, name: r.name, price: r.price, cat: r.cat, desc: r.descr, soldOut: !!r.sold_out || setBlocked(r, look), photo: r.photo ? '/photos/' + r.photo : null,
+        stockLeft: (() => { const a = stockAvail(r, look); return admin ? (a ?? null) : (a != null && a <= 5 ? a : null); })(), // guests only see small counts ("N개 남음"); a set shows the fewest its components allow
+        ...(r.components ? { components: compView(r, look) } : {}),
         ...(admin ? { hidden: !!r.hidden, sortOrder: r.sort, categoryId: r.category_id, inUse: r.used > 0, stockAuto: !!r.stock_auto } : {}),
       })),
     };
@@ -494,6 +544,15 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const adminItem = (id) => menuView(true).items.find((i) => i.id === id);
 
   const checkStockLeft = (v) => { if (!Number.isInteger(v) || v < 0 || v > 9999) fail(400, 'bad_stock_left', '남은 수량은 0~9999 사이 정수이거나 비워 두어야 합니다.'); return v; };
+  // components input -> JSON string for the column, or null (absent / null / [] clears it)
+  function checkComponents(v, selfId) {
+    if (v == null || (Array.isArray(v) && !v.length)) return null;
+    const p = componentProblem(v, selfId, (id) => { const x = dbItem(id); return x && { hasComponents: !!x.components }; });
+    if (p) fail(400, 'bad_components', p);
+    if (selfId) { const u = usedAsComponent(selfId); if (u) fail(400, 'bad_components', `${u.name}의 구성으로 쓰이는 메뉴는 세트로 만들 수 없습니다.`); }
+    return JSON.stringify(v.map(({ id, qty }) => ({ id, qty })));
+  }
+  const compText = (r) => compView(r).map((c) => `${c.name}×${c.qty}`).join(', ') || '없음';
   function createItem(body) {
     const name = cleanLabel(body.name, 1, 30, 'bad_name', '메뉴 이름');
     const price = checkPrice(body.price);
@@ -501,12 +560,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const cat = cleanLabel(body.category, 1, 12, 'bad_category', '카테고리 이름');
     if (body.hidden != null && typeof body.hidden !== 'boolean') fail(400, 'bad_hidden', 'hidden은 true/false여야 합니다.');
     const stockLeft = body.stockLeft == null ? null : checkStockLeft(body.stockLeft);
+    const comps = checkComponents(body.components, null);
     if (nameTaken(name)) fail(409, 'name_taken', '같은 이름의 메뉴가 이미 있습니다.');
     if (get('SELECT COUNT(*) n FROM menu_items').n >= MENU_MAX_ITEMS) fail(409, 'too_many_items', `메뉴는 ${MENU_MAX_ITEMS}개까지 만들 수 있습니다.`);
     const id = tx(() => {
       const nid = 'm' + crypto.randomBytes(5).toString('hex');
-      run('INSERT INTO menu_items(id,name,price,category_id,descr,hidden,sort,stock_left,sold_out,stock_auto) VALUES(?,?,?,?,?,?,(SELECT COALESCE(MAX(sort), -1) + 1 FROM menu_items),?,?,?)', nid, name, price, categoryByName(cat), descr, body.hidden ? 1 : 0, stockLeft, stockLeft === 0 ? 1 : 0, stockLeft === 0 ? 1 : 0);
-      audit('menu_create', `item ${nid}`, `price ${price}`, `메뉴 추가 · ${name} · ${W(price)}`);
+      run('INSERT INTO menu_items(id,name,price,category_id,descr,hidden,sort,stock_left,sold_out,stock_auto,components) VALUES(?,?,?,?,?,?,(SELECT COALESCE(MAX(sort), -1) + 1 FROM menu_items),?,?,?,?)', nid, name, price, categoryByName(cat), descr, body.hidden ? 1 : 0, stockLeft, stockLeft === 0 ? 1 : 0, stockLeft === 0 ? 1 : 0, comps);
+      audit('menu_create', `item ${nid}`, `price ${price}${comps ? `, components ${comps}` : ''}`, `메뉴 추가 · ${name} · ${W(price)}${comps ? ` · 구성 ${compText({ components: comps })}` : ''}`);
       return nid;
     });
     return adminItem(id);
@@ -514,7 +574,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function updateItem(id, body) {
     const cur = get('SELECT * FROM menu_items WHERE id=?', id) || fail(404, 'no_item', '없는 메뉴입니다.');
     const has = (k) => Object.hasOwn(body, k);
-    if (!['name', 'price', 'category', 'desc', 'hidden', 'sortOrder', 'stockLeft'].some(has)) fail(400, 'nothing_to_update', '바꿀 항목이 없습니다.');
+    if (!['name', 'price', 'category', 'desc', 'hidden', 'sortOrder', 'stockLeft', 'components'].some(has)) fail(400, 'nothing_to_update', '바꿀 항목이 없습니다.');
     const name = has('name') ? cleanLabel(body.name, 1, 30, 'bad_name', '메뉴 이름') : cur.name;
     const price = has('price') ? checkPrice(body.price) : cur.price;
     const descr = has('desc') ? cleanLabel(body.desc, 0, 60, 'bad_desc', '설명') : cur.descr;
@@ -522,6 +582,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (has('hidden') && typeof body.hidden !== 'boolean') fail(400, 'bad_hidden', 'hidden은 true/false여야 합니다.');
     if (has('sortOrder') && (!Number.isInteger(body.sortOrder) || body.sortOrder < 0 || body.sortOrder > 100000)) fail(400, 'bad_sort', 'sortOrder가 올바르지 않습니다.');
     const stockLeft = has('stockLeft') ? (body.stockLeft === null ? null : checkStockLeft(body.stockLeft)) : cur.stock_left;
+    const comps = has('components') ? checkComponents(body.components, id) : cur.components;
     if (nameTaken(name, id)) fail(409, 'name_taken', '같은 이름의 메뉴가 이미 있습니다.');
     tx(() => {
       run('UPDATE menu_items SET name=?, price=?, descr=?, category_id=?, hidden=?, sort=? WHERE id=?', name, price, descr, cat ? categoryByName(cat) : cur.category_id,
@@ -533,6 +594,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       }
       const ch = [];
       const ko = [];
+      if (comps !== cur.components) {
+        run('UPDATE menu_items SET components=? WHERE id=?', comps, id);
+        ch.push(`components ${cur.components ?? '-'}→${comps ?? '-'}`); ko.push(`구성 ${cur.components ? compText(cur) : '없음'}→${comps ? compText({ components: comps }) : '없음'}`);
+      }
       if (price !== cur.price) { ch.push(`price ${cur.price}→${price}`); ko.push(`가격 ${W(cur.price)}→${W(price)}`); }
       if (name !== cur.name) { ch.push('name'); ko.push(`이름 ${cur.name}→${name}`); }
       if (has('hidden') && !!cur.hidden !== body.hidden) { ch.push(body.hidden ? 'hidden' : 'shown'); ko.push(body.hidden ? '숨김' : '표시'); }
@@ -544,6 +609,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function deleteItem(id) {
     if (!get('SELECT 1 FROM menu_items WHERE id=?', id)) fail(404, 'no_item', '없는 메뉴입니다.');
     if (get('SELECT 1 FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.item_id=? AND o.table_id>0 LIMIT 1', id)) fail(409, 'in_use', '주문 내역이 있는 메뉴는 삭제할 수 없습니다. 숨김 처리해 주세요.');
+    const set = usedAsComponent(id);
+    if (set) fail(409, 'in_use', `${set.name}의 구성으로 쓰이는 메뉴는 삭제할 수 없습니다. 먼저 세트 구성에서 빼 주세요.`);
     const photo = get('SELECT photo FROM menu_items WHERE id=?', id).photo;
     run('DELETE FROM menu_items WHERE id=?', id);
     removePhotoFile(photo);
@@ -749,11 +816,16 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (unknown.length) fail(400, 'unknown_item', '없는 메뉴가 있습니다.', { ids: unknown });
     const gone = lines.filter((l) => rows.get(l.id).sold_out && !rows.get(l.id).hidden).map((l) => l.id); // hidden items (staff only) are not sold-out checked
     if (gone.length) fail(409, 'sold_out', '품절된 메뉴가 있습니다.', { ids: gone, names: gone.map((id) => rows.get(id).name) });
-    const short = tableId === 0 ? [] : lines.filter((l) => rows.get(l.id).stock_left != null && l.qty > rows.get(l.id).stock_left);
+    // total demand per stock item over all lines AND set components (라면×2 + 라면세트×1 = 3 라면); a line is short if any item it touches is
+    const demand = new Map();
+    for (const l of lines) for (const [id, n] of [[l.id, l.qty], ...compsOf(rows.get(l.id)).map((c) => [c.id, c.qty * l.qty])]) demand.set(id, (demand.get(id) || 0) + n);
+    const lack = (id) => { const s = dbItem(id)?.stock_left; return s != null && demand.get(id) > s; };
+    const short = tableId === 0 ? [] : lines.filter((l) => lack(l.id) || compsOf(rows.get(l.id)).some((c) => lack(c.id)));
     if (short.length) {
+      const left = (l) => stockAvail(rows.get(l.id));
       fail(409, 'insufficient_stock', '남은 수량이 부족한 메뉴가 있습니다.', {
-        id: short[0].id, left: rows.get(short[0].id).stock_left, ids: short.map((l) => l.id), names: short.map((l) => rows.get(l.id).name),
-        items: short.map((l) => ({ id: l.id, name: rows.get(l.id).name, left: rows.get(l.id).stock_left })),
+        id: short[0].id, left: left(short[0]), ids: short.map((l) => l.id), names: short.map((l) => rows.get(l.id).name),
+        items: short.map((l) => ({ id: l.id, name: rows.get(l.id).name, left: left(l) })),
       });
     }
     if (!staff && body.expectedTotal != null && !Number.isInteger(body.expectedTotal)) fail(400, 'bad_expected_total', 'expectedTotal은 정수여야 합니다.');

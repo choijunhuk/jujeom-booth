@@ -8177,3 +8177,118 @@ test('L6 trust follows money: a guest-entered headcount counts as min(people, PA
     for (let n = 6; n <= 9; n++) { await guestSets(n, 30); const l = await kGuests(srv, tk[n - 1], 5); assert.equal(kEarned(await kFinish(tk[n - 1], l), P.id), 1, `table ${n}`); }
   }, { env: KENV });
 });
+
+// ---------- set menus: a set consumes its components' stock ----------
+const SET_MENU = {
+  categories: ['세트', '안주'],
+  items: [
+    { id: 'set1', name: '라면세트', price: 12000, cat: '세트', components: [{ id: 'ramen', qty: 1 }, { id: 'sausage', qty: 2 }] },
+    { id: 'ramen', name: '라면', price: 6000, cat: '안주', stock: 4 },
+    { id: 'sausage', name: '소세지', price: 7000, cat: '안주', stock: 9 },
+    { id: 'plain', name: '무제한', price: 1000, cat: '안주' },
+  ],
+};
+const stockOfItem = async (s, id) => (await s.get('/api/staff/state')).json.menu.items.find((i) => i.id === id);
+
+test('set menu: menu.json components seed; a bad components list is not seeded', async () => {
+  await withBooth(async ({ s }) => {
+    const set = await stockOfItem(s, 'set1');
+    assert.deepEqual(set.components, [{ id: 'ramen', qty: 1, name: '라면' }, { id: 'sausage', qty: 2, name: '소세지' }]);
+    assert.equal(set.stockLeft, 4, 'min(4 ramen / 1, 9 sausage / 2)');
+    assert.equal((await stockOfItem(s, 'ramen')).components, undefined);
+  }, { menu: SET_MENU });
+  const mk = (components) => ({ categories: ['a'], items: [{ id: 'x', name: 'X', price: 1000, cat: 'a', components }, { id: 'y', name: 'Y', price: 1000, cat: 'a', components: [{ id: 'z', qty: 1 }] }, { id: 'z', name: 'Z', price: 1000, cat: 'a' }] });
+  for (const bad of [[{ id: 'x', qty: 1 }], [{ id: 'nope', qty: 1 }], [{ id: 'y', qty: 1 }], [{ id: 'z', qty: 0 }], [{ id: 'z', qty: 11 }], [{ id: 'z', qty: 1.5 }], Array.from({ length: 7 }, () => ({ id: 'z', qty: 1 }))]) {
+    const srv = await boot({ menu: mk(bad) });
+    try { assert.equal((await (await staffLogin(srv)).get('/api/staff/state')).json.menu.items.length, 0, JSON.stringify(bad)); } finally { await srv.stop(); }
+  }
+});
+
+test('set menu: ordering takes component stock, cancelling gives it back, edits follow the diff, the test table consumes nothing', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const left = async () => [(await stockOfItem(s, 'ramen')).stockLeft, (await stockOfItem(s, 'sausage')).stockLeft];
+    const g = new Client(srv);
+    const o = (await order(g, tk[0], [{ id: 'set1', qty: 2 }])).json.order;
+    assert.deepEqual(await left(), [2, 5]);
+    assert.equal((await new Client(srv).get(`/api/t/${tk[0]}`)).json.menu.items.find((i) => i.id === 'set1').stockLeft, 2);
+    // edit diff: 2 -> 1 gives one set back, 1 -> 2 takes it again
+    await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'set1', qty: 1 }] });
+    assert.deepEqual(await left(), [3, 7]);
+    await s.post(`/api/staff/orders/${o.id}/items`, { items: [{ id: 'set1', qty: 2 }] });
+    assert.deepEqual(await left(), [2, 5]);
+    // a service line of a set also consumes
+    await s.post(`/api/staff/orders/${o.id}/service`, { itemId: 'set1', qty: 1 });
+    assert.deepEqual(await left(), [1, 3]);
+    await s.post(`/api/staff/orders/${o.id}/status`, { status: 'cancelled' });
+    assert.deepEqual(await left(), [4, 9]);
+    // the test table never consumes
+    const tt = await testTokenOf(s);
+    assert.equal((await order(new Client(srv), tt, [{ id: 'set1', qty: 3 }])).status, 201);
+    assert.deepEqual(await left(), [4, 9]);
+  }, { menu: SET_MENU });
+});
+
+test('set menu: demand is aggregated over lines and components; a short component refuses the whole order', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await s.post('/api/staff/menu/items/ramen', { stockLeft: 2 });
+    const g = new Client(srv);
+    const r = await order(g, tk[0], [{ id: 'ramen', qty: 2 }, { id: 'set1', qty: 1 }]);
+    assert.equal(r.status, 409);
+    assert.equal(r.json.error, 'insufficient_stock');
+    assert.ok(r.json.ids.includes('set1') && r.json.ids.includes('ramen') && r.json.items.every((i) => typeof i.left === 'number'));
+    assert.deepEqual([(await stockOfItem(s, 'ramen')).stockLeft, (await stockOfItem(s, 'sausage')).stockLeft], [2, 9], 'nothing consumed');
+    assert.equal((await order(g, tk[0], [{ id: 'set1', qty: 3 }])).json.error, 'insufficient_stock');
+    assert.equal((await order(g, tk[0], [{ id: 'ramen', qty: 1 }, { id: 'set1', qty: 1 }])).status, 201);
+    assert.equal((await stockOfItem(s, 'ramen')).stockLeft, 0);
+  }, { menu: SET_MENU });
+});
+
+test('set menu: a sold-out or too-low component sells the set out for guests and staff', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const guestSet = async () => (await new Client(srv).get(`/api/t/${tk[0]}`)).json.menu.items.find((i) => i.id === 'set1');
+    assert.equal((await guestSet()).soldOut, false);
+    await s.post('/api/staff/menu/sausage/soldout', { soldOut: true });
+    assert.equal((await guestSet()).soldOut, true);
+    assert.equal((await stockOfItem(s, 'set1')).soldOut, true);
+    const r = await order(new Client(srv), tk[0], [{ id: 'set1', qty: 1 }]);
+    assert.deepEqual([r.status, r.json.error, r.json.ids], [409, 'sold_out', ['set1']]);
+    await s.post('/api/staff/menu/sausage/soldout', { soldOut: false });
+    await s.post('/api/staff/menu/items/sausage', { stockLeft: 1 }); // a set needs 2 sausages
+    assert.equal((await guestSet()).soldOut, true);
+    assert.equal((await stockOfItem(s, 'set1')).stockLeft, 0);
+    await s.post('/api/staff/menu/items/sausage', { stockLeft: 3 });
+    assert.deepEqual([(await guestSet()).soldOut, (await guestSet()).stockLeft], [false, 1]);
+    // the set's own counter also applies
+    await s.post('/api/staff/menu/items/set1', { stockLeft: 1 });
+    await s.post('/api/staff/menu/items/sausage', { stockLeft: 9 });
+    assert.equal((await stockOfItem(s, 'set1')).stockLeft, 1);
+    assert.equal((await order(new Client(srv), tk[0], [{ id: 'set1', qty: 2 }])).json.error, 'insufficient_stock');
+  }, { menu: SET_MENU });
+});
+
+test('set menu: staff API validates components; a component cannot be deleted or become a set; audit records the change', async () => {
+  await withBooth(async ({ s }) => {
+    const upd = (id, components) => s.post(`/api/staff/menu/items/${id}`, { components });
+    const code = async (p) => (await p).json.error;
+    assert.equal(await code(upd('plain', [{ id: 'plain', qty: 1 }])), 'bad_components', 'self');
+    assert.equal(await code(upd('plain', [{ id: 'set1', qty: 1 }])), 'bad_components', 'nested');
+    assert.equal(await code(upd('plain', [{ id: 'nope', qty: 1 }])), 'bad_components', 'unknown');
+    for (const qty of [0, 11, 1.5, '1']) assert.equal(await code(upd('plain', [{ id: 'ramen', qty }])), 'bad_components', `qty ${qty}`);
+    assert.equal(await code(upd('plain', 'ramen')), 'bad_components');
+    assert.equal(await code(upd('plain', [{ id: 'ramen', qty: 1 }, { id: 'ramen', qty: 1 }])), 'bad_components', 'duplicate');
+    assert.equal(await code(upd('ramen', [{ id: 'plain', qty: 1 }])), 'bad_components', 'an item used as a component cannot become a set');
+    assert.equal(await code(s.post('/api/staff/menu/items', { name: '새 세트', price: 1000, category: '세트', components: [{ id: 'set1', qty: 1 }] })), 'bad_components');
+    const del = await s.post('/api/staff/menu/items/ramen/delete', {});
+    assert.deepEqual([del.status, del.json.error], [409, 'in_use']);
+    const made = await s.post('/api/staff/menu/items', { name: '새 세트', price: 1000, category: '세트', components: [{ id: 'plain', qty: 2 }] });
+    assert.equal(made.status, 200, made.text);
+    assert.deepEqual(made.json.item.components, [{ id: 'plain', qty: 2, name: '무제한' }]);
+    const ch = await upd(made.json.item.id, [{ id: 'ramen', qty: 1 }, { id: 'plain', qty: 1 }]);
+    assert.equal(ch.status, 200, ch.text);
+    assert.equal(ch.json.item.components.length, 2);
+    assert.ok(JSON.stringify(await auditOf(s)).includes('구성'), 'audit records the components change');
+    assert.equal((await upd(made.json.item.id, [])).json.item.components, undefined);
+    assert.equal((await upd('set1', null)).json.item.components, undefined);
+    assert.equal((await s.post('/api/staff/menu/items/ramen/delete', {})).status, 200, 'deletable once nothing uses it');
+  }, { menu: SET_MENU });
+});
