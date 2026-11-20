@@ -1418,7 +1418,8 @@
     var recBox = rec ? h('div', { class: 'rec' },
       h('div', { class: 'grow' }, h('span', { class: 'tag ok' }, '추천'), h('b', { style: 'font-size:1.15rem' }, rec.intent ? cLabel(rec) : rec.table + '번 · ' + won(rec.balance != null ? rec.balance : rec.total)), h('span', { class: 'muted' }, (rec.intent ? '"낼게요"를 누른 이름과 문자 이름이 같아요' : '입금자 ' + nm(rec.depositor) + ' · 문자와 같은 이름') + ' · ' + SC.agoText(rec.createdAt))),
       abtn('btn btn-primary btn-block rec-btn', '입금 확인', function () { return doAssign(n, cObj(rec), false); })) : null;
-    var cands = (n.candidates || []).filter(function (c) { return !rec || c.id !== rec.id; }).map(function (c) {
+    // compare the object, not the id: an intent candidate shares its cover order's id with that order's other candidates
+    var cands = (n.candidates || []).filter(function (c) { return c !== rec; }).map(function (c) {
       var o = cObj(c);
       return h('div', { class: 'cand' },
         h('div', { class: 'grow' }, h('b', null, cLabel(c)), h('span', { class: 'muted' }, c.intent ? '손님이 "낼게요"를 눌렀어요 · ' + SC.agoText(c.createdAt) : (c.depositor ? '입금자 ' + nm(c.depositor) : '입금자명 없음') + ' · ' + SC.agoText(c.createdAt))),

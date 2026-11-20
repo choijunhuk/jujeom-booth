@@ -6369,6 +6369,55 @@ test('two same-amount share intents at one table with different payers: auto-con
   } finally { await d.srv.stop(); }
 });
 
+test('a share taken by hand from a payer with an open "낼게요" closes that intent (their later transfer is not booked as another share)', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    await coverOn(s);
+    await partyOf(s, 1, 4);
+    const g = await guestWithDevice(srv); const g2 = await guestWithDevice(srv);
+    const iA = (await g.post(`/api/t/${tk[0]}/cover/intents`, { payer: '김철수', shares: 1 })).json;
+    const iB = (await g2.post(`/api/t/${tk[0]}/cover/intents`, { payer: '이영희', shares: 1 })).json;
+    const c = await coverIn(s, 1);
+    const r = await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 1, payer: '김 철수' });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents.map((i) => i.id), [iB.id]);
+    const n = await d.sms(3000, '김철수');
+    assert.equal(n.status, 'pending');
+    assert.equal((await coverIn(s, 1)).paidAmount, 3000);
+    assert.ok(!(await s.get('/api/staff/state')).json.coverIntents.some((i) => i.id === iA.id));
+    // an amount that is not whole shares closes nothing; a whole-share amount (3,000) does
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', amount: 1000, payer: '이영희' })).status, 200);
+    assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents.map((i) => i.id), [iB.id]);
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', amount: 3000, payer: '이영희' })).status, 200);
+    assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents, []);
+    assert.equal((await d.sms(3000, '이영희')).status, 'pending');
+  } finally { await d.srv.stop(); }
+});
+
+test('two open "낼게요" with the same payer: a 2-share hand payment closes the 2-share one, not the oldest', async () => {
+  const d = await depositSetup();
+  try {
+    const { srv, s, tk } = d;
+    await coverOn(s);
+    await partyOf(s, 1, 4);
+    const g1 = await guestWithDevice(srv); const g2 = await guestWithDevice(srv);
+    const i1 = (await g1.post(`/api/t/${tk[0]}/cover/intents`, { payer: '김철수', shares: 1 })).json;
+    const i2 = (await g2.post(`/api/t/${tk[0]}/cover/intents`, { payer: '김철수', shares: 2 })).json;
+    const c = await coverIn(s, 1);
+    assert.equal((await s.post(`/api/staff/orders/${c.id}/paid`, { paid: true, method: 'cash', shares: 2, payer: '김철수' })).status, 200);
+    assert.deepEqual((await s.get('/api/staff/state')).json.coverIntents.map((i) => i.id), [i1.id]);
+    assert.notEqual(i2.id, i1.id);
+    // the 2-share transfer is not booked again
+    assert.equal((await d.sms(6000, '김철수')).status, 'pending');
+    assert.equal((await coverIn(s, 1)).paidAmount, 6000);
+    // voiding that hand payment voids the intent it closed (it is not reopened) and the money leaves the order
+    const pay = (await coverIn(s, 1)).payments.find((p) => p.shares === 2);
+    assert.equal((await s.post(`/api/staff/payments/${pay.id}/void`, { reason: '잘못 입력' })).status, 200);
+    assert.deepEqual([(await coverIn(s, 1)).paidAmount, (await s.get('/api/staff/state')).json.coverIntents.map((i) => i.id)], [0, [i1.id]]);
+  } finally { await d.srv.stop(); }
+});
+
 test('I3 deposit notices match share intents: candidates, recommended payer, assign with intentId, strict auto-confirm', async () => {
   const d = await depositSetup();
   try {

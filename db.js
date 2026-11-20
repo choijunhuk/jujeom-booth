@@ -996,7 +996,17 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         const payer = opts.payer == null || opts.payer === '' ? null : cleanPayer(opts.payer);
         if (amount === 0 && o.total > 0) fail(400, 'bad_amount', '입금액은 0보다 커야 합니다.');
         const balBefore = balanceOf(o);
-        addPayment(o, amount, method, 'staff', ts, null, { shares, payer });
+        const pid = addPayment(o, amount, method, 'staff', ts, null, { shares, payer });
+        // a share taken by hand from someone who had pressed "낼게요": close that intent, or a later transfer of theirs would pay another share
+        // a payment worth whole shares closes intents: the one with exactly those shares, else oldest-first while the shares cover them
+        const unitNow = o.kind === 'cover' && o.cover_mode === 'per_person' ? coverUnit(o.id).unit_price : 0;
+        const closeShares = shares || (unitNow > 0 && amount > 0 && amount % unitNow === 0 ? amount / unitNow : 0);
+        if (o.kind === 'cover' && payer && closeShares && pid) {
+          const same = openIntents(o.table_id, o.seat).filter((x) => sameDepositor(payer, x.payer));
+          const exact = same.find((x) => x.shares === closeShares);
+          let left = closeShares;
+          for (const i of exact ? [exact] : same) if (i.shares <= left) { run("UPDATE cover_intents SET status='paid', payment_id=? WHERE id=?", pid, i.id); left -= i.shares; }
+        }
         if (o.table_id > 0) markHandledNotices([amount, balBefore]);
         audit('order_paid', `order #${id}`, `${method} ${amount} won (total ${o.total})${shares ? `, ${shares} shares` : ''}`, `주문 #${id} 입금 확인 · ${MKO[method]} ${W(amount)}${shares ? ` · ${shares}명분` : ''}${payer ? ` · ${payer}` : ''} · 잔액 ${W(balanceOf(get('SELECT * FROM orders WHERE id=?', id)))}`);
       } else {
