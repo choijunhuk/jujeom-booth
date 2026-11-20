@@ -8292,3 +8292,73 @@ test('set menu: staff API validates components; a component cannot be deleted or
     assert.equal((await s.post('/api/staff/menu/items/ramen/delete', {})).status, 200, 'deletable once nothing uses it');
   }, { menu: SET_MENU });
 });
+
+test('set menu: components cannot change while a live real-table order holds the set (set_in_use); cancelled and test orders do not block', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const upd = (components) => s.post('/api/staff/menu/items/set1', { components });
+    const o = (await order(new Client(srv), tk[0], [{ id: 'set1', qty: 1 }])).json.order;
+    for (const c of [[{ id: 'ramen', qty: 2 }, { id: 'sausage', qty: 2 }], [{ id: 'ramen', qty: 1 }, { id: 'plain', qty: 1 }], [{ id: 'ramen', qty: 1 }], null]) {
+      const r = await upd(c);
+      assert.deepEqual([r.status, r.json.error], [409, 'set_in_use'], JSON.stringify(c));
+    }
+    // adding components to a plain item that a live order holds is refused as well
+    const o2 = (await order(new Client(srv), tk[1], [{ id: 'plain', qty: 1 }])).json.order;
+    assert.equal((await s.post('/api/staff/menu/items/plain', { components: [{ id: 'ramen', qty: 1 }] })).json.error, 'set_in_use');
+    assert.equal((await s.post('/api/staff/menu/items/set1', { price: 13000 })).status, 200, 'other fields are free');
+    assert.equal((await upd([{ id: 'ramen', qty: 1 }, { id: 'sausage', qty: 2 }])).status, 200, 'no difference = allowed');
+    await s.post(`/api/staff/orders/${o.id}/status`, { status: 'cancelled' });
+    await s.post(`/api/staff/orders/${o2.id}/status`, { status: 'cancelled' });
+    assert.equal((await upd([{ id: 'ramen', qty: 1 }])).status, 200);
+    assert.equal((await s.post('/api/staff/menu/items/plain', { components: [{ id: 'ramen', qty: 1 }] })).status, 200);
+    // a test-table order never blocks
+    await order(new Client(srv), await testTokenOf(s), [{ id: 'set1', qty: 1 }]);
+    assert.equal((await upd([{ id: 'ramen', qty: 1 }, { id: 'sausage', qty: 1 }])).status, 200);
+  }, { menu: SET_MENU });
+});
+
+test('set menu: staff view has ownStockLeft and blockedBy, guests get neither components nor blockedBy', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await s.post('/api/staff/menu/items/set1', { stockLeft: 7 });
+    let set = await stockOfItem(s, 'set1');
+    assert.deepEqual([set.ownStockLeft, set.stockLeft, set.blockedBy], [7, 4, []]);
+    assert.equal((await stockOfItem(s, 'ramen')).ownStockLeft, 4);
+    assert.equal((await stockOfItem(s, 'ramen')).blockedBy, undefined);
+    await s.post('/api/staff/menu/sausage/soldout', { soldOut: true });
+    await s.post('/api/staff/menu/items/ramen', { stockLeft: 0 });
+    set = await stockOfItem(s, 'set1');
+    assert.deepEqual([set.soldOut, set.blockedBy], [true, ['라면', '소세지']]);
+    const g = (await new Client(srv).get(`/api/t/${tk[0]}`)).json.menu.items.find((i) => i.id === 'set1');
+    assert.deepEqual([g.soldOut, g.components, g.blockedBy], [true, undefined, undefined]);
+    // a manual sold-out of the set itself still works while it is not blocked
+    await s.post('/api/staff/menu/sausage/soldout', { soldOut: false });
+    await s.post('/api/staff/menu/items/ramen', { stockLeft: 4 });
+    assert.deepEqual([(await stockOfItem(s, 'set1')).soldOut, (await stockOfItem(s, 'set1')).blockedBy], [false, []]);
+    await s.post('/api/staff/menu/set1/soldout', { soldOut: true });
+    assert.deepEqual([(await stockOfItem(s, 'set1')).soldOut, (await stockOfItem(s, 'set1')).blockedBy], [true, []]);
+  }, { menu: SET_MENU });
+});
+
+test('set menu: per-line left lets the guest clamp the cart into a valid order', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await s.post('/api/staff/menu/items/ramen', { stockLeft: 2 });
+    const g = new Client(srv);
+    const r = await order(g, tk[0], [{ id: 'ramen', qty: 2 }, { id: 'set1', qty: 1 }]);
+    assert.equal(r.json.error, 'insufficient_stock');
+    const clamped = r.json.items.map((i) => ({ id: i.id, qty: Math.min(i.left, i.id === 'ramen' ? 2 : 1) })).filter((l) => l.qty > 0);
+    assert.ok(clamped.length > 0);
+    assert.equal((await order(g, tk[0], clamped)).status, 201, JSON.stringify(r.json.items));
+  }, { menu: SET_MENU });
+});
+
+test('set menu: a corrupt components value counts as no components', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const db = dbOf(srv);
+    try {
+      for (const bad of ['{oops', '"x"', '{"id":"ramen"}', '[{"id":"ramen","qty":0}]', '[{"id":5,"qty":1}]', '[null]']) {
+        db.prepare("UPDATE menu_items SET components=? WHERE id='set1'").run(bad);
+        const set = await stockOfItem(s, 'set1');
+        assert.deepEqual([set.components, set.stockLeft, set.soldOut], [undefined, null, false], bad);
+      }
+    } finally { db.close(); }
+  }, { menu: SET_MENU });
+});

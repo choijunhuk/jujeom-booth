@@ -387,10 +387,16 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
 
   // ---------- menu / ordering ----------
   const dbItem = (id) => get('SELECT name, stock_left, sold_out, components FROM menu_items WHERE id=?', id);
-  const compsOf = (r) => (r && r.components ? JSON.parse(r.components) : []);
+  const compsOf = (r) => { // a corrupt value counts as "no components"
+    try {
+      const v = JSON.parse(r && r.components);
+      return Array.isArray(v) ? v.filter((c) => c && typeof c.id === 'string' && Number.isInteger(c.qty) && c.qty > 0) : [];
+    } catch { return []; }
+  };
+  const blockingComps = (r, look = dbItem) => compsOf(r).filter((c) => { const x = look(c.id); return !x || x.sold_out || (x.stock_left != null && x.stock_left < c.qty); }).map((c) => look(c.id)?.name ?? c.id);
   const compView = (r, look = dbItem) => compsOf(r).map((c) => ({ id: c.id, qty: c.qty, name: look(c.id)?.name ?? c.id }));
   // a set is blocked when any component is sold out (manual or auto) or has fewer left than one set needs
-  const setBlocked = (r, look = dbItem) => compsOf(r).some((c) => { const x = look(c.id); return !x || x.sold_out || (x.stock_left != null && x.stock_left < c.qty); });
+  const setBlocked = (r, look = dbItem) => blockingComps(r, look).length > 0;
   // how many of this item can still be ordered: own counter and every component counter (null = unlimited)
   const stockAvail = (r, look = dbItem) => {
     let a = r.stock_left;
@@ -509,7 +515,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       items: vis.map((r) => ({
         id: r.id, name: r.name, price: r.price, cat: r.cat, desc: r.descr, soldOut: !!r.sold_out || setBlocked(r, look), photo: r.photo ? '/photos/' + r.photo : null,
         stockLeft: (() => { const a = stockAvail(r, look); return admin ? (a ?? null) : (a != null && a <= 5 ? a : null); })(), // guests only see small counts ("N개 남음"); a set shows the fewest its components allow
-        ...(r.components ? { components: compView(r, look) } : {}),
+        ...(admin && compsOf(r).length ? { components: compView(r, look), blockedBy: blockingComps(r, look) } : {}), // components are staff-only
+        ...(admin ? { ownStockLeft: r.stock_left ?? null } : {}), // the raw counter of the item itself (a set's stockLeft is the computed minimum)
         ...(admin ? { hidden: !!r.hidden, sortOrder: r.sort, categoryId: r.category_id, inUse: r.used > 0, stockAuto: !!r.stock_auto } : {}),
       })),
     };
@@ -583,6 +590,9 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (has('sortOrder') && (!Number.isInteger(body.sortOrder) || body.sortOrder < 0 || body.sortOrder > 100000)) fail(400, 'bad_sort', 'sortOrder가 올바르지 않습니다.');
     const stockLeft = has('stockLeft') ? (body.stockLeft === null ? null : checkStockLeft(body.stockLeft)) : cur.stock_left;
     const comps = has('components') ? checkComponents(body.components, id) : cur.components;
+    if (comps !== cur.components && get("SELECT 1 FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.item_id=? AND o.table_id>0 AND o.status!='cancelled' LIMIT 1", id)) {
+      fail(409, 'set_in_use', '이 세트가 들어간 진행 중 주문이 있어서 구성을 바꿀 수 없어요. 주문을 처리한 뒤 바꿔 주세요.'); // cancelling would give back stock that was never taken
+    }
     if (nameTaken(name, id)) fail(409, 'name_taken', '같은 이름의 메뉴가 이미 있습니다.');
     tx(() => {
       run('UPDATE menu_items SET name=?, price=?, descr=?, category_id=?, hidden=?, sort=? WHERE id=?', name, price, descr, cat ? categoryByName(cat) : cur.category_id,
@@ -822,7 +832,15 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const lack = (id) => { const s = dbItem(id)?.stock_left; return s != null && demand.get(id) > s; };
     const short = tableId === 0 ? [] : lines.filter((l) => lack(l.id) || compsOf(rows.get(l.id)).some((c) => lack(c.id)));
     if (short.length) {
-      const left = (l) => stockAvail(rows.get(l.id));
+      // most this line can still be ordered given the OTHER lines' demand, per stock item it touches
+      const left = (l) => {
+        let best = Infinity;
+        for (const [id, unit] of [[l.id, 1], ...compsOf(rows.get(l.id)).map((c) => [c.id, c.qty])]) {
+          const s = dbItem(id)?.stock_left;
+          if (s != null) best = Math.min(best, Math.floor((s - (demand.get(id) - unit * l.qty)) / unit));
+        }
+        return Math.max(0, best === Infinity ? 0 : best);
+      };
       fail(409, 'insufficient_stock', '남은 수량이 부족한 메뉴가 있습니다.', {
         id: short[0].id, left: left(short[0]), ids: short.map((l) => l.id), names: short.map((l) => rows.get(l.id).name),
         items: short.map((l) => ({ id: l.id, name: rows.get(l.id).name, left: left(l) })),
