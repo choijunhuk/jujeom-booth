@@ -635,7 +635,7 @@
         var its = d.items && d.items.length ? d.items : [{ id: d.id, name: '', left: d.left }];
         its.forEach(function (i) { if (i.left > 0) cart.items[i.id] = Math.min(cart.items[i.id] || i.left, i.left); else delete cart.items[i.id]; }); saveCart();
         var mm = menuMap();
-        msg = its.map(function (i) { var n = i.name || (mm[i.id] && mm[i.id].name) || '메뉴'; return i.left > 0 ? n + ' ' + i.left + '개만 남았어요' : n + ' 품절'; }).join(', ') + '. 장바구니를 맞췄어요. 확인 후 다시 주문해 주세요.';
+        msg = its.map(function (i) { var n = i.name || (mm[i.id] && mm[i.id].name) || '메뉴'; return i.left > 0 ? n + ' ' + i.left + '개까지 주문할 수 있어요' : its.length > 1 ? n + ' 재고 부족' : n + ' 품절'; }).join(', ') + '. 장바구니를 맞췄어요. 확인 후 다시 주문해 주세요.';
         api('').then(function (s) { if (s.ok) applyState(s.data); }, function () {});
       } else if (e === 'sold_out') {
         (d.ids || []).forEach(function (id) { delete cart.items[id]; }); saveCart();

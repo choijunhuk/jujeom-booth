@@ -8350,6 +8350,20 @@ test('set menu: per-line left lets the guest clamp the cart into a valid order',
   }, { menu: SET_MENU });
 });
 
+test('set menu: lines sharing one short item split it in cart order instead of all dropping to 0', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await s.post('/api/staff/menu/items/ramen', { stockLeft: 2 });
+    const g = new Client(srv);
+    const r = await order(g, tk[0], [{ id: 'ramen', qty: 2 }, { id: 'set1', qty: 2 }]); // 4 ramen wanted, 2 left
+    assert.equal(r.json.error, 'insufficient_stock');
+    const left = Object.fromEntries(r.json.items.map((i) => [i.id, i.left]));
+    assert.deepEqual(left, { ramen: 2, set1: 0 }, 'the first line keeps what is left; the sum always fits');
+    const r2 = await order(g, tk[0], [{ id: 'set1', qty: 2 }, { id: 'ramen', qty: 2 }]);
+    assert.deepEqual(Object.fromEntries(r2.json.items.map((i) => [i.id, i.left])), { set1: 2, ramen: 0 });
+    assert.equal((await order(g, tk[0], [{ id: 'set1', qty: 2 }])).status, 201);
+  }, { menu: SET_MENU });
+});
+
 test('set menu: a corrupt components value counts as no components', async () => {
   await withBooth(async ({ srv, s }) => {
     const db = dbOf(srv);

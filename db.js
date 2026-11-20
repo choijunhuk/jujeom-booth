@@ -591,7 +591,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const stockLeft = has('stockLeft') ? (body.stockLeft === null ? null : checkStockLeft(body.stockLeft)) : cur.stock_left;
     const comps = has('components') ? checkComponents(body.components, id) : cur.components;
     if (comps !== cur.components && get("SELECT 1 FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.item_id=? AND o.table_id>0 AND o.status!='cancelled' LIMIT 1", id)) {
-      fail(409, 'set_in_use', '이 세트가 들어간 진행 중 주문이 있어서 구성을 바꿀 수 없어요. 주문을 처리한 뒤 바꿔 주세요.'); // cancelling would give back stock that was never taken
+      fail(409, 'set_in_use', '이 세트가 들어간 주문이 있어서 구성을 바꿀 수 없어요. 그 주문을 모두 취소하거나 영업 마감 후에 바꿔 주세요.'); // cancelling would give back stock that was never taken
     }
     if (nameTaken(name, id)) fail(409, 'name_taken', '같은 이름의 메뉴가 이미 있습니다.');
     tx(() => {
@@ -832,15 +832,17 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const lack = (id) => { const s = dbItem(id)?.stock_left; return s != null && demand.get(id) > s; };
     const short = tableId === 0 ? [] : lines.filter((l) => lack(l.id) || compsOf(rows.get(l.id)).some((c) => lack(c.id)));
     if (short.length) {
-      // most this line can still be ordered given the OTHER lines' demand, per stock item it touches
-      const left = (l) => {
-        let best = Infinity;
-        for (const [id, unit] of [[l.id, 1], ...compsOf(rows.get(l.id)).map((c) => [c.id, c.qty])]) {
-          const s = dbItem(id)?.stock_left;
-          if (s != null) best = Math.min(best, Math.floor((s - (demand.get(id) - unit * l.qty)) / unit));
-        }
-        return Math.max(0, best === Infinity ? 0 : best);
-      };
+      // hand the remaining stock out line by line in cart order: each line's `left` is what it gets, so clamping every line
+      // to its `left` always fits (lines sharing one item split it instead of all dropping to 0)
+      const rem = new Map(); const got = new Map();
+      for (const l of lines) {
+        const touch = [[l.id, 1], ...compsOf(rows.get(l.id)).map((c) => [c.id, c.qty])].filter(([id]) => dbItem(id)?.stock_left != null);
+        for (const [id] of touch) if (!rem.has(id)) rem.set(id, dbItem(id).stock_left);
+        const take = Math.max(0, Math.min(l.qty, ...touch.map(([id, unit]) => Math.floor(rem.get(id) / unit))));
+        for (const [id, unit] of touch) rem.set(id, rem.get(id) - take * unit);
+        got.set(l.id, take);
+      }
+      const left = (l) => got.get(l.id);
       fail(409, 'insufficient_stock', '남은 수량이 부족한 메뉴가 있습니다.', {
         id: short[0].id, left: left(short[0]), ids: short.map((l) => l.id), names: short.map((l) => rows.get(l.id).name),
         items: short.map((l) => ({ id: l.id, name: rows.get(l.id).name, left: left(l) })),
