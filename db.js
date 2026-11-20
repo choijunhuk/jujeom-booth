@@ -118,9 +118,20 @@ const BANK_RE = /^(신한|국민|우리|하나|농협|nh|카카오|카뱅|토스
 const NOT_NAMES = /^(입금|입출금|잔액|출금|이체|계좌|통장|원$|web발신|웹발신|sms|문자|체크|타행|당행|모바일|스마트폰|인터넷|전자금융|뱅킹|from|총|합계)/i;
 const IGNORE_WORD_RE = /(?<!입)출금|취소|정정|오류|반환|실패|입금\s*(계좌|취소|은행|예정|한도)/; // 입출금통장 (KakaoBank) is a template word, not a withdrawal
 const spaces = (n) => ' '.repeat(n);
+// Shinhan SOL push, forwarded as "<title>\n<text>": "입금\n100원 최준혁 입출금(1394)\r\n11.20 19:23 잔액  758,333원".
+// The generic rules refuse it (amount and name share a line; the account's last 4 digits look like a second amount), so it is
+// accepted only as an exact whole-text match: the amount opens a line the bank writes right after the bare title "입금", so no
+// sender text can precede or touch it, and the sender's name must be 2..10 letters (no digits, spaces or punctuation to smuggle a number).
+const SHINHAN_SOL_RE = /^입금\n([1-9]\d{0,2}(?:,\d{3})*)원 ([가-힣A-Za-z]{2,10}) [가-힣A-Za-z]{1,20}\((\d{4})\)\n+\d{1,2}\.\d{1,2} \d{1,2}:\d{2} 잔액 +\d{1,3}(?:,\d{3})*원$/;
+const transferTime = (raw) => { const m = /(?:^|\D)(\d{1,2}):(\d{2})(?!\d)/.exec(String(raw).normalize('NFKC')); return m ? `${Number(m[1])}:${m[2]}` : null; }; // HH:MM the bank printed
 function parseDeposit(rawText) {
   const text = String(rawText).normalize('NFKC').replace(/[\u2028\u2029]/g, ' ').replace(/\r/g, '\n'); // full-width digits become ASCII; no exotic line starts
   if (!text.includes('입금')) return { kind: 'ignore' }; // withdrawals and everything that is not a deposit
+  const sol = String(rawText).length <= 300 && !IGNORE_WORD_RE.test(text) && SHINHAN_SOL_RE.exec(text.trimEnd());
+  if (sol) {
+    const amount = Number(sol[1].replace(/,/g, ''));
+    if (amount >= 100 && amount <= 10000000) return { kind: 'deposit', amount, depositor: sol[2], acct4: sol[3], at: transferTime(text), autoEligible: true, reasons: [] }; // acct4: checked against the booth account
+  }
   const w = text
     .replace(/\d{4}[-./]\d{1,2}[-./]\d{1,2}/g, ' ') // dates
     .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, ' ') // times
@@ -176,7 +187,7 @@ function parseDeposit(rawText) {
   if (IGNORE_WORD_RE.test(text)) reasons.unshift('ignore_word');
   const amount = pick ? pick.v : null;
   depositor = shown === null ? null : shown.replace(INVISIBLE, '') || shown;
-  return { kind: review ? 'review' : 'deposit', amount, depositor, autoEligible: !reasons.length && amount !== null, reasons };
+  return { kind: review ? 'review' : 'deposit', amount, depositor, at: transferTime(text), autoEligible: !reasons.length && amount !== null, reasons };
 }
 const depKey = (x) => String(x).normalize('NFKC').replace(/\s+/g, '').toLowerCase();
 // auto-confirm name rule: equal after normalisation, nothing else (a prefix rule would let a guest guess only the first characters of someone's name)
@@ -282,6 +293,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (!Number.isInteger(i.price) || i.price < 0 || i.price > 1000000 || i.price % 100 !== 0) return `bad price for ${JSON.stringify(i.name)} (integer, multiple of 100, 0..1000000)`;
       if (typeof i.cat !== 'string' || !cats.has(key(i.cat))) return `item ${JSON.stringify(i.name)} uses a category that is not in "categories"`;
       if (i.desc != null && (typeof i.desc !== 'string' || [...i.desc].length > 60)) return `bad desc for ${JSON.stringify(i.name)}`;
+      if (i.stock != null && (!Number.isInteger(i.stock) || i.stock < 1 || i.stock > 9999)) return `bad stock for ${JSON.stringify(i.name)} (integer 1..9999, omit for unlimited)`;
     }
     return null;
   };
@@ -298,8 +310,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       };
       for (const c of menu.categories || []) ensureCat(c);
       menu.items.forEach((i, idx) => {
-        run('INSERT INTO menu_items(id,name,price,category_id,descr,sold_out,sort) VALUES(?,?,?,?,?,?,?)',
-          i.id, i.name, i.price, ensureCat(i.cat), i.desc || '', legacySoldOut.has(i.id) ? 1 : 0, idx);
+        run('INSERT INTO menu_items(id,name,price,category_id,descr,sold_out,sort,stock_left) VALUES(?,?,?,?,?,?,?,?)',
+          i.id, i.name, i.price, ensureCat(i.cat), i.desc || '', legacySoldOut.has(i.id) ? 1 : 0, idx, i.stock ?? null);
       });
     });
   }
@@ -1447,6 +1459,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   const orderVisible = (o) => !!get('SELECT 1 FROM tables t WHERE t.id=? AND t.seat=? AND t.id BETWEEN 1 AND ?', o.table_id, o.seat, tableCount); // test orders are never matched / assigned a deposit
   const candOut = (o) => ({ id: o.id, table: o.table_id, total: o.total, balance: o.balance ?? 0, depositor: o.depositor ?? null, createdAt: o.created_at, intent: o.intent ?? null });
   // the one decision function: used for real notices and for the staff "test" preview (which stores nothing)
+  const SAME_DEPOSIT_MS = 10 * 60 * 1000;
   function decideDeposit(p, sameRecent) {
     if (p.kind === 'ignore') return { status: 'ignored', reasons: [] };
     if (p.kind === 'review') return { status: 'review', reasons: p.reasons };
@@ -1455,6 +1468,12 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (sameRecent) reasons.push('duplicate');
     if (!autoConfirmOn()) reasons.push('auto_off');
     if (p.amount > autoMax()) reasons.push('over_max_amount');
+    // the push names the receiving account: a deposit to another account on the same phone must never pay an order
+    if (p.acct4 && String(payAll().account).replace(/\D/g, '').slice(-4) !== p.acct4) reasons.push('other_account');
+    // one transfer can arrive as two DIFFERENT texts (bank push + SMS / another app): the second must not auto-pay a newer same-amount order
+    // (both copies print the bank's transfer time; a genuine second transfer of the same amount by the same person carries a later minute)
+    if (all("SELECT raw FROM deposit_notices WHERE status='matched' AND amount=? AND depositor=? AND received_at>?", p.amount, p.depositor ?? '', now() - SAME_DEPOSIT_MS)
+      .some((r) => { const t = transferTime(r.raw); return !t || !p.at || t === p.at; })) reasons.push('possible_same_deposit');
     const cands = allCandidates(p.amount); // whole balances AND open share intents: one unique, name-equal candidate is the strictness for auto-confirm
     const handled = handPaidSame(p.amount);
     if (handled.length) reasons.push('maybe_already_handled');

@@ -1372,6 +1372,8 @@
     text_too_long: '문자가 너무 길어요 (300자 초과). 내용을 직접 확인하세요',
     auto_off: '자동 확인이 꺼져 있어요',
     over_max_amount: '자동 확인 최대 금액을 넘는 금액이에요',
+    other_account: '부스 계좌가 아닌 다른 계좌로 들어온 입금이에요',
+    possible_same_deposit: '같은 이름·같은 금액 입금이 10분 안에 이미 자동 확인됐어요. 같은 입금의 중복 알림일 수 있어요',
     maybe_already_handled: '이미 손으로 입금 확인한 같은 금액 주문이 있어요',
     no_candidate: '금액이 같은 입금 대기 주문이 없어요 (손님이 아직 주문 전이거나 금액이 달라요)',
     several_candidates: '같은 금액 주문이 여러 건이라 어느 주문인지 몰라요',

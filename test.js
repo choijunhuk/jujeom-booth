@@ -1902,6 +1902,21 @@ test('menu + settings survive a reset; sold-out flags do not', async () => {
   } finally { await srv.stop(); }
 });
 
+test('menu.json "stock" seeds the stock counter; omitted means unlimited; a bad value is not seeded', async () => {
+  const menu = { categories: ['안주'], items: [{ id: 'a', name: '라면', price: 6000, cat: '안주', stock: 2 }, { id: 'b', name: '세트', price: 9000, cat: '안주' }] };
+  const srv = await boot({ menu });
+  try {
+    const s = await staffLogin(srv);
+    const items = (await s.get('/api/staff/state')).json.menu.items;
+    assert.deepEqual(items.map((i) => [i.id, i.stockLeft]), [['a', 2], ['b', null]]);
+  } finally { await srv.stop(); }
+  const bad = await boot({ menu: { categories: ['안주'], items: [{ id: 'a', name: '라면', price: 6000, cat: '안주', stock: 0 }] } });
+  try {
+    const s = await staffLogin(bad);
+    assert.equal((await s.get('/api/staff/state')).json.menu.items.length, 0, 'stock 0 rejects the whole file');
+  } finally { await bad.stop(); }
+});
+
 test('menu.json only seeds an empty menu; later edits survive restarts', async () => {
   const srv = await boot();
   let srv2;
@@ -3352,6 +3367,23 @@ test('deposit parsing: the common bank SMS shapes, hardened for automatic confir
     assert.equal(p.autoEligible, false, JSON.stringify(t));
     assert.ok(p.reasons.includes('multiple_amounts'), JSON.stringify(t) + ' ' + p.reasons);
   }
+  // Shinhan SOL push (MacroDroid "<title>\n<text>", real capture): auto-eligible only as an exact whole-text match
+  const sol = (amt, name, tail = '입출금(1394)') => `입금\n${amt}원 ${name} ${tail}\r\n11.20 19:23 잔액  758,333원`;
+  assert.deepEqual(pick(sol('100', '최준혁')), { kind: 'deposit', amount: 100, depositor: '최준혁', auto: true });
+  assert.deepEqual(pick(sol('16,000', 'Hong')), { kind: 'deposit', amount: 16000, depositor: 'Hong', auto: true });
+  for (const t of [
+    sol('100', '9000원김철'), sol('100', '김철9000'), sol('100', '김철 9000원'), sol('100', '김철,9'), // name tampering
+    `광고\n${sol('100', '김철')}`, sol('100', '김철').replace('입금\n', '입금 9,000원\n'), sol('100', '김철') + '\n9000원', // text around the template
+    sol('100', '김철', '입출금(13945)'), sol('100', '김철', '(1394)'), sol('1,00', '김철'), sol('50', '김철'), // shape / range
+    sol('100', '김철').replace('입금\n', '입금취소\n'), sol('100', '김철취소'),
+    sol('100', '김철').replace('입금\n', '출금\n'), sol('100', '김철') + '\n입금 9,000원', sol('0,100', '김철'), sol('10,000,001', '김철'),
+    ' ' + sol('100', '김철'), '\n' + sol('100', '김철'), sol('100', '김철').replace(/\r\n.*$/s, ''),
+    sol('100', '김철\r\n'), sol('100', '김철 입출금(1394)\r\n11.20 19:23 잔액 1원\r\n9,000원'),
+  ]) assert.ok(!parseDeposit(t).autoEligible, JSON.stringify(t));
+  assert.equal(parseDeposit(sol('100', '㎏㎏')).depositor, 'kgkg', 'compatibility letters are compared after NFKC, like sameDepositor');
+  assert.equal(parseDeposit(sol('100', '최준혁')).depositor, '최준혁', 'the name, never the account label');
+  assert.equal(parseDeposit(sol('100', '김철')).autoEligible, true);
+  assert.equal(parseDeposit(sol('100', '김철취소')).kind, 'review', 'a reversal word anywhere still forces review');
   // shape of the name
   assert.ok(reasons('입금 16,000원\n홍길동 김철수').includes('several_names'));
   assert.ok(reasons('From: 홍길동\n입금 16,000원\n김철수').includes('several_names'));
@@ -3867,6 +3899,29 @@ test('deposit notices: the staff list is capped at the newest 200', () => {
 });
 
 // ======================= deposit notices: second-model review fixes =======================
+test('Shinhan SOL push: auto-confirms only into the booth account, and one transfer seen twice never pays a second order', async () => {
+  const d = await depositSetup();
+  try {
+    const { tk, s } = d;
+    await s.post('/api/staff/pay', { bank: '신한은행', account: '110-639-481394', holder: '최준혁', confirmAccount: '110639481394' });
+    const push = (amt, name, acct, mm) => `입금\n${amt}원 ${name} 입출금(${acct})\r\n11.20 19:${mm} 잔액  758,333원`;
+    const a = await d.place(tk[0], '김철', 'odeng'); // 9,000
+    const other = await d.notice(push('9,000', '김철', '9999', '01'));
+    assert.equal(other.status, 'pending'); assert.equal((await d.order(a.id)).paid, false, 'another account on the same phone');
+    assert.ok((await d.notices()).find((n) => n.id === other.id).reasons.includes('other_account'));
+    const ok = await d.notice(push('9,000', '김철', '1394', '02'));
+    assert.equal(ok.status, 'matched'); assert.equal((await d.order(a.id)).paid, true);
+    // the same transfer arrives again as a different text (e.g. the SMS): a NEW same-name same-amount order is not paid by it
+    const b = await d.place(tk[1], '김철', 'odeng');
+    const again = await d.notice('[Web발신]\n신한 11/20 19:02\n110-639-***394\n입금 9,000\n잔액 758,333\n김철');
+    assert.equal(again.status, 'pending'); assert.equal((await d.order(b.id)).paid, false);
+    assert.ok((await d.notices()).find((n) => n.id === again.id).reasons.includes('possible_same_deposit'));
+    // a genuine second transfer (a later minute) by the same person for the same amount still confirms on its own
+    const later = await d.notice(push('9,000', '김철', '1394', '05'));
+    assert.equal(later.status, 'matched'); assert.equal((await d.order(b.id)).paid, true);
+  } finally { await d.srv.stop(); }
+});
+
 test('deposit injection: the sender-controlled name can never make a 100 won transfer pay a 9,000 won order', async () => {
   const d = await depositSetup();
   try {
