@@ -9443,6 +9443,7 @@ test('staff coupon move sends the displayed source seating', async () => {
   vm.runInNewContext(src.slice(begin, end), { SO, X, SC: { toast() {}, confirm: async () => true },
     openSheet: (_title, fn) => fn(s), view: () => null, h, note: () => null, toastErr() {}, encodeURIComponent });
   SO.moveCoupon({ code: 'ABC123', table: 1, seat: 5, label: '쿠폰' });
+  X.S.data = { tables: [{ number: 1, seat: 5 }, { number: 2, seat: 10 }] }; // an SSE refresh after the picker opened must not launder the seat staff saw
   buttons.find((b) => b.children?.[0] === '2').attrs.onclick();
   await buttons.find((b) => b.classList).onclick();
   assert.equal(requests[0].url, '/api/staff/coupons/ABC123/move');
@@ -9459,6 +9460,9 @@ test('review round 3: destination seat check on coupon move, recall window survi
     store.addWait('age-dev2', '손님', 1, waitPhone(), true);
     const row = db.prepare('SELECT status, phone FROM waitlist WHERE id=?').get(old.id);
     assert.equal(row?.status, 'noshow', 'still recallable'); assert.ok(row.phone);
+    db.prepare('UPDATE waitlist SET phone=NULL WHERE id=?').run(old.id); // a pre-upgrade ticket without a number is kept on the same deadline
+    store.addWait('age-dev3', '손님', 1, waitPhone(), true);
+    assert.equal(db.prepare('SELECT status FROM waitlist WHERE id=?').get(old.id)?.status, 'noshow');
     // per-ticket sms flag: configured URL but no number left → false
     store.setWaitSmsUrl('https://trigger.macrodroid.com/abc/booth');
     const w = store.addWait('flag-dev', '손님', 1, waitPhone(), true);

@@ -43,7 +43,7 @@
     var nick = h('input', { class: 'y2k-field', type: 'text', maxlength: '10', autocomplete: 'nickname', required: true, 'aria-label': '대기 이름', placeholder: '예: 맥주왕 (최대 10자)' });
     var phone = h('input', { class: 'y2k-field', type: 'tel', inputmode: 'numeric', autocomplete: 'tel', required: true, 'aria-label': '휴대폰 번호', placeholder: '010-1234-5678' });
     var consent = h('input', { type: 'checkbox', required: true, 'aria-label': '호출 안내를 위한 개인정보 수집 동의' });
-    var consentText = h('span', null, '호출 안내를 위해 휴대폰 번호를 받아요. 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.');
+    var consentText = h('span', null, '호출 안내를 위해 휴대폰 번호를 받아요. 문자 호출이 켜져 있으면 부스 휴대폰 자동화 앱(MacroDroid) 서버를 거쳐 문자를 보내요. 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.'); // MacroDroid always disclosed, from first paint: staff may switch texting on after this guest registered
     var hint = h('p', { class: 'hint' }, '이 화면을 열어 두면 호출 때 알려드려요.');
     var out = h('output', { class: 'lcd-sm', 'aria-live': 'polite' }, String(size), h('small', null, '명'));
     var err = h('p', { class: 'err', role: 'alert' }, msg || '');
@@ -76,7 +76,6 @@
     setSize(size);
     function applyInfo(i) {
       setNotice(i.notice);
-      consentText.textContent = '호출 문자를 보내려고 휴대폰 번호를 받아요. 문자는 부스 휴대폰 자동화 앱(MacroDroid) 서버를 거쳐 보내지고, 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.'; // always disclosed: staff may switch texting on after this guest registered
       hint.textContent = i.sms ? '호출되면 문자로도 알려드려요. 이 화면과 진동으로도 알려 드려요.' : '이 화면을 열어 두면 호출 때 알려드려요.';
       form.hidden = !i.open;
       notice.className = i.open ? 'w-sub' : 'err';

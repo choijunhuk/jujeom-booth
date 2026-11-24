@@ -2228,7 +2228,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return changed;
   }
   function clearWait() { const n = run("UPDATE waitlist SET status='cancelled', phone=NULL WHERE status IN ('waiting','called','noshow')").changes; if (n) invalidate(); return n; }
-  const checkpointWaitPhones = () => { db.exec('PRAGMA busy_timeout=0'); try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } finally { db.exec('PRAGMA busy_timeout=5000'); } }; // never stall the event loop on a reader; the next 30 s tick retries
+  const checkpointWaitPhones = () => { db.exec('PRAGMA busy_timeout=0'); try { if (db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()?.busy) console.warn('wal checkpoint busy; retrying next sweep'); } finally { db.exec('PRAGMA busy_timeout=5000'); } }; // never stall the event loop on a reader; the next 30 s tick retries
   const waitInfo = () => { sweepWait(); return { open: waitOpen(), sms: !!waitSmsUrl(), waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, notice: bannerOut() }; };
   function addWait(device, nick, size, phoneInput, consent) {
     if (!waitOpen()) fail(403, 'wait_closed', '지금은 대기 등록을 받지 않습니다.');
@@ -2242,7 +2242,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const t = now();
     while (waitTimes.length && waitTimes[0] < t - 60000) waitTimes.shift();
     if (waitTimes.length >= MAX_WAIT_PER_MIN) fail(429, 'wait_rate', '대기 등록이 몰리고 있습니다. 잠시 후 다시 시도해 주세요.');
-    run("DELETE FROM waitlist WHERE status IN ('seated','cancelled','noshow') AND created_at<? AND NOT (status='noshow' AND recalled=0 AND phone IS NOT NULL AND phone_until>=?)", t - WAIT_KEEP_MS, t); // a no-show still inside its recall window stays recallable
+    run("DELETE FROM waitlist WHERE status IN ('seated','cancelled','noshow') AND created_at<? AND NOT (status='noshow' AND recalled=0 AND phone_until IS NOT NULL AND phone_until>=?)", t - WAIT_KEEP_MS, t); // a no-show still inside its recall window stays recallable
     waitTimes.push(t); // counted before the duplicate check: probing whether a number is waiting costs the same rate budget as registering
     if (get("SELECT 1 FROM waitlist WHERE phone=? AND status IN ('waiting','called')", phone)) fail(409, 'dup_phone', '이미 이 번호로 대기 중입니다.');
     const secret = crypto.randomBytes(12).toString('base64url');
