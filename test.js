@@ -8749,7 +8749,7 @@ test('SMS board settings: boolean-only merged subsets hide data server-side and 
 test('SMS board member: advertises only configured, enabled and positive usable discount settings', async () => {
   await withWaitStore(async (store) => assert.equal(Object.hasOwn(store.boardState(), 'member'), false));
   await withWaitStore(async (store) => {
-    assert.deepEqual(store.boardState().member, { mode: 'percent', pct: 10, amount: 1000 });
+    assert.deepEqual(store.boardState().member, { mode: 'percent', pct: 10, amount: 1000, maxDiscount: 0 }); // spec change: the cap is published so the board can show it
     store.setMemberSettings({ enabled: false }); assert.equal(Object.hasOwn(store.boardState(), 'member'), false);
     store.setMemberSettings({ enabled: true, pct: 0 }); assert.equal(Object.hasOwn(store.boardState(), 'member'), false);
     store.setMemberSettings({ mode: 'fixed', amount: 0 }); assert.equal(Object.hasOwn(store.boardState(), 'member'), false);
@@ -9436,7 +9436,7 @@ test('staff coupon move sends the displayed source seating', async () => {
   const begin = src.indexOf('  SO.moveCoupon = function (c) {'), end = src.indexOf('  // ---------------------------------------------------------------- refunds', begin);
   const buttons = [], requests = [], SO = {};
   const h = (tag, attrs, ...children) => { const n = { tag, attrs, children, setAttribute() {} }; if (tag === 'button') buttons.push(n); return n; };
-  const X = { S: { data: { tables: [{ number: 1 }, { number: 2 }] } },
+  const X = { S: { data: { tables: [{ number: 1, seat: 5 }, { number: 2, seat: 9 }] } }, // spec change: the UI also sends the destination seating it showed
     abtn: (_cls, _label, onclick) => { const n = { onclick, classList: { contains: () => false } }; buttons.push(n); return n; },
     api: async (url, body) => { requests.push({ url, body }); return {}; }, refresh: async () => {} };
   const s = { show() {}, close() {} };
@@ -9446,5 +9446,36 @@ test('staff coupon move sends the displayed source seating', async () => {
   buttons.find((b) => b.children?.[0] === '2').attrs.onclick();
   await buttons.find((b) => b.classList).onclick();
   assert.equal(requests[0].url, '/api/staff/coupons/ABC123/move');
-  assert.deepEqual({ ...requests[0].body }, { table: 2, fromTable: 1, fromSeat: 5 });
+  assert.deepEqual({ ...requests[0].body }, { table: 2, toSeat: 9, fromTable: 1, fromSeat: 5 });
+});
+
+test('review round 3: destination seat check on coupon move, recall window survives age cleanup, per-ticket sms flag, capped member amount on the board', async () => {
+  await withWaitStore(async (store, db) => {
+    // a no-show inside its recall window is not deleted by the 3 h age cleanup of a later registration
+    store.setWaitAutoNext(false);
+    const old = store.addWait('age-dev', '손님', 2, waitPhone(), true);
+    store.waitAction(old.id, 'call');
+    db.prepare('UPDATE waitlist SET created_at=?, called_at=? WHERE id=?').run(Date.now() - 4 * 3600000, Date.now() - 11 * 60000, old.id);
+    store.addWait('age-dev2', '손님', 1, waitPhone(), true);
+    const row = db.prepare('SELECT status, phone FROM waitlist WHERE id=?').get(old.id);
+    assert.equal(row?.status, 'noshow', 'still recallable'); assert.ok(row.phone);
+    // per-ticket sms flag: configured URL but no number left → false
+    store.setWaitSmsUrl('https://trigger.macrodroid.com/abc/booth');
+    const w = store.addWait('flag-dev', '손님', 1, waitPhone(), true);
+    const sec = db.prepare('SELECT secret FROM waitlist WHERE id=?').get(w.id).secret;
+    assert.equal(store.waitStatus(w.id, sec).sms, true);
+    db.prepare('UPDATE waitlist SET phone=NULL WHERE id=?').run(w.id);
+    assert.equal(store.waitStatus(w.id, sec).sms, false);
+  });
+  await withWaitStore(async (store) => {
+    store.setMemberSettings({ mode: 'fixed', amount: 5000, maxDiscount: 1000 });
+    assert.equal(store.boardState().member.amount, 1000, 'the board never promises more than checkout gives');
+    store.setMemberSettings({ mode: 'percent', pct: 10, maxDiscount: 2000 });
+    assert.equal(store.boardState().member.maxDiscount, 2000);
+  }, { memberEnabled: true });
+  await withWaitStore(async (store) => {
+    const c = store.createManualCoupon(1, { type: 'item', label: '이동' });
+    assert.throws(() => store.moveCoupon(c.code, 2, 1, 1, 7), (e) => e.code === 'seat_changed', 'destination reseated since the picker opened');
+    assert.equal(store.moveCoupon(c.code, 2, 1, 1, 1).coupon.table, 2);
+  });
 });

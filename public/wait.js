@@ -76,7 +76,7 @@
     setSize(size);
     function applyInfo(i) {
       setNotice(i.notice);
-      consentText.textContent = i.sms ? '호출 문자를 보내려고 휴대폰 번호를 받아요. 문자는 부스 휴대폰 자동화 앱(MacroDroid) 서버를 거쳐 보내지고, 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.' : '호출 안내를 위해 휴대폰 번호를 받아요. 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.';
+      consentText.textContent = '호출 문자를 보내려고 휴대폰 번호를 받아요. 문자는 부스 휴대폰 자동화 앱(MacroDroid) 서버를 거쳐 보내지고, 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.'; // always disclosed: staff may switch texting on after this guest registered
       hint.textContent = i.sms ? '호출되면 문자로도 알려드려요. 이 화면과 진동으로도 알려 드려요.' : '이 화면을 열어 두면 호출 때 알려드려요.';
       form.hidden = !i.open;
       notice.className = i.open ? 'w-sub' : 'err';
@@ -154,7 +154,7 @@
       h('div', { class: 'y2k-title called-title' }, h('span', { class: 'y2k-ico', 'aria-hidden': 'true', style: 'width:16px;height:18px;color:#fff' }), h('span', { class: 'y2k-title-t' }, 'COMHERE.exe - 호출')),
       h('div', { class: 'y2k-body called-body' },
         h('h1', { id: 'called-h', class: 'called-h' }, '입장하세요'),
-        h('p', { class: 'called-who' }, d.nick + ' · ' + d.size + '명'),
+        h('p', { class: 'called-who' }, '대기 번호 ' + d.id + '번 · ' + d.nick + ' · ' + d.size + '명'),
         h('p', { class: 'called-note' }, '입구 스태프에게 이 화면을 보여 주세요'),
         h('button', { class: 'y2k-btn y2k-btn--primary', type: 'button', onclick: function () { calledEl.hidden = true; clearInterval(vibTimer); try { if (navigator.vibrate) navigator.vibrate(0); } catch (e) { /* ignore */ } } }, '확인했어요'))));
     calledEl.hidden = false;
@@ -164,7 +164,7 @@
       h('div', { class: 'y2k-title' }, h('span', { class: 'y2k-ico', 'aria-hidden': 'true', style: 'width:16px;height:18px;color:#fff' }), h('span', { class: 'y2k-title-t' }, 'COMHERE.exe - 호출 시간 지남')),
       h('div', { class: 'y2k-body called-body' },
         h('h1', { id: 'called-h', class: 'called-h noshow-h' }, '호출 시간이 지났어요'),
-        h('p', { class: 'called-who' }, d.nick + ' · ' + d.size + '명'),
+        h('p', { class: 'called-who' }, '대기 번호 ' + d.id + '번 · ' + d.nick + ' · ' + d.size + '명'),
         h('p', { class: 'called-note' }, '입구 스태프에게 말씀해 주세요'),
         d.canRecall ? h('p', { class: 'called-note' }, '스태프가 한 번 더 불러 드릴 수 있어요. 순번(대기표)은 그대로 남아 있어요.') : h('p', { class: 'called-note' }, '대기표는 그대로 남아 있어요.'),
         h('button', { class: 'y2k-btn y2k-btn--primary', type: 'button', onclick: function () { calledEl.hidden = true; } }, '확인했어요'))));

@@ -142,7 +142,7 @@
     parts.push('QR 찍고 도전!');
     parts.push('테이블 QR로 게임하고 쿠폰을 받아 가세요');
     if (state && state.hourly && state.hourly.label && state.hourly.enabled !== false) parts.push('매 정시 1등 테이블에게 ' + state.hourly.label);
-    if (state && state.member) parts.push('COMS 회원 ' + (state.member.mode === 'percent' ? nf(state.member.pct) + '%' : nf(state.member.amount) + '원') + ' 할인');
+    if (state && state.member) parts.push('COMS 회원 ' + (state.member.mode === 'percent' ? nf(state.member.pct) + '%' + (state.member.maxDiscount > 0 ? '(최대 ' + nf(state.member.maxDiscount) + '원)' : '') : nf(state.member.amount) + '원') + ' 할인');
     var t = (n && n.level === 'warn' ? 'W|' : '') + parts.join('   ★   ');
     if (t !== lastTicker) {
       lastTicker = t;

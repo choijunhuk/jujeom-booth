@@ -1041,10 +1041,10 @@
     openSheet('쿠폰 옮기기', function (s) {
       var to = null, buttons = {}, tables = X.S.data.tables.filter(function (t) { return t.number !== c.table; }).sort(function (a, b) { return a.number - b.number; });
       var go = X.abtn('btn btn-primary btn-block', '쿠폰 옮기기', function () {
-        var dest = to;
+        var dest = to, destSeat = (X.S.data.tables.filter(function (t) { return t.number === dest; })[0] || {}).seat;
         return SC.confirm({ title: '쿠폰 ' + c.code + '을 ' + dest + '번 테이블로 옮길까요?', ok: '옮기기', message: c.label + ' · ' + c.table + '번 → ' + dest + '번 테이블' }).then(function (ok) {
           if (!ok) return;
-          return X.api('/api/staff/coupons/' + encodeURIComponent(c.code) + '/move', { table: dest, fromTable: c.table, fromSeat: c.seat }).then(function () {
+          return X.api('/api/staff/coupons/' + encodeURIComponent(c.code) + '/move', { table: dest, toSeat: destSeat, fromTable: c.table, fromSeat: c.seat }).then(function () {
             SC.toast('쿠폰 ' + c.code + '을 ' + dest + '번 테이블로 옮겼어요', 'ok');
             return X.refresh().then(function () { s.close(); });
           }, toastErr);

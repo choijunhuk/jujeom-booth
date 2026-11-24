@@ -744,7 +744,7 @@ route('POST', '/api/staff/tables/(\\d{1,4})/orders', (c) => {
 }, S);
 route('POST', '/api/staff/tables/(\\d{1,4})/coupons', (c) => { const coupon = store.createManualCoupon(int(c.m[1]), c.body); touchTable(int(c.m[1])); return { ok: true, coupon }; }, S);
 route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/void', (c) => { const coupon = store.voidCoupon(c.m[1]); touchTable(coupon.table); return { ok: true, coupon }; }, S);
-route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/move', (c) => { const { coupon, from } = store.moveCoupon(c.m[1], c.body.table, c.body.fromTable, c.body.fromSeat); touchTable(from); touchTable(coupon.table); return { ok: true, coupon }; }, S);
+route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/move', (c) => { const { coupon, from } = store.moveCoupon(c.m[1], c.body.table, c.body.fromTable, c.body.fromSeat, c.body.toSeat); touchTable(from); touchTable(coupon.table); return { ok: true, coupon }; }, S);
 const orderEdited = (order) => { touchTable(order.table); hint('g:' + order.table, 'order_status', { id: order.id, status: order.status }); return order; };
 route('POST', '/api/staff/orders/(\\d{1,9})/items', (c) => {
   const go = () => store.editItems(int(c.m[1]), c.body.items, { expectedUpdatedAt: c.body.expectedUpdatedAt });
