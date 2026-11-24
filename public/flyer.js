@@ -5,10 +5,11 @@
   var sheet = $('#fl-sheet'), status = $('#fl-status'), print = $('#fl-print');
   var fields = ['date', 'time', 'location'].map(function (key) { return $('#fl-' + key); });
   var storageKey = 'comhere-flyer-event:' + SC.BASE;
-  var shell, gate, pending, running = false;
+  var shell, gate, pending, running = false, lastSig = '';
   var printHint = 'A4 가로 · 배율 100% (실제 크기) · 한 장에 전단지 2부';
 
   function fit() {
+    var tooLong = false;
     sheet.querySelectorAll('.fl-details').forEach(function (box) {
       var content = box.firstElementChild;
       box.classList.remove('fl-compact');
@@ -18,8 +19,10 @@
       if (!overflows()) return;
       box.classList.add('fl-compact');
       box.style.fontSize = '';
-      for (var compact = 15.5; compact >= 1 && overflows(); compact -= 0.5) box.style.fontSize = compact + 'px';
+      for (var compact = 15.5; compact >= 9 && overflows(); compact -= 0.5) box.style.fontSize = compact + 'px'; // below 9px nobody reads it
+      if (overflows()) tooLong = true;
     });
+    if (tooLong) status.textContent = '메뉴·상품이 너무 많아 전단지에 다 들어가지 않아요. 일부 항목이 잘려요.';
   }
 
   function eventText() {
@@ -49,21 +52,23 @@
       items.length ? h('div', { class: 'fl-menu' }, groups) : h('p', null, '판매 중인 메뉴가 없어요.'));
   }
 
+  function minOrder(rule) { return rule.minOrder > 0 ? ' · ' + won(rule.minOrder) + ' 이상 주문 시' : ''; }
   function memberOffer(state) {
     var rule = state.memberDiscount;
     if (!state.memberEnabled || !rule.enabled) return '';
     if (rule.mode === 'percent' && rule.pct > 0) {
-      return 'COMS 회원 ' + rule.pct + '% 할인' + (rule.maxDiscount > 0 ? ' (최대 ' + won(rule.maxDiscount) + ')' : '');
+      return 'COMS 회원 ' + rule.pct + '% 할인' + (rule.maxDiscount > 0 ? ' (최대 ' + won(rule.maxDiscount) + ')' : '') + minOrder(rule);
     }
     if (rule.mode === 'fixed' && rule.amount > 0) {
-      return 'COMS 회원 ' + won(rule.maxDiscount > 0 ? Math.min(rule.amount, rule.maxDiscount) : rule.amount) + ' 할인';
+      return 'COMS 회원 ' + won(rule.maxDiscount > 0 ? Math.min(rule.amount, rule.maxDiscount) : rule.amount) + ' 할인' + minOrder(rule);
     }
     return '';
   }
 
   function prizeSection(state, data) {
-    var prizes = data.rewards.filter(function (reward) { return reward.active; }).map(function (reward) {
-      return h('li', null, data.games[reward.game].label + ' ',
+    var prizes = data.rewards.filter(function (reward) { return reward.active && reward.remaining > 0; }).map(function (reward) { // sold-out prizes are not advertised
+      var game = data.games[reward.game];
+      return h('li', null, (game ? game.label : reward.game) + ' ', // a reward whose game was removed must not break the whole sheet
         h('span', { class: 'fl-num' }, reward.threshold.toLocaleString('ko-KR')), '점 이상 → ', reward.label);
     });
     if (data.hourly.enabled) prizes.push(h('li', null, '매 정시 1등 테이블: ' + data.hourly.label));
@@ -101,7 +106,8 @@
     var task = Promise.all([SC.api('/api/staff/state'), SC.api('/api/staff/rewards'), SC.api('/api/staff/tables')])
       .then(function (results) {
         if (pending !== task) return false;
-        render(results[0], results[1], results[2]);
+        var sig = JSON.stringify([results[0].menu, results[0].memberDiscount, results[0].memberEnabled, results[1], results[2].waitUrl]);
+        if (sig !== lastSig) { lastSig = sig; render(results[0], results[1], results[2]); } // the 15 s poll re-renders only when something on the flyer changed
         shell.conn.set('live');
         print.disabled = false;
         return true;
@@ -131,6 +137,7 @@
   function stop() {
     running = false;
     pending = null;
+    lastSig = '';
     print.disabled = true;
     sheet.replaceChildren();
   }
@@ -153,8 +160,9 @@
   window.addEventListener('resize', fit);
   window.addEventListener('beforeprint', fit);
   window.addEventListener('afterprint', fit);
-  window.matchMedia('print').addEventListener('change', fit);
-  function refresh() { if (running && document.visibilityState === 'visible') load(); }
+  var printMq = window.matchMedia('print');
+  if (printMq.addEventListener) printMq.addEventListener('change', fit); else if (printMq.addListener) printMq.addListener(fit); // Safari < 14
+  function refresh() { if (running && document.visibilityState === 'visible' && !printMq.matches) load(); } // never swap the DOM under a print preview
   setInterval(refresh, 15000);
   document.addEventListener('visibilitychange', refresh);
   gate = SC.gate({ app: $('#app'), start: start, stop: stop, where: '전단지 인쇄' });
