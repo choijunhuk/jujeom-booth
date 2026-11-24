@@ -5468,6 +5468,7 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
       '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})/photo/delete': [`/api/staff/menu/items/${it}/photo/delete`, {}],
       '/api/staff/ordering': ['/api/staff/ordering', { open: false }],
       '/api/staff/coupons/redeem': ['/api/staff/coupons/redeem', { code: cp.code }],
+      '/api/staff/coupons/([A-Za-z0-9]{1,12})/move': [`/api/staff/coupons/${cp2.code}/move`, { table: 3 }],
       '/api/staff/tables/count': ['/api/staff/tables/count', { count: 30 }],
       '/api/staff/tables/(\\d{1,4})/rotate': ['/api/staff/tables/5/rotate', {}],
       '/api/staff/tables/move': ['/api/staff/tables/move', { from: 6, to: 7 }],
@@ -8862,6 +8863,218 @@ test('SMS auto-next rolls back all replacements and emits no send if the transac
     db.exec('DROP TRIGGER fail_auto');
     assert.ok(store.sweepWait());
     assert.equal(store.drainEvents().filter((e) => e.type === 'wait_sms').length, 1);
+  });
+});
+
+test('coupon move updates one row and makes a discount usable only at its destination', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const source = await guestWithDevice(srv), destination = await guestWithDevice(srv);
+    const c = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: '분할 쿠폰' })).json.coupon;
+    const moved = await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2 });
+    assert.equal(moved.status, 200, moved.text);
+    const db = kDb(srv);
+    try {
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM coupons WHERE code=?').get(c.code).n, 1);
+      assert.deepEqual({ ...db.prepare('SELECT table_id,seat,origin_table,origin_seat FROM coupons WHERE code=?').get(c.code) }, { table_id: 2, seat: 1, origin_table: 1, origin_seat: 1 });
+    } finally { db.close(); }
+    assert.ok(!(await kSnap(source, tk[0])).coupons.some((x) => x.code === c.code));
+    assert.ok((await kSnap(destination, tk[1])).coupons.some((x) => x.code === c.code));
+    assert.equal((await s.get('/api/staff/state')).json.coupons.find((x) => x.code === c.code).table, 2);
+    assert.equal((await order(source, tk[0], [{ id: 'fries', qty: 1 }], { couponCode: c.code })).json.error, 'bad_coupon');
+    const placed = await order(destination, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: c.code });
+    assert.equal(placed.status, 201, placed.text);
+    assert.equal(placed.json.order.discount, 1000);
+    assert.ok((await auditOf(s)).some((e) => e.action === 'coupon_move' && e.summaryKo === `쿠폰 ${c.code} 1번 → 2번 테이블 옮기기 · 분할 쿠폰`));
+  });
+});
+
+test('coupon move refreshes both source and destination guest SSE snapshots', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const c = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '알림 쿠폰' })).json.coupon;
+    const source = await guestWithDevice(srv), destination = await guestWithDevice(srv);
+    const a = await openSse(srv, `/api/t/${tk[0]}/events`, { cookie: source.cookieHeader() });
+    const b = await openSse(srv, `/api/t/${tk[1]}/events`, { cookie: destination.cookieHeader() });
+    try {
+      const beforeA = await a.until((text) => text.includes(`"code":"${c.code}"`));
+      await b.until((text) => text.includes('event: state'));
+      assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2 })).status, 200);
+      await a.until((text) => text.lastIndexOf('event: state') > beforeA.lastIndexOf('event: state') && !text.slice(text.lastIndexOf('event: state')).includes(`"code":"${c.code}"`));
+      await b.until((text) => text.slice(text.lastIndexOf('event: state')).includes(`"code":"${c.code}"`));
+    } finally { a.close(); b.close(); }
+  });
+});
+
+test('a moved discount uses the destination seating use limit', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    await s.post('/api/staff/coupon-limits', { maxDiscountUsesPerSeat: 1 });
+    const a = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: '원래 사용' })).json.coupon;
+    const b = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: '옮겨 사용' })).json.coupon;
+    const c = (await s.post('/api/staff/tables/2/coupons', { type: 'discount', amount: 1000, label: '도착지 사용' })).json.coupon;
+    const source = await guestWithDevice(srv), destination = await guestWithDevice(srv);
+    assert.equal((await order(source, tk[0], [{ id: 'fries', qty: 1 }], { couponCode: a.code })).status, 201);
+    assert.equal((await s.post(`/api/staff/coupons/${b.code}/move`, { table: 2 })).status, 200);
+    assert.equal((await order(destination, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: b.code })).status, 201);
+    const blocked = await order(destination, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: c.code });
+    assert.deepEqual([blocked.status, blocked.json.error, blocked.json.used], [409, 'coupon_limit', 1]);
+    assert.deepEqual([(await kSnap(source, tk[0])).couponSeat.discountUses, (await kSnap(destination, tk[1])).couponSeat.discountUses], [1, 1]);
+  });
+});
+
+test('coupon move rejects invalid destinations and ineligible coupons without changing their rows', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const issued = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '정상' })).json.coupon;
+    const used = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '사용' })).json.coupon;
+    const voided = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '무효' })).json.coupon;
+    const testCoupon = (await s.post('/api/staff/tables/0/coupons', { type: 'item', label: '시험' })).json.coupon;
+    await s.post('/api/staff/coupons/redeem', { code: used.code });
+    await s.post(`/api/staff/coupons/${voided.code}/void`, {});
+    const path = (code) => `/api/staff/coupons/${code}/move`;
+    assert.deepEqual([...(await Promise.all([0, 999, '2', 1.5].map((table) => s.post(path(issued.code), { table }))))].map((r) => r.status), [400, 400, 400, 400]);
+    const same = await s.post(path(issued.code), { table: 1 });
+    assert.deepEqual([same.status, same.json.error], [400, 'same_table']);
+    for (const code of [used.code, voided.code, testCoupon.code]) {
+      const bad = await s.post(path(code), { table: 2 });
+      assert.deepEqual([bad.status, bad.json.error], [409, 'coupon_not_movable'], code);
+    }
+    await s.post('/api/staff/tables/1/clear', {});
+    const stale = await s.post(path(issued.code), { table: 2 });
+    assert.deepEqual([stale.status, stale.json.error], [409, 'coupon_not_movable']);
+    const db = kDb(srv);
+    try { assert.equal(db.prepare('SELECT table_id FROM coupons WHERE code=?').get(issued.code).table_id, 1); } finally { db.close(); }
+  });
+});
+
+test('moving the same coupon twice keeps its first earning origin', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const c = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '분할' })).json.coupon;
+    for (const table of [2, 3]) assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table })).status, 200);
+    const db = kDb(srv);
+    try { assert.deepEqual({ ...db.prepare('SELECT table_id,origin_table,origin_seat FROM coupons WHERE code=?').get(c.code) }, { table_id: 3, origin_table: 1, origin_seat: 1 }); } finally { db.close(); }
+  });
+});
+
+test('coupon origin migration keeps older rows eligible to move after reopening', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-coupon-origin-')), file = path.join(dir, 'booth.db');
+  const first = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 });
+  const old = first.createManualCoupon(1, { type: 'item', label: '예전 쿠폰' });
+  first.close();
+  const legacy = new DatabaseSync(file);
+  legacy.exec('ALTER TABLE coupons DROP COLUMN origin_table; ALTER TABLE coupons DROP COLUMN origin_seat');
+  legacy.close();
+  const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 }), db = new DatabaseSync(file);
+  try {
+    assert.deepEqual({ ...db.prepare('SELECT origin_table,origin_seat FROM coupons WHERE code=?').get(old.code) }, { origin_table: null, origin_seat: null });
+    store.moveCoupon(old.code, 2);
+    assert.deepEqual({ ...db.prepare('SELECT table_id,origin_table,origin_seat FROM coupons WHERE code=?').get(old.code) }, { table_id: 2, origin_table: 1, origin_seat: 1 });
+  } finally { db.close(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('moving earned coupons preserves source earning limits and does not consume destination limits', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const reward = await kReward(s, { label: '원래 자리', type: 'discount', amount: 1000, perSeat: { mode: 'fixed', count: 1 }, perDevice: 0 });
+    await s.post('/api/staff/coupon-limits', { maxPerSeat: 1 });
+    const g1 = await guestWithDevice(srv);
+    assert.equal(kEarned([await playOnce(g1, tk[0], 'pour', 200)], reward.id), 1);
+    const c = (await s.get('/api/staff/state')).json.coupons.find((x) => x.rewardId === reward.id);
+    assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2 })).status, 200);
+    const g2 = await guestWithDevice(srv);
+    const src = await kSnap(await guestWithDevice(srv), tk[0]);
+    const dst = await kSnap(g2, tk[1]);
+    assert.deepEqual([src.couponSeat.couponsIssued, src.rewards.find((x) => x.id === reward.id).got, src.rewards.find((x) => x.id === reward.id).seatIssued], [1, true, 1]);
+    assert.deepEqual([dst.couponSeat.couponsIssued, dst.rewards.find((x) => x.id === reward.id).got, dst.rewards.find((x) => x.id === reward.id).seatIssued], [0, false, 0]);
+    assert.equal(kEarned([await playOnce(await guestWithDevice(srv), tk[0], 'pour', 200)], reward.id), 0);
+    assert.equal(kEarned([await playOnce(g2, tk[1], 'pour', 200)], reward.id), 1);
+    assert.equal((await kSnap(g2, tk[1])).couponSeat.couponsIssued, 1);
+  }, { env: KENV });
+});
+
+test('table merge reassigns the earning origin even for a coupon held at a third table', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const reward = await kReward(s, { label: '병합 한도', perSeat: { mode: 'fixed', count: 1 }, perDevice: 0 });
+    assert.equal(kEarned([await playOnce(await guestWithDevice(srv), tk[0], 'pour', 200)], reward.id), 1);
+    const c = (await s.get('/api/staff/state')).json.coupons.find((x) => x.rewardId === reward.id);
+    assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 3 })).status, 200);
+    const moved = await s.post('/api/staff/tables/move', { from: 1, to: 2 });
+    assert.equal(moved.status, 200, moved.text);
+    const db = kDb(srv);
+    try { assert.deepEqual({ ...db.prepare('SELECT table_id,origin_table,origin_seat FROM coupons WHERE code=?').get(c.code) }, { table_id: 3, origin_table: 2, origin_seat: 1 }); } finally { db.close(); }
+    const g = await guestWithDevice(srv);
+    assert.equal((await kSnap(g, tk[1])).rewards.find((x) => x.id === reward.id).seatIssued, 1);
+    assert.equal(kEarned([await playOnce(g, tk[1], 'pour', 200)], reward.id), 0);
+  }, { env: KENV });
+});
+
+test('wait seating rejects occupied current seats and clear:true starts a new seat', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const g = await guestWithDevice(srv);
+    const w = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '대기', size: 2 })).json;
+    assert.equal((await partyOf(s, 1, 3)).status, 200);
+    const occupied = await s.post(`/api/staff/wait/${w.id}/seat`, { table: 1 });
+    assert.deepEqual([occupied.status, occupied.json.error, occupied.json.table, occupied.json.partySet], [409, 'table_occupied', 1, false]);
+    assert.deepEqual([(await tableIn(s, 1)).seat, (await tableIn(s, 1)).people], [1, 3]);
+    assert.equal((await s.get('/api/staff/state')).json.waitlist.find((x) => x.id === w.id).status, 'waiting');
+    const seated = await s.post(`/api/staff/wait/${w.id}/seat`, { table: 1, clear: true });
+    assert.deepEqual([seated.status, seated.json.partySet, seated.json.table], [200, true, 1]);
+    assert.deepEqual([(await tableIn(s, 1)).seat, (await tableIn(s, 1)).people], [2, 2]);
+    assert.ok((await auditOf(s)).some((x) => x.action === 'table_clear'));
+  });
+});
+
+test('wait clear:true refuses unsettled orders and keeps both table and wait row untouched', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    const g = await guestWithDevice(srv);
+    const w = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '대기', size: 2 })).json;
+    assert.equal((await order(g, tk[0], [{ id: 'fries', qty: 1 }])).status, 201);
+    const denied = await s.post(`/api/staff/wait/${w.id}/seat`, { table: 1, clear: true });
+    assert.deepEqual([denied.status, denied.json.error], [409, 'unsettled']);
+    assert.equal((await tableIn(s, 1)).seat, 1);
+    const db = kDb(srv);
+    try {
+      assert.deepEqual({ ...db.prepare('SELECT status,seated_table FROM waitlist WHERE id=?').get(w.id) }, { status: 'waiting', seated_table: null });
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM table_clears').get().n, 0);
+    } finally { db.close(); }
+  });
+});
+
+test('wait clear:true rolls back the clear if the later seating update fails', async () => {
+  await withWaitStore(async (store, db) => {
+    const w = store.addWait('atomic-wait', '대기', 2, waitPhone(), true);
+    store.setPartyStaff(1, 3);
+    db.exec("CREATE TRIGGER block_seat BEFORE UPDATE OF status ON waitlist WHEN NEW.status='seated' BEGIN SELECT RAISE(ABORT, 'seat blocked'); END");
+    assert.throws(() => store.waitAction(w.id, 'seat', { table: 1, clear: true }), /seat blocked/);
+    assert.equal(db.prepare('SELECT seat FROM tables WHERE id=1').get().seat, 1);
+    assert.equal(db.prepare('SELECT people FROM seat_info WHERE table_id=1 AND seat=1').get().people, 3);
+    assert.equal(db.prepare('SELECT status FROM waitlist WHERE id=?').get(w.id).status, 'waiting');
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM table_clears').get().n, 0);
+  });
+});
+
+for (const [name, insert] of [
+  ['play', "INSERT INTO plays(table_id,seat,game,device,started_at) VALUES(1,1,'pour','activity',1)"],
+  ['nickname', "INSERT INTO nicks(device,table_id,seat,nick) VALUES('activity',1,1,'손님')"],
+  ['call', "INSERT INTO calls(table_id,seat,type,created_at) VALUES(1,1,'물',1)"],
+  ['coupon', "INSERT INTO coupons(code,reward_id,source,type,label,table_id,seat,created_at) VALUES('ACT123','staff','staff','item','서비스',1,1,1)"],
+  ['live cover intent', "INSERT INTO cover_intents(table_id,seat,device,payer,shares,amount,created_at,status) VALUES(1,1,'activity','손님',1,3000,CAST(strftime('%s','now') AS INTEGER)*1000,'open')"],
+]) {
+  test(`wait seating treats a current-seat ${name} as activity`, async () => {
+    await withWaitStore(async (store, db) => {
+      const w = store.addWait('activity-wait', '대기', 2, waitPhone(), true);
+      db.exec(insert);
+      assert.throws(() => store.waitAction(w.id, 'seat', { table: 1 }), (e) => e.status === 409 && e.code === 'table_occupied' && e.extra.table === 1);
+      assert.equal(db.prepare('SELECT status FROM waitlist WHERE id=?').get(w.id).status, 'waiting');
+    });
+  });
+}
+
+test('wait seating enters an empty table directly, while seating without a table keeps its prior behavior', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const g = await guestWithDevice(srv);
+    const first = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '첫손님', size: 2 })).json;
+    const second = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '둘째손님', size: 1 })).json;
+    const seated = await s.post(`/api/staff/wait/${first.id}/seat`, { table: 1 });
+    assert.deepEqual([seated.status, seated.json.partySet, (await tableIn(s, 1)).seat], [200, true, 1]);
+    const plain = await s.post(`/api/staff/wait/${second.id}/seat`, {});
+    assert.deepEqual([plain.status, plain.json.partySet, (await tableIn(s, 2)).people], [200, undefined, null]);
   });
 });
 

@@ -622,6 +622,7 @@
             h('span', { class: 'muted' }, c.table + '번 테이블 · ' + (c.source === 'hour' ? '정시 시상' : c.source === 'staff' ? '직원 발급' : '게임 보상') + ' · ', SC.timeEl(c.createdAt, 'ago'))),
           h('div', { class: 'btns' },
             c.type === 'discount' ? h('span', { class: 'tag info' }, '주문 시 자동 사용') : abtn('btn btn-sm', '코드 입력', function () { input.value = c.code; input.focus(); return Promise.resolve(); }),
+            abtn('btn btn-sm', '다른 테이블로', function () { return SO.moveCoupon(c); }),
             abtn('btn btn-sm btn-danger', '무효 처리', function () { return SO.voidCoupon(c); })));
       }, emptyEl('미사용 쿠폰이 없어요'));
       SC.reconcile(rewardList, d.rewards, function (r) { return r.id; }, sig, rewardCard, emptyEl('보상이 없어요'));

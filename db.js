@@ -246,6 +246,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (!colsOf(tbl).includes(col)) db.exec(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${ddl}`); // existing coupons: device unknown (never blocks anyone)
   }
   db.exec('CREATE INDEX IF NOT EXISTS coupons_dev ON coupons(device, reward_id)');
+  for (const col of ['origin_table', 'origin_seat']) if (!colsOf('coupons').includes(col)) db.exec(`ALTER TABLE coupons ADD COLUMN ${col} INTEGER`); // NULL keeps older coupons tied to their current seating
   if (!colsOf('order_items').includes('service')) db.exec('ALTER TABLE order_items ADD COLUMN service INTEGER NOT NULL DEFAULT 0');
   if (!colsOf('menu_items').includes('stock_left')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_left INTEGER');
   if (!colsOf('menu_items').includes('stock_auto')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_auto INTEGER NOT NULL DEFAULT 0');
@@ -275,6 +276,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   let dryMode = false; // dry(): every tx runs and is rolled back, so a preview shows exactly what the real call would do and writes nothing
   const dry = (fn) => { dryMode = true; try { return fn(); } finally { dryMode = false; } };
   const tx = (fn) => {
+    if (db.isTransaction) return fn(); // compound operations share the outer commit and rollback (including audit and outbox)
     db.exec('BEGIN IMMEDIATE');
     txEvents = [];
     try { const r = fn(); db.exec(dryMode ? 'ROLLBACK' : 'COMMIT'); if (!dryMode) outbox.push(...txEvents); txEvents = []; return r; } catch (e) { try { db.exec('ROLLBACK'); } catch { /* already rolled back */ } throw e; }
@@ -1862,8 +1864,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (r.per_seat_mode === 'fixed') return { limit: r.per_seat_count, source: 'fixed' };
     return { limit: Math.min(headcountCounted(tid, seat), r.per_seat_cap), source: 'people' };
   }
-  const seatIssuedOf = (rid, tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tid, seat, rid).n;
-  const seatTotalOf = (tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND source!='staff'", tid, seat).n; // reward coupons of any kind; manual staff coupons are not counted
+  const seatIssuedOf = (rid, tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE COALESCE(origin_table, table_id)=? AND COALESCE(origin_seat, seat)=? AND source='score' AND reward_id=?", tid, seat, rid).n;
+  const seatTotalOf = (tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE COALESCE(origin_table, table_id)=? AND COALESCE(origin_seat, seat)=? AND source!='staff'", tid, seat).n; // earned here, including moved-away coupons; manual staff coupons are not counted
   const discountUsesOf = (tid, seat) => get("SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=? AND coupon_code IS NOT NULL AND status!='cancelled'", tid, seat).n
     + get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND type='discount' AND status='used' AND order_id IS NULL", tid, seat).n; // + discount coupons redeemed at the counter
   const deviceIssuedOf = (rid, device) => (device ? get('SELECT COUNT(*) n FROM coupons WHERE reward_id=? AND device=? AND table_id>0', rid, device).n : 0);
@@ -1888,7 +1890,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       const sl = seatLimitOf(r, tableId, seat); const why = blockedBy(r, tableId, seat, device);
       return {
         id: r.id, game: r.game, label: r.label, type: r.type, amount: r.amount ?? null, item: r.item ?? null, threshold: r.threshold,
-        soldOut: tableId !== 0 && r.issued >= r.stock, got: !!get("SELECT 1 FROM coupons WHERE table_id=? AND seat=? AND source='score' AND reward_id=?", tableId, seat, r.id),
+        soldOut: tableId !== 0 && r.issued >= r.stock, got: seatIssuedOf(r.id, tableId, seat) > 0,
         seatIssued: seatIssuedOf(r.id, tableId, seat), seatLimit: sl.limit, limitSource: sl.source,
         deviceIssued: deviceIssuedOf(r.id, device), deviceLimit: tableId === 0 ? 0 : r.per_device, canEarn: !why, ...(why ? { blockedBy: why } : {}),
         seatCap: sl.source === 'people' ? r.per_seat_cap : null,
@@ -2085,6 +2087,20 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     tx(() => { run("UPDATE coupons SET status='void' WHERE code=?", c.code); audit('coupon_void', `coupon ${c.code}`, `${c.type} ${c.label}`, `쿠폰 ${c.code} 무효 처리 · ${c.label}`); });
     return couponOut(get('SELECT * FROM coupons WHERE code=?', c.code));
   }
+  function moveCoupon(code, table) {
+    if (!Number.isInteger(table) || table < 1 || table > tableCount) fail(400, 'bad_table', `테이블 번호는 1~${tableCount} 사이여야 합니다.`);
+    const c = get('SELECT * FROM coupons WHERE code=?', String(code || '').trim().toUpperCase()) || fail(404, 'no_coupon', '없는 쿠폰 코드입니다.');
+    const a = get('SELECT seat FROM tables WHERE id=? AND id BETWEEN 1 AND ?', c.table_id, tableCount);
+    if (c.status !== 'issued' || !a || c.seat !== a.seat) fail(409, 'coupon_not_movable', '사용 전인 실제 테이블의 현재 손님 쿠폰만 옮길 수 있습니다.');
+    if (c.table_id === table) fail(400, 'same_table', '같은 테이블로 옮길 수 없습니다.');
+    const b = tableRow(table);
+    invalidate();
+    return tx(() => {
+      run('UPDATE coupons SET origin_table=COALESCE(origin_table, table_id), origin_seat=COALESCE(origin_seat, seat), table_id=?, seat=? WHERE code=?', table, b.seat, c.code);
+      audit('coupon_move', `coupon ${c.code}`, `table ${c.table_id} to table ${table}: ${c.label}`, `쿠폰 ${c.code} ${c.table_id}번 → ${table}번 테이블 옮기기 · ${c.label}`);
+      return { coupon: couponOut(get('SELECT * FROM coupons WHERE code=?', c.code)), from: c.table_id };
+    });
+  }
 
   function hourRanking(start) {
     const rows = all('SELECT table_id, game, MAX(score) s FROM plays WHERE score IS NOT NULL AND finished_at>=? AND finished_at<? GROUP BY table_id, game', start, start + HOUR);
@@ -2263,7 +2279,11 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (action === 'seat' && opts.table != null) { // seated at a table: the party size becomes that seat's headcount when it has none yet
       if (!Number.isInteger(opts.table) || opts.table < 1 || opts.table > tableCount) fail(400, 'bad_table', `테이블 번호는 1~${tableCount} 사이여야 합니다.`);
       return tx(() => {
-        const t = tableRow(opts.table);
+        let t = tableRow(opts.table);
+        if (opts.clear === true) {
+          clearTable(t.id, false);
+          t = tableRow(t.id);
+        } else if (Object.keys(seatActivity(t)).length) fail(409, 'table_occupied', '이 테이블에 이전 손님 기록이 있어요. 정리하고 앉힐까요?', { table: t.id, partySet: false });
         let partySet = false;
         if (seatPeople(t.id, t.seat) == null) {
           applyPeople(t, Math.min(PEOPLE_MAX, w.size), now(), 'waitlist');
@@ -2272,7 +2292,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         }
         run("UPDATE waitlist SET status='seated', seated_table=?, phone=NULL WHERE id=?", t.id, id);
         invalidate();
-        return { partySet, table: t.id };
+        return { partySet, table: t.id, ...(opts.clear === true ? { seat: t.seat } : {}) };
       });
     }
     const to = { call: 'called', seat: 'seated', cancel: 'cancelled' }[action];
@@ -2443,11 +2463,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   // undo of a clear: only within 10 minutes and only while the new seat is still completely empty
   const UNCLEAR_MS = 10 * 60000;
-  function unclearCheck(t) {
-    const c = get('SELECT * FROM table_clears WHERE table_id=? ORDER BY id DESC LIMIT 1', t.id);
-    if (!c) return { ok: false, reason: 'no_clear' };
-    if (c.new_seat !== t.seat) return { ok: false, reason: 'seat_changed' };
-    if (now() - c.at > UNCLEAR_MS) return { ok: false, reason: 'too_old' };
+  function seatActivity(t) {
     const used = {};
     for (const [k, sql] of [['orders', 'SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=?'], ['plays', 'SELECT COUNT(*) n FROM plays WHERE table_id=? AND seat=?'],
       ['coupons', 'SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=?'], ['nicks', 'SELECT COUNT(*) n FROM nicks WHERE table_id=? AND seat=?'], ['calls', 'SELECT COUNT(*) n FROM calls WHERE table_id=? AND seat=?']]) {
@@ -2458,6 +2474,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (pr && pr.people != null) used.party = 1;
     const oi = openIntents(t.id, t.seat).length;
     if (oi) used.intents = oi;
+    return used;
+  }
+  function unclearCheck(t) {
+    const c = get('SELECT * FROM table_clears WHERE table_id=? ORDER BY id DESC LIMIT 1', t.id);
+    if (!c) return { ok: false, reason: 'no_clear' };
+    if (c.new_seat !== t.seat) return { ok: false, reason: 'seat_changed' };
+    if (now() - c.at > UNCLEAR_MS) return { ok: false, reason: 'too_old' };
+    const used = seatActivity(t);
     if (Object.keys(used).length) return { ok: false, reason: 'seat_in_use', used };
     return { ok: true, clear: c, until: c.at + UNCLEAR_MS };
   }
@@ -2488,6 +2512,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return tx(() => {
       const trustedBoth = headcountTrusted(a, A.seat) && headcountTrusted(b, B.seat); // evaluated BEFORE anything moves
       const mv = (tbl, set = '') => run(`UPDATE ${tbl} SET table_id=?, seat=?${set} WHERE table_id=? AND seat=?`, b, B.seat, a, A.seat).changes;
+      run('UPDATE coupons SET origin_table=?, origin_seat=? WHERE COALESCE(origin_table, table_id)=? AND COALESCE(origin_seat, seat)=?', b, B.seat, a, A.seat); // earned by the merged party, even when the coupon was moved elsewhere
       // moved orders get a derived key so equal idempotency keys in both seats cannot collide
       const moved = { orders: mv('orders', ", key=key||'~m'||id"), coupons: mv('coupons'), plays: mv('plays') };
       mv('cover_intents'); // open share intents follow the cover order
@@ -2827,7 +2852,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     createOrder, setStatus, setPaid, guestCancel, menuView, setSoldOut, setOrdering, orderingOpen,
     setCouponLimits, setSeatCouponLimit, couponLimits,
     setTableCount, rotateToken, tableCountNow: () => tableCount, payInfo, staffPay: payAll, setPay, setDepositor, ingestDeposit, previewDeposit, listDeposits, depositCounts, assignDeposit, attachDeposit, dismissDeposit, setAutoConfirm, depositSecret, rotateDepositSecret, checkDepositSecret, deviceSecret, setPhoto, deletePhoto, photosDir, createReward, updateReward, deleteReward, hourlyReward, setHourlyReward, memberSettings, setMemberSettings, listRewards, createItem, updateItem, deleteItem, createCategory, renameCategory, deleteCategory, reorderMenu, memberPct,
-    startPlay, finishPlay, redeem, awardHour, setStock, setNick, addCall, resolveCall,
+    startPlay, finishPlay, redeem, moveCoupon, awardHour, setStock, setNick, addCall, resolveCall,
     addWait, waitStatus, waitCancel, waitAction, setWaitOpen, clearWait, waitInfo, normalizePhone, waitSmsUrl, setWaitSmsUrl, waitSmsTarget, setWaitSms, queueWaitSms, setWaitAutoNext, setBoardShow,
     newLoginKey, validLoginKey, loginKeyOk, loginKeyFail,
     guestState, staffState, kitchenState, boardState, clearTable, moveTable, sales, salesCsv, reset,

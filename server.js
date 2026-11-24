@@ -540,7 +540,7 @@ const actionKo = (p, b) => {
   for (const [re, f] of rules) if (re.test(p)) return f();
   return `직원 작업 · ${p}`;
 };
-const DB_AUDITED = /^\/api\/staff\/(orders\/\d+\/(status|paid|items|service|move)|tables\/(\d+\/(clear|unclear|orders|coupons)|move)|refunds\/\d+\/done|coupons\/(redeem|[A-Za-z0-9]+\/void)|deposits\/(\d+\/(assign|dismiss|attach)|autoconfirm)|deposit-hook\/test|pay|member-discount|notice|reset|day\/close|ordering|test\/(reset|settings|rotate)|cover\/settings|cover\/intents\/\d+\/cancel|payments\/\d+\/void|tables\/\d+\/party|tables\/\d+\/cover\/(waive|restore)|coupon-limits|tables\/\d+\/coupon-limit|tables\/count|tables\/\d+\/rotate|deposit-hook\/rotate|waitlist\/(timeout|sms|auto-next)|board|menu\/items(\/[A-Za-z0-9_-]+)?)$/; // routes whose store method writes its own (richer) audit row
+const DB_AUDITED = /^\/api\/staff\/(orders\/\d+\/(status|paid|items|service|move)|tables\/(\d+\/(clear|unclear|orders|coupons)|move)|refunds\/\d+\/done|coupons\/(redeem|[A-Za-z0-9]+\/(void|move))|deposits\/(\d+\/(assign|dismiss|attach)|autoconfirm)|deposit-hook\/test|pay|member-discount|notice|reset|day\/close|ordering|test\/(reset|settings|rotate)|cover\/settings|cover\/intents\/\d+\/cancel|payments\/\d+\/void|tables\/\d+\/party|tables\/\d+\/cover\/(waive|restore)|coupon-limits|tables\/\d+\/coupon-limit|tables\/count|tables\/\d+\/rotate|deposit-hook\/rotate|waitlist\/(timeout|sms|auto-next)|board|menu\/items(\/[A-Za-z0-9_-]+)?)$/; // routes whose store method writes its own (richer) audit row
 route('GET', '/api/staff/state', () => staffSnap(), S);
 route('GET', '/api/staff/events', (c) => sse(c, 'staff', () => staffSnap(), true), S);
 route('GET', '/api/staff/tables', () => ({
@@ -740,6 +740,7 @@ route('POST', '/api/staff/tables/(\\d{1,4})/orders', (c) => {
 }, S);
 route('POST', '/api/staff/tables/(\\d{1,4})/coupons', (c) => { const coupon = store.createManualCoupon(int(c.m[1]), c.body); touchTable(int(c.m[1])); return { ok: true, coupon }; }, S);
 route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/void', (c) => { const coupon = store.voidCoupon(c.m[1]); touchTable(coupon.table); return { ok: true, coupon }; }, S);
+route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/move', (c) => { const { coupon, from } = store.moveCoupon(c.m[1], c.body.table); touchTable(from); touchTable(coupon.table); return { ok: true, coupon }; }, S);
 const orderEdited = (order) => { touchTable(order.table); hint('g:' + order.table, 'order_status', { id: order.id, status: order.status }); return order; };
 route('POST', '/api/staff/orders/(\\d{1,9})/items', (c) => {
   const go = () => store.editItems(int(c.m[1]), c.body.items, { expectedUpdatedAt: c.body.expectedUpdatedAt });
@@ -801,9 +802,10 @@ route('GET', '/api/staff/day/reports/(\\d{1,9})\\.csv', (c) => sendText(c.res, 2
 route('POST', '/api/staff/waitlist/timeout', (c) => { const minutes = store.setWaitTimeout(c.body.minutes); touch('staff', 'board', 'w:*'); return { ok: true, minutes }; }, S);
 route('POST', '/api/staff/calls/(\\d{1,9})/resolve', (c) => { store.resolveCall(int(c.m[1])); touch('staff', 'g:*'); return { ok: true }; }, S);
 route('POST', '/api/staff/wait/(\\d{1,9})/(call|seat|cancel|recall)', (c) => {
-  const r = store.waitAction(int(c.m[1]), c.m[2], { table: c.body.table }); // seat + table: the party size becomes that table's headcount when it has none
+  const r = store.waitAction(int(c.m[1]), c.m[2], { table: c.body.table, clear: c.body.clear });
   touch('staff', 'board', 'w:*');
   if (r.table) touchTable(r.table);
+  if (r.seat) hint('g:' + r.table, 'cleared', { seat: r.seat });
   return { ok: true, ...r };
 }, S);
 route('POST', '/api/staff/wait/(\\d{1,9})/sms', (c) => { store.queueWaitSms(int(c.m[1])); return { ok: true }; }, S);

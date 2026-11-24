@@ -525,14 +525,19 @@
           h('button', { class: 'btn', type: 'button', onclick: function () { partyView(s, n); } }, '인원 바꾸기'))))];
     if (SO.coverUIOn()) body.push(coverSection(s, n, t, co));
     body.push(couponLimitRow(s, n, t));
-    var sig0 = X.sig([t, co, d.cover, d.couponLimits, t.couponLimitOverride, t.couponLimits, t.headcountTrusted, (d.coverIntents || []).filter(function (i) { return i.table === n; })]);
+    var coupons = d.coupons.filter(function (c) { return c.table === n; });
+    if (coupons.length) body.push(h('div', { class: 'card' }, h('h3', { class: 'sec-title' }, '이 자리 미사용 쿠폰'), coupons.map(function (c) {
+      return h('div', { class: 'row-card' }, h('div', { class: 'grow' }, h('span', { class: 'code big' }, c.code), h('span', null, c.label)),
+        X.abtn('btn btn-sm', '다른 테이블로', function () { return SO.moveCoupon(c); }));
+    })));
+    var sig0 = X.sig([t, co, d.cover, d.couponLimits, t.couponLimitOverride, t.couponLimits, t.headcountTrusted, coupons, (d.coverIntents || []).filter(function (i) { return i.table === n; })]);
     body.push(h('div', { class: 'bigacts' },
       act('직접 주문 넣기', closed ? '주문 마감 중에도 직원은 넣을 수 있어요' : '손님 대신 주문을 입력해요', function () { directView(s, n); }),
       act('쿠폰 직접 발급', '할인 쿠폰 · 상품 쿠폰을 이 자리에 바로 줘요', function () { couponView(s, n); }),
       act('손님 화면 열기', '새 탭으로 이 테이블의 손님 화면을 열어요', function () { openGuestScreen(n); })));
     s.nextOnState = function (nd) {
       var t2 = tableOf(n), co2 = coverOrderOf(n);
-      if (X.sig([t2, co2, nd.cover, nd.couponLimits, t2.couponLimitOverride, (nd.coverIntents || []).filter(function (i) { return i.table === n; })]) !== sig0) tableHome(s, n);
+      if (X.sig([t2, co2, nd.cover, nd.couponLimits, t2.couponLimitOverride, t2.couponLimits, t2.headcountTrusted, nd.coupons.filter(function (c) { return c.table === n; }), (nd.coverIntents || []).filter(function (i) { return i.table === n; })]) !== sig0) tableHome(s, n);
     };
     s.show(view(s, n + '번 테이블 더보기', null, null, body));
   }
@@ -815,7 +820,7 @@
 
   // ---- waitlist seat: optional table picker so the party size carries over
   SO.seatWait = function (x) {
-    var d = X.S.data, tables = d.tables.filter(function (t) { return t.people == null; }).sort(function (a, b) { return a.number - b.number; });
+    var d = X.S.data, tables = d.tables.slice().sort(function (a, b) { return a.number - b.number; });
     function done(r, tableNo) {
       if (tableNo != null) SC.toast(r && r.partySet ? tableNo + '번 테이블 인원을 ' + Math.min(x.size, 30) + '명으로 기록했어요' : tableNo + '번 테이블은 이미 인원이 있어서 그대로 뒀어요', 'ok');
       else SC.toast(x.nick + ' 착석 처리했어요', 'ok');
@@ -827,13 +832,16 @@
         var finished = false;
         function fin(p) { if (finished) return; finished = true; resolve(p); }
         s.dlg.addEventListener('close', function () { fin(Promise.resolve()); });
-        function seat(no) {
-          return X.api('/api/staff/wait/' + x.id + '/seat', no != null ? { table: no } : {}).then(function (r) { fin(done(r, no)); s.close(); }, function (e) { toastErr(e); });
+        function seat(no, clear) {
+          return X.api('/api/staff/wait/' + x.id + '/seat', no != null ? { table: no, ...(clear ? { clear: true } : {}) } : {}).then(function (r) { fin(done(r, no)); s.close(); }, function (e) {
+            if (e.code === 'table_occupied' && no != null && !clear) return SC.confirm({ title: no + '번 테이블에 이전 손님 기록이 있어요. 정리하고 앉힐까요?', danger: true, ok: '정리하고 앉히기', cancel: '돌아가기' }).then(function (ok) { if (ok) return seat(no, true); });
+            toastErr(e);
+          });
         }
         var btns = {};
         s.show(view(s, x.nick + ' · ' + x.size + '명 착석', '앉은 테이블을 고르면 인원 ' + Math.min(x.size, 30) + '명이 그 테이블에 기록돼요 (선택).', null, [
-          h('div', { class: 'pick' }, tables.map(function (t) { return h('button', { class: 'btn', type: 'button', onclick: function () { seat(t.number); } }, String(t.number), h('small', null, t.status === 'occupied' ? '사용 중' : '비어 있음')); })),
-          note('info', '이미 인원이 기록된 테이블은 목록에 없어요. 테이블을 정하지 않고 착석만 처리할 수도 있어요.')],
+          h('div', { class: 'pick' }, tables.map(function (t) { return h('button', { class: 'btn', type: 'button', onclick: function () { seat(t.number); } }, String(t.number), h('small', null, t.status === 'occupied' || t.people != null ? '기록 있음' : '자리 선택')); })),
+          note('info', '이전 손님 기록이 있는 테이블은 정리 여부를 확인해요. 테이블을 정하지 않고 착석만 처리할 수도 있어요.')],
           h('button', { class: 'btn btn-block', type: 'button', onclick: function () { seat(null); } }, '테이블 정하지 않고 착석')));
       });
     });
@@ -1024,6 +1032,28 @@
     return SC.confirm({ title: '쿠폰 ' + c.code + '을 무효로 만들까요?', danger: true, ok: '무효 처리', cancel: '돌아가기', message: c.label + ' · ' + c.table + '번 테이블\n무효로 만들면 손님이 쓸 수 없고 되돌릴 수 없어요.' }).then(function (ok) {
       if (!ok) return;
       return X.api('/api/staff/coupons/' + encodeURIComponent(c.code) + '/void').then(function () { SC.toast('쿠폰 ' + c.code + ' 무효 처리했어요', 'ok'); return X.refresh(); }, toastErr);
+    });
+  };
+
+  SO.moveCoupon = function (c) {
+    openSheet('쿠폰 옮기기', function (s) {
+      var to = null, buttons = {}, tables = X.S.data.tables.filter(function (t) { return t.number !== c.table; }).sort(function (a, b) { return a.number - b.number; });
+      var go = X.abtn('btn btn-primary btn-block', '쿠폰 옮기기', function () {
+        var dest = to;
+        return SC.confirm({ title: '쿠폰 ' + c.code + '을 ' + dest + '번 테이블로 옮길까요?', ok: '옮기기', message: c.label + ' · ' + c.table + '번 → ' + dest + '번 테이블' }).then(function (ok) {
+          if (!ok) return;
+          return X.api('/api/staff/coupons/' + encodeURIComponent(c.code) + '/move', { table: dest }).then(function () {
+            SC.toast('쿠폰 ' + c.code + '을 ' + dest + '번 테이블로 옮겼어요', 'ok');
+            return X.refresh().then(function () { s.close(); });
+          }, toastErr);
+        });
+      });
+      go.disabled = true;
+      s.show(view(s, '쿠폰 ' + c.code + ' 옮기기', c.label + ' · ' + c.table + '번 테이블', null,
+        tables.length ? h('div', { class: 'pick' }, tables.map(function (t) {
+          var b = h('button', { class: 'btn', type: 'button', 'aria-pressed': 'false', onclick: function () { to = t.number; Object.keys(buttons).forEach(function (n) { buttons[n].setAttribute('aria-pressed', String(Number(n) === to)); }); go.disabled = go.classList.contains('busy'); } }, String(t.number), h('small', null, t.status === 'occupied' ? '사용 중' : '비어 있음'));
+          buttons[t.number] = b; return b;
+        })) : note('info', '옮길 다른 테이블이 없어요.'), go));
     });
   };
 
