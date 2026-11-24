@@ -702,7 +702,7 @@ route('POST', '/api/staff/waitlist/open', (c) => {
   return { ok: true, waitOpen: c.body.open };
 }, S);
 route('POST', '/api/staff/waitlist/clear', () => { const cancelled = store.clearWait(); touch('staff', 'board', 'w:*'); return { ok: true, cancelled }; }, S);
-route('POST', '/api/staff/waitlist/sms', (c) => { store.setWaitSmsUrl(c.body.url); touch('staff'); return { ok: true }; }, S);
+route('POST', '/api/staff/waitlist/sms', (c) => { store.setWaitSmsUrl(c.body.url); touch('staff', 'w:*'); return { ok: true }; }, S);
 route('POST', '/api/staff/waitlist/sms/test', async (c) => {
   if (!store.waitSmsUrl()) throw new HttpError(400, 'sms_not_set', '문자 호출 주소를 먼저 설정해 주세요.');
   const phone = store.normalizePhone(c.body.phone);
@@ -744,7 +744,7 @@ route('POST', '/api/staff/tables/(\\d{1,4})/orders', (c) => {
 }, S);
 route('POST', '/api/staff/tables/(\\d{1,4})/coupons', (c) => { const coupon = store.createManualCoupon(int(c.m[1]), c.body); touchTable(int(c.m[1])); return { ok: true, coupon }; }, S);
 route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/void', (c) => { const coupon = store.voidCoupon(c.m[1]); touchTable(coupon.table); return { ok: true, coupon }; }, S);
-route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/move', (c) => { const { coupon, from } = store.moveCoupon(c.m[1], c.body.table); touchTable(from); touchTable(coupon.table); return { ok: true, coupon }; }, S);
+route('POST', '/api/staff/coupons/([A-Za-z0-9]{1,12})/move', (c) => { const { coupon, from } = store.moveCoupon(c.m[1], c.body.table, c.body.fromTable, c.body.fromSeat); touchTable(from); touchTable(coupon.table); return { ok: true, coupon }; }, S);
 const orderEdited = (order) => { touchTable(order.table); hint('g:' + order.table, 'order_status', { id: order.id, status: order.status }); return order; };
 route('POST', '/api/staff/orders/(\\d{1,9})/items', (c) => {
   const go = () => store.editItems(int(c.m[1]), c.body.items, { expectedUpdatedAt: c.body.expectedUpdatedAt });
@@ -806,7 +806,7 @@ route('GET', '/api/staff/day/reports/(\\d{1,9})\\.csv', (c) => sendText(c.res, 2
 route('POST', '/api/staff/waitlist/timeout', (c) => { const minutes = store.setWaitTimeout(c.body.minutes); touch('staff', 'board', 'w:*'); return { ok: true, minutes }; }, S);
 route('POST', '/api/staff/calls/(\\d{1,9})/resolve', (c) => { store.resolveCall(int(c.m[1])); touch('staff', 'g:*'); return { ok: true }; }, S);
 route('POST', '/api/staff/wait/(\\d{1,9})/(call|seat|cancel|recall)', (c) => {
-  const r = store.waitAction(int(c.m[1]), c.m[2], { table: c.body.table, clear: c.body.clear });
+  const r = store.waitAction(int(c.m[1]), c.m[2], { table: c.body.table, clear: c.body.clear, seat: c.body.seat });
   touch('staff', 'board', 'w:*');
   if (r.table) touchTable(r.table);
   if (r.seat) hint('g:' + r.table, 'cleared', { seat: r.seat });
@@ -898,7 +898,13 @@ function runBackup(periodic = false) {
 async function backupNow() { if (backupP) await backupP; return runBackup(); }
 const backupTimer = setInterval(() => runBackup(true), BACKUP_MS);
 backupTimer.unref();
-const waitSweepTimer = setInterval(() => { try { store.purgeIntents(); if (store.sweepWait()) touch('staff', 'board', 'w:*'); } catch (e) { console.error('wait sweep failed:', e.message); } finally { drainStoreEvents(); } }, 30000); // calls nobody answered become no-shows
+const waitSweepTimer = setInterval(() => {
+  try { store.purgeIntents(); if (store.sweepWait()) touch('staff', 'board', 'w:*'); } catch (e) { console.error('wait sweep failed:', e.message); }
+  finally {
+    try { store.checkpointWaitPhones(); } catch (e) { console.error(e.message); }
+    drainStoreEvents();
+  }
+}, 30000); // calls nobody answered become no-shows; erased phones leave the WAL too
 waitSweepTimer.unref();
 
 let closing = false;

@@ -42,7 +42,9 @@
     document.title = '대기 등록 · COMHERE';
     var nick = h('input', { class: 'y2k-field', type: 'text', maxlength: '10', autocomplete: 'nickname', required: true, 'aria-label': '대기 이름', placeholder: '예: 맥주왕 (최대 10자)' });
     var phone = h('input', { class: 'y2k-field', type: 'tel', inputmode: 'numeric', autocomplete: 'tel', required: true, 'aria-label': '휴대폰 번호', placeholder: '010-1234-5678' });
-    var consent = h('input', { type: 'checkbox', required: true, 'aria-label': '문자 호출을 위한 개인정보 수집 동의' });
+    var consent = h('input', { type: 'checkbox', required: true, 'aria-label': '호출 안내를 위한 개인정보 수집 동의' });
+    var consentText = h('span', null, '호출 안내를 위해 휴대폰 번호를 받아요. 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.');
+    var hint = h('p', { class: 'hint' }, '이 화면을 열어 두면 호출 때 알려드려요.');
     var out = h('output', { class: 'lcd-sm', 'aria-live': 'polite' }, String(size), h('small', null, '명'));
     var err = h('p', { class: 'err', role: 'alert' }, msg || '');
     function setSize(n) { size = Math.max(1, Math.min(10, n)); out.firstChild.textContent = String(size); minus.disabled = size <= 1; plus.disabled = size >= 10; }
@@ -55,7 +57,7 @@
       if (!name) { err.textContent = '이름(닉네임)을 입력해 주세요.'; nick.focus(); return; }
       var digits = phone.value.replace(/[\s-]/g, '');
       if (!/^01[016789]\d{7,8}$/.test(digits)) { err.textContent = '휴대폰 번호를 정확히 입력해 주세요.'; phone.focus(); return; }
-      if (!consent.checked) { err.textContent = '문자 호출을 위해 개인정보 수집에 동의해 주세요.'; consent.focus(); return; }
+      if (!consent.checked) { err.textContent = '호출 안내를 위해 개인정보 수집에 동의해 주세요.'; consent.focus(); return; }
       err.textContent = '';
       SC.audio.unlock(); // user gesture: lets us beep when called
       SC.act(go, function () {
@@ -67,14 +69,15 @@
       h('label', { class: 'lab' }, '이름 (닉네임)', nick),
       h('div', { class: 'lab' }, '인원', h('div', { class: 'stepper' }, minus, out, plus)),
       h('label', { class: 'lab' }, '휴대폰 번호', phone),
-      h('label', { class: 'consent' }, consent, h('span', null, '호출 문자를 보내려고 휴대폰 번호를 받아요. 문자는 부스 휴대폰 자동화 앱(MacroDroid) 서버를 거쳐 보내지고, 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.')),
-      err, go,
-      h('p', { class: 'hint' }, '호출되면 문자로도 알려드려요. 이 화면과 진동으로도 알려 드려요.'));
+      h('label', { class: 'consent' }, consent, consentText),
+      err, go, hint);
     var notice = h('p', { class: 'w-sub', role: 'status', 'aria-live': 'polite' }, '대기를 등록하면 순번을 알려 드려요.');
     main.replaceChildren(win('대기 등록 - COMHERE.exe', [h('h1', { class: 'w-h' }, '자리가 날 때까지', h('br'), '여기서 기다려 주세요'), notice, form]));
     setSize(size);
     function applyInfo(i) {
       setNotice(i.notice);
+      consentText.textContent = i.sms ? '호출 문자를 보내려고 휴대폰 번호를 받아요. 문자는 부스 휴대폰 자동화 앱(MacroDroid) 서버를 거쳐 보내지고, 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.' : '호출 안내를 위해 휴대폰 번호를 받아요. 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.';
+      hint.textContent = i.sms ? '호출되면 문자로도 알려드려요. 이 화면과 진동으로도 알려 드려요.' : '이 화면을 열어 두면 호출 때 알려드려요.';
       form.hidden = !i.open;
       notice.className = i.open ? 'w-sub' : 'err';
       notice.textContent = i.open ? '현재 ' + (i.waitingTotal || 0) + '팀 대기 중' : '지금은 대기 접수를 받지 않아요';
@@ -87,7 +90,7 @@
   // ---------- ticket ----------
   var T = {};
   function buildTicket() {
-    T.pos = h('div', { class: 'pos' }); T.ahead = h('div', { class: 'ahead' }); T.who = h('div', { class: 'who' }); T.total = h('div', { class: 'k' });
+    T.pos = h('div', { class: 'pos' }); T.number = h('div', { class: 'k' }); T.hint = h('p', { class: 'hint' }); T.ahead = h('div', { class: 'ahead' }); T.who = h('div', { class: 'who' }); T.total = h('div', { class: 'k' });
     var cancel = h('button', { class: 'y2k-btn y2k-btn--danger', type: 'button', onclick: function () {
       SC.confirm({ title: '대기를 취소할까요?', message: '취소하면 순번이 사라져요.', ok: '대기 취소', cancel: '계속 기다리기', danger: true }).then(function (ok) {
         if (!ok) return;
@@ -98,8 +101,8 @@
     main.replaceChildren(
       SC.audioStrip(),
       win('내 순번 - COMHERE.exe', [
-        h('div', { class: 'ticket' }, h('div', { class: 'k' }, '내 순번'), h('div', { class: 'lcd' }, T.pos), T.ahead, h('div', { class: 'perf' }), T.who, T.total),
-        h('p', { class: 'hint' }, '호출되면 문자로도 알려드려요. 순서가 되면 이 화면이 "입장하세요"로 바뀌어요.'),
+        h('div', { class: 'ticket' }, T.number, h('div', { class: 'k' }, '내 순번'), h('div', { class: 'lcd' }, T.pos), T.ahead, h('div', { class: 'perf' }), T.who, T.total),
+        T.hint,
         alertControls(),
         cancel]));
   }
@@ -138,6 +141,8 @@
       if (prevStatus !== 'noshow') showNoshow(d);
     } else { calledEl.hidden = true; clearInterval(vibTimer); }
     prevStatus = d.status;
+    T.number.textContent = '대기 번호 ' + d.id + '번';
+    T.hint.textContent = d.sms ? '호출되면 문자로도 알려드려요. 순서가 되면 이 화면이 "입장하세요"로 바뀌어요.' : '이 화면을 열어 두면 호출 때 알려드려요.';
     T.pos.replaceChildren(String(d.position != null ? d.position : '-'), h('small', null, '번째'));
     T.ahead.textContent = d.ahead != null ? (d.ahead === 0 ? '다음이 내 차례예요!' : '내 앞에 ' + d.ahead + '팀') : '';
     T.who.textContent = d.nick + ' · ' + d.size + '명';

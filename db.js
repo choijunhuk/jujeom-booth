@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS calls(id INTEGER PRIMARY KEY AUTOINCREMENT, table_id 
 CREATE TABLE IF NOT EXISTS waitlist(
   id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL, size INTEGER NOT NULL, secret TEXT NOT NULL, device TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'waiting', created_at INTEGER NOT NULL, called_at INTEGER, recalled INTEGER NOT NULL DEFAULT 0,
-  phone TEXT, sms_state TEXT, sms_at INTEGER);
+  phone TEXT, sms_state TEXT, sms_at INTEGER, phone_until INTEGER);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS login_keys(hash TEXT PRIMARY KEY, fails INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS deposit_notices(
@@ -248,12 +248,13 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   db.exec('CREATE INDEX IF NOT EXISTS coupons_dev ON coupons(device, reward_id)');
   for (const col of ['origin_table', 'origin_seat']) if (!colsOf('coupons').includes(col)) db.exec(`ALTER TABLE coupons ADD COLUMN ${col} INTEGER`); // NULL keeps older coupons tied to their current seating
+  db.exec('CREATE INDEX IF NOT EXISTS coupons_origin ON coupons(origin_table, origin_seat)');
   if (!colsOf('order_items').includes('service')) db.exec('ALTER TABLE order_items ADD COLUMN service INTEGER NOT NULL DEFAULT 0');
   if (!colsOf('menu_items').includes('stock_left')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_left INTEGER');
   if (!colsOf('menu_items').includes('stock_auto')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_auto INTEGER NOT NULL DEFAULT 0');
   if (!colsOf('menu_items').includes('components')) db.exec('ALTER TABLE menu_items ADD COLUMN components TEXT'); // set menu: JSON [{id, qty}] of items whose stock the set consumes
   if (!colsOf('waitlist').includes('recalled')) db.exec('ALTER TABLE waitlist ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0');
-  for (const [col, ddl] of [['phone', 'TEXT'], ['sms_state', 'TEXT'], ['sms_at', 'INTEGER']]) if (!colsOf('waitlist').includes(col)) db.exec(`ALTER TABLE waitlist ADD COLUMN ${col} ${ddl}`);
+  for (const [col, ddl] of [['phone', 'TEXT'], ['sms_state', 'TEXT'], ['sms_at', 'INTEGER'], ['phone_until', 'INTEGER']]) if (!colsOf('waitlist').includes(col)) db.exec(`ALTER TABLE waitlist ADD COLUMN ${col} ${ddl}`);
   for (const [col, ddl] of [['duplicate_of', 'INTEGER'], ['reasons', 'TEXT'], ['amount_guessed', 'INTEGER NOT NULL DEFAULT 0'], ['repeat_count', 'INTEGER NOT NULL DEFAULT 1'], ['last_at', 'INTEGER']]) {
     if (!colsOf('deposit_notices').includes(col)) db.exec(`ALTER TABLE deposit_notices ADD COLUMN ${col} ${ddl}`);
   }
@@ -1865,8 +1866,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (r.per_seat_mode === 'fixed') return { limit: r.per_seat_count, source: 'fixed' };
     return { limit: Math.min(headcountCounted(tid, seat), r.per_seat_cap), source: 'people' };
   }
-  const seatIssuedOf = (rid, tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE COALESCE(origin_table, table_id)=? AND COALESCE(origin_seat, seat)=? AND source='score' AND reward_id=?", tid, seat, rid).n;
-  const seatTotalOf = (tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE COALESCE(origin_table, table_id)=? AND COALESCE(origin_seat, seat)=? AND source!='staff'", tid, seat).n; // earned here, including moved-away coupons; manual staff coupons are not counted
+  const seatIssuedOf = (rid, tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE ((origin_table IS NULL AND table_id=? AND seat=?) OR (origin_table=? AND origin_seat=?)) AND source='score' AND reward_id=?", tid, seat, tid, seat, rid).n;
+  const seatTotalOf = (tid, seat) => get("SELECT COUNT(*) n FROM coupons WHERE ((origin_table IS NULL AND table_id=? AND seat=?) OR (origin_table=? AND origin_seat=?)) AND source!='staff'", tid, seat, tid, seat).n; // earned here, including moved-away coupons; manual staff coupons are not counted
   const discountUsesOf = (tid, seat) => get("SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=? AND coupon_code IS NOT NULL AND status!='cancelled'", tid, seat).n
     + get("SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=? AND type='discount' AND status='used' AND order_id IS NULL", tid, seat).n; // + discount coupons redeemed at the counter
   const deviceIssuedOf = (rid, device) => (device ? get('SELECT COUNT(*) n FROM coupons WHERE reward_id=? AND device=? AND table_id>0', rid, device).n : 0);
@@ -2088,9 +2089,10 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     tx(() => { run("UPDATE coupons SET status='void' WHERE code=?", c.code); audit('coupon_void', `coupon ${c.code}`, `${c.type} ${c.label}`, `쿠폰 ${c.code} 무효 처리 · ${c.label}`); });
     return couponOut(get('SELECT * FROM coupons WHERE code=?', c.code));
   }
-  function moveCoupon(code, table) {
+  function moveCoupon(code, table, fromTable, fromSeat) {
     if (!Number.isInteger(table) || table < 1 || table > tableCount) fail(400, 'bad_table', `테이블 번호는 1~${tableCount} 사이여야 합니다.`);
     const c = get('SELECT * FROM coupons WHERE code=?', String(code || '').trim().toUpperCase()) || fail(404, 'no_coupon', '없는 쿠폰 코드입니다.');
+    if (c.table_id !== fromTable || c.seat !== fromSeat) fail(409, 'coupon_moved', '다른 직원이 먼저 이 쿠폰을 옮겼습니다.');
     const a = get('SELECT seat FROM tables WHERE id=? AND id BETWEEN 1 AND ?', c.table_id, tableCount);
     if (c.status !== 'issued' || !a || c.seat !== a.seat) fail(409, 'coupon_not_movable', '사용 전인 실제 테이블의 현재 손님 쿠폰만 옮길 수 있습니다.');
     if (c.table_id === table) fail(400, 'same_table', '같은 테이블로 옮길 수 없습니다.');
@@ -2209,14 +2211,15 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function sweepWait() {
     const changed = tx(() => {
       const t = now();
-      const expired = run("UPDATE waitlist SET status='noshow' WHERE status='called' AND called_at<?", t - waitTimeoutMin() * 60000).changes;
+      const timeout = waitTimeoutMin() * 60000;
+      const expired = run("UPDATE waitlist SET status='noshow', phone_until=called_at+? WHERE status='called' AND called_at<?", timeout + 30 * 60000, t - timeout).changes;
       if (expired && waitAutoNext()) {
         for (const w of all("SELECT id FROM waitlist WHERE status='waiting' ORDER BY id LIMIT ?", expired)) {
           run("UPDATE waitlist SET status='called', called_at=?, sms_state=NULL, sms_at=NULL WHERE id=?", t, w.id);
           emit('wait_sms', { id: w.id });
         }
       }
-      const scrubbed = run("UPDATE waitlist SET phone=NULL WHERE phone IS NOT NULL AND NOT (status IN ('waiting','called') OR (status='noshow' AND recalled=0 AND called_at IS NOT NULL AND called_at>=?))", t - (waitTimeoutMin() + 30) * 60000).changes; // a no-show keeps the number 30 min after its call ran out, so one recall can still text
+      const scrubbed = run("UPDATE waitlist SET phone=NULL WHERE phone IS NOT NULL AND NOT (status IN ('waiting','called') OR (status='noshow' AND recalled=0 AND phone_until IS NOT NULL AND phone_until>=?))", t).changes; // the no-show deadline is fixed when its call runs out, even if staff change the timeout later
       if (expired || scrubbed) emit('wait_changed', {});
       return expired + scrubbed;
     });
@@ -2224,7 +2227,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return changed;
   }
   function clearWait() { const n = run("UPDATE waitlist SET status='cancelled', phone=NULL WHERE status IN ('waiting','called','noshow')").changes; if (n) invalidate(); return n; }
-  const waitInfo = () => { sweepWait(); return { open: waitOpen(), waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, notice: bannerOut() }; };
+  const checkpointWaitPhones = () => db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  const waitInfo = () => { sweepWait(); return { open: waitOpen(), sms: !!waitSmsUrl(), waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, notice: bannerOut() }; };
   function addWait(device, nick, size, phoneInput, consent) {
     if (!waitOpen()) fail(403, 'wait_closed', '지금은 대기 등록을 받지 않습니다.');
     const phone = normalizePhone(phoneInput);
@@ -2258,7 +2262,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const ahead = w.status === 'waiting' ? get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting' AND id<?", w.id).n : 0;
     return {
       id: w.id, nick: w.nick, size: w.size, status: w.status, canRecall: w.status === 'noshow' && !w.recalled, ahead, position: w.status === 'waiting' ? ahead + 1 : null,
-      waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, open: waitOpen(), notice: bannerOut(),
+      waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, open: waitOpen(), sms: !!waitSmsUrl(), notice: bannerOut(),
     };
   }
   function waitCancel(id, secret) {
@@ -2266,12 +2270,17 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (w.status === 'waiting' || w.status === 'called' || w.status === 'noshow') { run("UPDATE waitlist SET status='cancelled', phone=NULL WHERE id=?", id); invalidate(); }
   }
   function waitAction(id, action, opts = {}) {
+    if (action === 'seat' && opts.table != null) {
+      if (!Number.isInteger(opts.table) || opts.table < 1 || opts.table > tableCount) fail(400, 'bad_table', `테이블 번호는 1~${tableCount} 사이여야 합니다.`);
+      if (opts.clear === true && opts.seat !== tableRow(opts.table).seat) fail(409, 'seat_changed', '테이블 상황이 바뀌었습니다. 다시 확인해 주세요.'); // reject stale confirmations before the sweep can change any wait entries
+    }
     sweepWait();
     const w = get('SELECT * FROM waitlist WHERE id=?', id) || fail(404, 'no_wait', '없는 대기 번호입니다.');
     if (w.status === 'seated' || w.status === 'cancelled') fail(409, 'wait_closed', '이미 처리된 대기입니다.');
     if (action === 'recall') { // a no-show may be called back once
       if (w.status !== 'noshow') fail(409, 'not_noshow', '미입장 처리된 대기만 다시 부를 수 있습니다.');
       if (w.recalled) fail(409, 'already_recalled', '이미 한 번 다시 불렀습니다.');
+      if (w.phone && get("SELECT 1 FROM waitlist WHERE phone=? AND status IN ('waiting','called') AND id!=?", w.phone, id)) fail(409, 'dup_phone', '같은 번호로 이미 대기 중인 손님이 있습니다.');
       tx(() => { run("UPDATE waitlist SET status='called', called_at=?, recalled=1, sms_state=NULL, sms_at=NULL WHERE id=?", now(), id); emit('wait_sms', { id }); });
       invalidate();
       return {};
@@ -2279,13 +2288,15 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (action === 'call' && w.status === 'called') return {}; // a double tap or a second phone must not text twice or restart the timer; resend is its own route
     if (action === 'call' && w.status === 'noshow') fail(409, 'wait_noshow', '미입장 처리된 대기입니다. 다시 부르기(recall)를 사용하세요.');
     if (action === 'seat' && opts.table != null) { // seated at a table: the party size becomes that seat's headcount when it has none yet
-      if (!Number.isInteger(opts.table) || opts.table < 1 || opts.table > tableCount) fail(400, 'bad_table', `테이블 번호는 1~${tableCount} 사이여야 합니다.`);
       return tx(() => {
         let t = tableRow(opts.table);
+        const occupied = Object.keys(seatActivity(t)).length > 0;
         if (opts.clear === true) {
-          clearTable(t.id, false);
-          t = tableRow(t.id);
-        } else if (Object.keys(seatActivity(t)).length) fail(409, 'table_occupied', '이 테이블에 이전 손님 기록이 있어요. 정리하고 앉힐까요?', { table: t.id, partySet: false });
+          if (occupied) {
+            clearTable(t.id, false);
+            t = tableRow(t.id);
+          }
+        } else if (occupied) fail(409, 'table_occupied', '이 테이블에 이전 손님 기록이 있어요. 정리하고 앉힐까요?', { table: t.id, seat: t.seat, partySet: false });
         let partySet = false;
         if (seatPeople(t.id, t.seat) == null) {
           applyPeople(t, Math.min(PEOPLE_MAX, w.size), now(), 'waitlist');
@@ -2294,7 +2305,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
         }
         run("UPDATE waitlist SET status='seated', seated_table=?, phone=NULL WHERE id=?", t.id, id);
         invalidate();
-        return { partySet, table: t.id, ...(opts.clear === true ? { seat: t.seat } : {}) };
+        return { partySet, table: t.id, ...(opts.clear === true && occupied ? { seat: t.seat } : {}) };
       });
     }
     const to = { call: 'called', seat: 'seated', cancel: 'cancelled' }[action];
@@ -2306,7 +2317,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function waitSmsTarget(id) {
     sweepWait();
     const w = get("SELECT phone, called_at FROM waitlist WHERE id=? AND status='called' AND phone IS NOT NULL", id);
-    return w ? { phone: w.phone, minutes: waitTimeoutMin(), calledAt: w.called_at } : null;
+    return w ? { phone: w.phone, minutes: Math.max(1, Math.ceil((w.called_at + waitTimeoutMin() * 60000 - now()) / 60000)), calledAt: w.called_at } : null;
   }
   function setWaitSms(id, ok, calledAt) {
     const params = [ok ? 'sent' : 'failed', now(), id];
@@ -2315,6 +2326,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return run(sql, ...params).changes;
   }
   function queueWaitSms(id) {
+    if (!waitSmsUrl()) fail(400, 'sms_not_set', '문자 호출 주소를 먼저 설정해 주세요.');
     sweepWait();
     tx(() => { if (!get("SELECT 1 FROM waitlist WHERE id=? AND status='called' AND phone IS NOT NULL", id)) fail(409, 'not_called', '호출 중인 대기만 문자를 보낼 수 있습니다.'); emit('wait_sms', { id }); });
     return { ok: true };
@@ -2468,10 +2480,12 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function seatActivity(t) {
     const used = {};
     for (const [k, sql] of [['orders', 'SELECT COUNT(*) n FROM orders WHERE table_id=? AND seat=?'], ['plays', 'SELECT COUNT(*) n FROM plays WHERE table_id=? AND seat=?'],
-      ['coupons', 'SELECT COUNT(*) n FROM coupons WHERE table_id=? AND seat=?'], ['nicks', 'SELECT COUNT(*) n FROM nicks WHERE table_id=? AND seat=?'], ['calls', 'SELECT COUNT(*) n FROM calls WHERE table_id=? AND seat=?']]) {
+      ['nicks', 'SELECT COUNT(*) n FROM nicks WHERE table_id=? AND seat=?'], ['calls', 'SELECT COUNT(*) n FROM calls WHERE table_id=? AND seat=?']]) {
       const n = get(sql, t.id, t.seat).n;
       if (n) used[k] = n;
     }
+    const coupons = get('SELECT COUNT(*) n FROM coupons WHERE ((origin_table IS NULL AND table_id=? AND seat=?) OR (origin_table=? AND origin_seat=?)) OR (table_id=? AND seat=?)', t.id, t.seat, t.id, t.seat, t.id, t.seat).n; // both the earning seat and the seat holding the coupon have activity
+    if (coupons) used.coupons = coupons;
     const pr = seatRow(t.id, t.seat); // a headcount (guest or staff) or a live share intent on the new seat is activity too
     if (pr && pr.people != null) used.party = 1;
     const oi = openIntents(t.id, t.seat).length;
@@ -2855,7 +2869,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     setCouponLimits, setSeatCouponLimit, couponLimits,
     setTableCount, rotateToken, tableCountNow: () => tableCount, payInfo, staffPay: payAll, setPay, setDepositor, ingestDeposit, previewDeposit, listDeposits, depositCounts, assignDeposit, attachDeposit, dismissDeposit, setAutoConfirm, depositSecret, rotateDepositSecret, checkDepositSecret, deviceSecret, setPhoto, deletePhoto, photosDir, createReward, updateReward, deleteReward, hourlyReward, setHourlyReward, memberSettings, setMemberSettings, listRewards, createItem, updateItem, deleteItem, createCategory, renameCategory, deleteCategory, reorderMenu, memberPct,
     startPlay, finishPlay, redeem, moveCoupon, awardHour, setStock, setNick, addCall, resolveCall,
-    addWait, waitStatus, waitCancel, waitAction, setWaitOpen, clearWait, waitInfo, normalizePhone, waitSmsUrl, setWaitSmsUrl, waitSmsTarget, setWaitSms, queueWaitSms, setWaitAutoNext, setBoardShow,
+    addWait, waitStatus, waitCancel, waitAction, setWaitOpen, clearWait, waitInfo, normalizePhone, waitSmsUrl, setWaitSmsUrl, waitSmsTarget, setWaitSms, queueWaitSms, checkpointWaitPhones, setWaitAutoNext, setBoardShow,
     newLoginKey, validLoginKey, loginKeyOk, loginKeyFail,
     guestState, staffState, kitchenState, boardState, clearTable, moveTable, sales, salesCsv, reset,
     newSession, validSession, endSession, tokens, guestTokens, testSettings, setTestSettings, rotateTestToken, resetTest, TEST_FAKE_MEMBER_ID, backup, orderById,

@@ -559,6 +559,7 @@
     btns.appendChild(waitAct(x, 'cancel', '취소', '', 'btn btn-danger'));
     return h('div', { class: 'row-card ' + (called ? 'called' : '') + (noshow ? ' noshow' : '') },
       h('div', { class: 'grow' },
+        h('span', { class: 'muted' }, '대기 번호 ' + x.id + '번'),
         h('span', { class: 'big' }, (x._n ? x._n + '. ' : '') + x.nick + ' · ' + x.size + '명'),
         h('span', { class: 'muted' }, '대기 ', SC.timeEl(x.createdAt, 'dur'), called || noshow ? ' · 호출 ' : '', (called || noshow) && x.calledAt ? SC.timeEl(x.calledAt, 'ago') : null, noshow ? (x.recalled ? ' · 이미 한 번 다시 불렀어요' : ' · 한 번 다시 부를 수 있어요') : ''),
         x.phoneMasked ? h('span', { class: 'muted' }, x.phoneMasked) : null,

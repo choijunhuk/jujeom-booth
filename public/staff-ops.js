@@ -45,6 +45,8 @@
     already_recalled: '이미 한 번 다시 부른 팀이에요.',
     wait_noshow: '노쇼 처리된 팀이에요. "다시 부르기"를 써 주세요.',
     no_wait: '이미 처리된 대기예요. 화면을 새로 불러올게요.',
+    seat_changed: '테이블 상황이 바뀌었습니다. 다시 확인해 주세요.',
+    coupon_moved: '다른 직원이 먼저 이 쿠폰을 옮겼습니다.',
     bad_minutes: '시간은 1~30분 사이 정수예요.',
     bad_text: '공지는 80자 이하로 입력해 주세요.',
     bad_level: '공지 종류가 올바르지 않아요.',
@@ -138,7 +140,7 @@
       throw e;
     });
   };
-  function toastErr(e) { SC.toast(SC.errText(e), 'error'); if (e.code === 'stale' || e.code === 'no_order' || e.code === 'unknown_item' || e.code === 'no_wait' || e.code === 'no_coupon' || e.code === 'no_refund' || e.code === 'not_noshow' || e.code === 'exceeds_balance') X.refresh(); }
+  function toastErr(e) { SC.toast(SC.errText(e), 'error'); if (e.code === 'stale' || e.code === 'seat_changed' || e.code === 'coupon_moved' || e.code === 'no_order' || e.code === 'unknown_item' || e.code === 'no_wait' || e.code === 'no_coupon' || e.code === 'no_refund' || e.code === 'not_noshow' || e.code === 'exceeds_balance') X.refresh(); }
   SO.toastErr = toastErr;
   function menuItems(includeHidden) { return ((X.S.data.menu && X.S.data.menu.items) || []).filter(function (i) { return includeHidden || !i.hidden; }); }
   function catName(i) { return i.cat || ''; }
@@ -832,9 +834,9 @@
         var finished = false;
         function fin(p) { if (finished) return; finished = true; resolve(p); }
         s.dlg.addEventListener('close', function () { fin(Promise.resolve()); });
-        function seat(no, clear) {
-          return X.api('/api/staff/wait/' + x.id + '/seat', no != null ? { table: no, ...(clear ? { clear: true } : {}) } : {}).then(function (r) { fin(done(r, no)); s.close(); }, function (e) {
-            if (e.code === 'table_occupied' && no != null && !clear) return SC.confirm({ title: no + '번 테이블에 이전 손님 기록이 있어요. 정리하고 앉힐까요?', danger: true, ok: '정리하고 앉히기', cancel: '돌아가기' }).then(function (ok) { if (ok) return seat(no, true); });
+        function seat(no, seenSeat) {
+          return X.api('/api/staff/wait/' + x.id + '/seat', no != null ? { table: no, ...(seenSeat != null ? { clear: true, seat: seenSeat } : {}) } : {}).then(function (r) { fin(done(r, no)); s.close(); }, function (e) {
+            if (e.code === 'table_occupied' && no != null && seenSeat == null) return SC.confirm({ title: no + '번 테이블에 이전 손님 기록이 있어요. 정리하고 앉힐까요?', danger: true, ok: '정리하고 앉히기', cancel: '돌아가기' }).then(function (ok) { if (ok) return seat(no, e.data.seat); });
             toastErr(e);
           });
         }
@@ -1042,7 +1044,7 @@
         var dest = to;
         return SC.confirm({ title: '쿠폰 ' + c.code + '을 ' + dest + '번 테이블로 옮길까요?', ok: '옮기기', message: c.label + ' · ' + c.table + '번 → ' + dest + '번 테이블' }).then(function (ok) {
           if (!ok) return;
-          return X.api('/api/staff/coupons/' + encodeURIComponent(c.code) + '/move', { table: dest }).then(function () {
+          return X.api('/api/staff/coupons/' + encodeURIComponent(c.code) + '/move', { table: dest, fromTable: c.table, fromSeat: c.seat }).then(function () {
             SC.toast('쿠폰 ' + c.code + '을 ' + dest + '번 테이블로 옮겼어요', 'ok');
             return X.refresh().then(function () { s.close(); });
           }, toastErr);

@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const { DatabaseSync } = require('node:sqlite');
 const { createStore } = require('./db');
@@ -1374,7 +1375,7 @@ test('waitlist switch: closing refuses registrations, clear cancels everyone', a
     const w1 = await a.post('/api/wait', { phone: waitPhone(), consent: true, nick: '가', size: 2 });
     const w2 = await b.post('/api/wait', { phone: waitPhone(), consent: true, nick: '나', size: 2 });
     assert.equal(w1.status, 201);
-    assert.deepEqual((await a.get('/api/wait/info')).json, { open: true, waitingTotal: 2, notice: null });
+    assert.deepEqual((await a.get('/api/wait/info')).json, { open: true, sms: false, waitingTotal: 2, notice: null });
     assert.equal((await s.get('/api/staff/state')).json.waitOpen, true);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: 'no' })).status, 400);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: false })).json.waitOpen, false);
@@ -5468,7 +5469,7 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
       '/api/staff/menu/items/([A-Za-z0-9_-]{1,40})/photo/delete': [`/api/staff/menu/items/${it}/photo/delete`, {}],
       '/api/staff/ordering': ['/api/staff/ordering', { open: false }],
       '/api/staff/coupons/redeem': ['/api/staff/coupons/redeem', { code: cp.code }],
-      '/api/staff/coupons/([A-Za-z0-9]{1,12})/move': [`/api/staff/coupons/${cp2.code}/move`, { table: 3 }],
+      '/api/staff/coupons/([A-Za-z0-9]{1,12})/move': [`/api/staff/coupons/${cp2.code}/move`, { table: 3, fromTable: 1, fromSeat: 1 }],
       '/api/staff/tables/count': ['/api/staff/tables/count', { count: 30 }],
       '/api/staff/tables/(\\d{1,4})/rotate': ['/api/staff/tables/5/rotate', {}],
       '/api/staff/tables/move': ['/api/staff/tables/move', { from: 6, to: 7 }],
@@ -5727,13 +5728,13 @@ test('R3-3 board and wait payloads carry the staff notice; wait status exposes n
     assert.equal((await st()).canRecall, false);
     await s.post(`/api/staff/wait/${w.id}/call`, {});
     const db = dbOf(srv);
-    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(11 * 60000); // past the (now 10 min) default timeout, not on its edge
+    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(11 * 60000); // exact 10 min is the called_at < now - timeout boundary and can fail in the same millisecond
     let x = await st();
     assert.deepEqual([x.status, x.canRecall], ['noshow', true]);
     await s.post(`/api/staff/wait/${w.id}/recall`, {});
     x = await st();
     assert.deepEqual([x.status, x.canRecall], ['called', false]);
-    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(11 * 60000); // past the (now 10 min) default timeout, not on its edge
+    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(11 * 60000); // exact 10 min is the called_at < now - timeout boundary and can fail in the same millisecond
     x = await st();
     assert.deepEqual([x.status, x.canRecall], ['noshow', false], 'recalled once already');
     db.close();
@@ -8556,14 +8557,14 @@ test('SMS phone sweep retains only active calls and unrecalled no-shows within 3
     const stamp = Date.now(), realNow = Date.now;
     Date.now = () => stamp;
     try {
-      const update = db.prepare('UPDATE waitlist SET status=?, recalled=?, called_at=? WHERE id=?');
-      update.run('called', 0, stamp, rows[1].id);
-      update.run('noshow', 0, stamp - (10 + 30) * 60000 + 1, rows[2].id); // spec change (review): window = call timeout (default 10) + 30 min, so a recall can still text
-      update.run('noshow', 0, stamp - (10 + 30) * 60000 - 1, rows[3].id);
-      update.run('noshow', 1, stamp - 1000, rows[4].id);
-      update.run('cancelled', 0, stamp, rows[5].id);
-      update.run('seated', 0, stamp, rows[6].id);
-      update.run('noshow', 0, null, rows[7].id);
+      const update = db.prepare('UPDATE waitlist SET status=?, recalled=?, called_at=?, phone_until=? WHERE id=?');
+      update.run('called', 0, stamp, null, rows[1].id);
+      update.run('noshow', 0, stamp - (10 + 30) * 60000 + 1, stamp + 1, rows[2].id);
+      update.run('noshow', 0, stamp - (10 + 30) * 60000 - 1, stamp - 1, rows[3].id);
+      update.run('noshow', 1, stamp - 1000, stamp + 60000, rows[4].id);
+      update.run('cancelled', 0, stamp, stamp + 60000, rows[5].id);
+      update.run('seated', 0, stamp, stamp + 60000, rows[6].id);
+      update.run('noshow', 0, null, null, rows[7].id);
       assert.ok(store.sweepWait());
       assert.deepEqual(rows.map((w) => !!db.prepare('SELECT phone FROM waitlist WHERE id=?').get(w.id).phone), [true, true, true, false, false, false, false, false]);
       assert.ok(store.waitSmsTarget(rows[1].id));
@@ -8598,6 +8599,7 @@ test('SMS auto-next: transactional oldest-first replacement, id-only events, rec
 
 test('SMS status updates are call-bound, staff-only, and skipped when cancelled before sending', async () => {
   await withWaitStore(async (store, db) => {
+    store.setWaitSmsUrl('https://trigger.macrodroid.com/test');
     const w = store.addWait('status', '손님', 1, waitPhone(), true);
     assert.throws(() => store.queueWaitSms(w.id), (e) => e.code === 'not_called');
     store.waitAction(w.id, 'call');
@@ -8638,9 +8640,11 @@ test('SMS settings: HTTPS MacroDroid only, no credential echoes, audited once, t
     assert.deepEqual((await s.get('/api/staff/state')).json.waitSms, { configured: false, hint: '' });
     assert.equal((await s.post('/api/staff/waitlist/auto-next', { on: 0 })).status, 400);
     const w = (await g.post('/api/wait', { nick: '손님', size: 1, phone, consent: true })).json;
-    assert.equal((await s.post(`/api/staff/wait/${w.id}/sms`, {})).status, 409);
+    const unavailableBeforeCall = await s.post(`/api/staff/wait/${w.id}/sms`, {});
+    assert.deepEqual([unavailableBeforeCall.status, unavailableBeforeCall.json.error], [400, 'sms_not_set']);
     await s.post(`/api/staff/wait/${w.id}/call`, {});
-    assert.equal((await s.post(`/api/staff/wait/${w.id}/sms`, {})).status, 200);
+    const unavailable = await s.post(`/api/staff/wait/${w.id}/sms`, {});
+    assert.deepEqual([unavailable.status, unavailable.json.error], [400, 'sms_not_set']);
     assert.equal((await s.get('/api/staff/state')).json.waitlist[0].smsState, null, 'unconfigured sends leave state null');
     assert.ok(!srv.log().includes('credential-test') && !srv.log().includes(phone));
   });
@@ -8660,7 +8664,8 @@ test('SMS sender: serial, at least 2500ms after the previous send finished, enco
   const target = () => ({ url: 'https://trigger.macrodroid.com/unit', phone: '01012345678', msg: '[컴히어] 1번 & ? # 입장' });
   const results = await Promise.all([sender.send(target, 1), sender.send(target, 2), sender.send(target, 3)]);
   assert.deepEqual(results, [{ ok: true }, { ok: false, error: '302' }, { ok: true }]);
-  assert.deepEqual(starts, [0, 2600, 5200]); assert.equal(maxActive, 1); // spec change: the 2.5 s gap runs from the previous send's END (each mock send takes 100 ms) assert.equal(cancelled, 3);
+  assert.deepEqual(starts, [0, 2600, 5200]); assert.equal(maxActive, 1); // the 2.5 s gap runs from the previous send's end
+  assert.equal(cancelled, 3);
   for (const url of bodies) { assert.equal(url.searchParams.get('phone'), '01012345678'); assert.equal(url.searchParams.get('msg'), target().msg); assert.equal(url.hash, ''); }
   assert.ok(signals.every((s) => s instanceof AbortSignal));
 });
@@ -8844,7 +8849,7 @@ test('SMS legacy wait migration keeps existing rows and adds nullable private co
   const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 }), db = new DatabaseSync(file);
   try {
     const row = db.prepare('SELECT * FROM waitlist').get();
-    assert.deepEqual([row.nick, row.phone, row.sms_state, row.sms_at], ['기존손님', null, null, null]);
+    assert.deepEqual([row.nick, row.phone, row.sms_state, row.sms_at, row.phone_until], ['기존손님', null, null, null, null]);
     assert.equal(store.staffState().waitlist[0].phoneMasked, null);
     assert.equal(store.waitStatus(1, 'old-secret').status, 'waiting');
   } finally { db.close(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
@@ -8870,7 +8875,7 @@ test('coupon move updates one row and makes a discount usable only at its destin
   await withBooth(async ({ srv, s, tk }) => {
     const source = await guestWithDevice(srv), destination = await guestWithDevice(srv);
     const c = (await s.post('/api/staff/tables/1/coupons', { type: 'discount', amount: 1000, label: '분할 쿠폰' })).json.coupon;
-    const moved = await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2 });
+    const moved = await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2, fromTable: 1, fromSeat: 1 });
     assert.equal(moved.status, 200, moved.text);
     const db = kDb(srv);
     try {
@@ -8897,7 +8902,7 @@ test('coupon move refreshes both source and destination guest SSE snapshots', as
     try {
       const beforeA = await a.until((text) => text.includes(`"code":"${c.code}"`));
       await b.until((text) => text.includes('event: state'));
-      assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2 })).status, 200);
+      assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2, fromTable: 1, fromSeat: 1 })).status, 200);
       await a.until((text) => text.lastIndexOf('event: state') > beforeA.lastIndexOf('event: state') && !text.slice(text.lastIndexOf('event: state')).includes(`"code":"${c.code}"`));
       await b.until((text) => text.slice(text.lastIndexOf('event: state')).includes(`"code":"${c.code}"`));
     } finally { a.close(); b.close(); }
@@ -8912,7 +8917,7 @@ test('a moved discount uses the destination seating use limit', async () => {
     const c = (await s.post('/api/staff/tables/2/coupons', { type: 'discount', amount: 1000, label: '도착지 사용' })).json.coupon;
     const source = await guestWithDevice(srv), destination = await guestWithDevice(srv);
     assert.equal((await order(source, tk[0], [{ id: 'fries', qty: 1 }], { couponCode: a.code })).status, 201);
-    assert.equal((await s.post(`/api/staff/coupons/${b.code}/move`, { table: 2 })).status, 200);
+    assert.equal((await s.post(`/api/staff/coupons/${b.code}/move`, { table: 2, fromTable: 1, fromSeat: 1 })).status, 200);
     assert.equal((await order(destination, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: b.code })).status, 201);
     const blocked = await order(destination, tk[1], [{ id: 'fries', qty: 1 }], { couponCode: c.code });
     assert.deepEqual([blocked.status, blocked.json.error, blocked.json.used], [409, 'coupon_limit', 1]);
@@ -8929,15 +8934,15 @@ test('coupon move rejects invalid destinations and ineligible coupons without ch
     await s.post('/api/staff/coupons/redeem', { code: used.code });
     await s.post(`/api/staff/coupons/${voided.code}/void`, {});
     const path = (code) => `/api/staff/coupons/${code}/move`;
-    assert.deepEqual([...(await Promise.all([0, 999, '2', 1.5].map((table) => s.post(path(issued.code), { table }))))].map((r) => r.status), [400, 400, 400, 400]);
-    const same = await s.post(path(issued.code), { table: 1 });
+    assert.deepEqual([...(await Promise.all([0, 999, '2', 1.5].map((table) => s.post(path(issued.code), { table, fromTable: 1, fromSeat: 1 }))))].map((r) => r.status), [400, 400, 400, 400]);
+    const same = await s.post(path(issued.code), { table: 1, fromTable: 1, fromSeat: 1 });
     assert.deepEqual([same.status, same.json.error], [400, 'same_table']);
     for (const code of [used.code, voided.code, testCoupon.code]) {
-      const bad = await s.post(path(code), { table: 2 });
+      const bad = await s.post(path(code), { table: 2, fromTable: code === testCoupon.code ? 0 : 1, fromSeat: 1 });
       assert.deepEqual([bad.status, bad.json.error], [409, 'coupon_not_movable'], code);
     }
     await s.post('/api/staff/tables/1/clear', {});
-    const stale = await s.post(path(issued.code), { table: 2 });
+    const stale = await s.post(path(issued.code), { table: 2, fromTable: 1, fromSeat: 1 });
     assert.deepEqual([stale.status, stale.json.error], [409, 'coupon_not_movable']);
     const db = kDb(srv);
     try { assert.equal(db.prepare('SELECT table_id FROM coupons WHERE code=?').get(issued.code).table_id, 1); } finally { db.close(); }
@@ -8947,7 +8952,7 @@ test('coupon move rejects invalid destinations and ineligible coupons without ch
 test('moving the same coupon twice keeps its first earning origin', async () => {
   await withBooth(async ({ srv, s }) => {
     const c = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '분할' })).json.coupon;
-    for (const table of [2, 3]) assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table })).status, 200);
+    for (const [table, fromTable] of [[2, 1], [3, 2]]) assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table, fromTable, fromSeat: 1 })).status, 200);
     const db = kDb(srv);
     try { assert.deepEqual({ ...db.prepare('SELECT table_id,origin_table,origin_seat FROM coupons WHERE code=?').get(c.code) }, { table_id: 3, origin_table: 1, origin_seat: 1 }); } finally { db.close(); }
   });
@@ -8959,12 +8964,12 @@ test('coupon origin migration keeps older rows eligible to move after reopening'
   const old = first.createManualCoupon(1, { type: 'item', label: '예전 쿠폰' });
   first.close();
   const legacy = new DatabaseSync(file);
-  legacy.exec('ALTER TABLE coupons DROP COLUMN origin_table; ALTER TABLE coupons DROP COLUMN origin_seat');
+  legacy.exec('DROP INDEX coupons_origin; ALTER TABLE coupons DROP COLUMN origin_table; ALTER TABLE coupons DROP COLUMN origin_seat');
   legacy.close();
   const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 }), db = new DatabaseSync(file);
   try {
     assert.deepEqual({ ...db.prepare('SELECT origin_table,origin_seat FROM coupons WHERE code=?').get(old.code) }, { origin_table: null, origin_seat: null });
-    store.moveCoupon(old.code, 2);
+    store.moveCoupon(old.code, 2, 1, 1);
     assert.deepEqual({ ...db.prepare('SELECT table_id,origin_table,origin_seat FROM coupons WHERE code=?').get(old.code) }, { table_id: 2, origin_table: 1, origin_seat: 1 });
   } finally { db.close(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -8976,7 +8981,7 @@ test('moving earned coupons preserves source earning limits and does not consume
     const g1 = await guestWithDevice(srv);
     assert.equal(kEarned([await playOnce(g1, tk[0], 'pour', 200)], reward.id), 1);
     const c = (await s.get('/api/staff/state')).json.coupons.find((x) => x.rewardId === reward.id);
-    assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2 })).status, 200);
+    assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 2, fromTable: 1, fromSeat: 1 })).status, 200);
     const g2 = await guestWithDevice(srv);
     const src = await kSnap(await guestWithDevice(srv), tk[0]);
     const dst = await kSnap(g2, tk[1]);
@@ -8993,7 +8998,7 @@ test('table merge reassigns the earning origin even for a coupon held at a third
     const reward = await kReward(s, { label: '병합 한도', perSeat: { mode: 'fixed', count: 1 }, perDevice: 0 });
     assert.equal(kEarned([await playOnce(await guestWithDevice(srv), tk[0], 'pour', 200)], reward.id), 1);
     const c = (await s.get('/api/staff/state')).json.coupons.find((x) => x.rewardId === reward.id);
-    assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 3 })).status, 200);
+    assert.equal((await s.post(`/api/staff/coupons/${c.code}/move`, { table: 3, fromTable: 1, fromSeat: 1 })).status, 200);
     const moved = await s.post('/api/staff/tables/move', { from: 1, to: 2 });
     assert.equal(moved.status, 200, moved.text);
     const db = kDb(srv);
@@ -9013,7 +9018,7 @@ test('wait seating rejects occupied current seats and clear:true starts a new se
     assert.deepEqual([occupied.status, occupied.json.error, occupied.json.table, occupied.json.partySet], [409, 'table_occupied', 1, false]);
     assert.deepEqual([(await tableIn(s, 1)).seat, (await tableIn(s, 1)).people], [1, 3]);
     assert.equal((await s.get('/api/staff/state')).json.waitlist.find((x) => x.id === w.id).status, 'waiting');
-    const seated = await s.post(`/api/staff/wait/${w.id}/seat`, { table: 1, clear: true });
+    const seated = await s.post(`/api/staff/wait/${w.id}/seat`, { table: 1, clear: true, seat: occupied.json.seat });
     assert.deepEqual([seated.status, seated.json.partySet, seated.json.table], [200, true, 1]);
     assert.deepEqual([(await tableIn(s, 1)).seat, (await tableIn(s, 1)).people], [2, 2]);
     assert.ok((await auditOf(s)).some((x) => x.action === 'table_clear'));
@@ -9025,7 +9030,7 @@ test('wait clear:true refuses unsettled orders and keeps both table and wait row
     const g = await guestWithDevice(srv);
     const w = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '대기', size: 2 })).json;
     assert.equal((await order(g, tk[0], [{ id: 'fries', qty: 1 }])).status, 201);
-    const denied = await s.post(`/api/staff/wait/${w.id}/seat`, { table: 1, clear: true });
+    const denied = await s.post(`/api/staff/wait/${w.id}/seat`, { table: 1, clear: true, seat: 1 });
     assert.deepEqual([denied.status, denied.json.error], [409, 'unsettled']);
     assert.equal((await tableIn(s, 1)).seat, 1);
     const db = kDb(srv);
@@ -9041,7 +9046,7 @@ test('wait clear:true rolls back the clear if the later seating update fails', a
     const w = store.addWait('atomic-wait', '대기', 2, waitPhone(), true);
     store.setPartyStaff(1, 3);
     db.exec("CREATE TRIGGER block_seat BEFORE UPDATE OF status ON waitlist WHEN NEW.status='seated' BEGIN SELECT RAISE(ABORT, 'seat blocked'); END");
-    assert.throws(() => store.waitAction(w.id, 'seat', { table: 1, clear: true }), /seat blocked/);
+    assert.throws(() => store.waitAction(w.id, 'seat', { table: 1, clear: true, seat: 1 }), /seat blocked/);
     assert.equal(db.prepare('SELECT seat FROM tables WHERE id=1').get().seat, 1);
     assert.equal(db.prepare('SELECT people FROM seat_info WHERE table_id=1 AND seat=1').get().people, 3);
     assert.equal(db.prepare('SELECT status FROM waitlist WHERE id=?').get(w.id).status, 'waiting');
@@ -9105,4 +9110,341 @@ test('SMS review fixes: webhook URL with a port is refused; a second call tap ne
     const row = db.prepare('SELECT status, phone FROM waitlist WHERE id=?').get(w.id);
     assert.equal(row.status, 'noshow'); assert.ok(row.phone, 'still reachable for one recall');
   });
+});
+
+test('wait clear retry requires the occupied seat the staff saw', async () => {
+  await withWaitStore(async (store, db) => {
+    const w = store.addWait('seat-race', '대기', 2, waitPhone(), true);
+    store.setPartyStaff(1, 3);
+    assert.throws(() => store.waitAction(w.id, 'seat', { table: 1 }), (e) => e.code === 'table_occupied' && e.extra.seat === 1);
+    for (const opts of [{ table: 1, clear: true }, { table: 1, clear: true, seat: 0 }]) {
+      assert.throws(() => store.waitAction(w.id, 'seat', opts), (e) => e.status === 409 && e.code === 'seat_changed' && e.message === '테이블 상황이 바뀌었습니다. 다시 확인해 주세요.');
+      assert.equal(db.prepare('SELECT seat FROM tables WHERE id=1').get().seat, 1);
+      assert.equal(db.prepare('SELECT status FROM waitlist WHERE id=?').get(w.id).status, 'waiting');
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM table_clears').get().n, 0);
+    }
+    store.clearTable(1, false);
+    assert.throws(() => store.waitAction(w.id, 'seat', { table: 1, clear: true, seat: 1 }), (e) => e.code === 'seat_changed');
+    assert.equal(db.prepare('SELECT seat FROM tables WHERE id=1').get().seat, 2);
+  });
+});
+
+test('wait clear retry on an empty seat seats without creating a clear record', async () => {
+  await withWaitStore(async (store, db) => {
+    const w = store.addWait('seat-empty', '대기', 2, waitPhone(), true);
+    store.waitAction(w.id, 'seat', { table: 1, clear: true, seat: 1 });
+    assert.deepEqual([db.prepare('SELECT seat FROM tables WHERE id=1').get().seat, db.prepare('SELECT COUNT(*) n FROM table_clears').get().n], [1, 0]);
+    assert.equal(db.prepare('SELECT status FROM waitlist WHERE id=?').get(w.id).status, 'seated');
+  });
+});
+
+test('stale wait clear retry leaves unrelated expired calls and the SMS outbox untouched', async () => {
+  await withWaitStore(async (store, db) => {
+    const pending = store.addWait('stale-pending', '대기', 1, waitPhone(), true);
+    const expired = store.addWait('stale-expired', '호출', 1, waitPhone(), true);
+    store.waitAction(expired.id, 'call');
+    store.drainEvents();
+    db.prepare('UPDATE waitlist SET called_at=? WHERE id=?').run(Date.now() - 11 * 60000, expired.id);
+    const before = db.prepare('SELECT id,status,called_at,phone_until FROM waitlist ORDER BY id').all();
+    const auditCount = db.prepare('SELECT COUNT(*) n FROM audit_log').get().n;
+    for (const opts of [{ table: 1, clear: true }, { table: 1, clear: true, seat: 0 }]) {
+      assert.throws(() => store.waitAction(pending.id, 'seat', opts), (e) => e.code === 'seat_changed');
+      assert.deepEqual(db.prepare('SELECT id,status,called_at,phone_until FROM waitlist ORDER BY id').all(), before);
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM audit_log').get().n, auditCount);
+      assert.equal(db.prepare('SELECT COUNT(*) n FROM table_clears').get().n, 0);
+      assert.deepEqual(store.drainEvents(), []);
+    }
+  });
+});
+
+test('wait status and info expose whether SMS is configured', async () => {
+  await withWaitStore(async (store) => {
+    const w = store.addWait('sms-flag', '대기', 1, waitPhone(), true);
+    assert.deepEqual([store.waitInfo().sms, store.waitStatus(w.id, w.secret).sms], [false, false]);
+    store.setWaitSmsUrl('https://trigger.macrodroid.com/test');
+    assert.deepEqual([store.waitInfo().sms, store.waitStatus(w.id, w.secret).sms], [true, true]);
+  });
+});
+
+test('guest wait status SSE refreshes its SMS flag when staff changes the URL', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const g = new Client(srv), w = (await g.post('/api/wait', { nick: '대기', size: 1, phone: waitPhone(), consent: true })).json;
+    assert.equal((await g.get('/api/wait/info')).json.sms, false);
+    const ev = await openSse(srv, `/api/wait/${w.id}/events?secret=${w.secret}`);
+    try {
+      await ev.until((x) => x.includes('"sms":false'));
+      await s.post('/api/staff/waitlist/sms', { url: 'https://trigger.macrodroid.com/test' });
+      await ev.until((x) => x.slice(x.lastIndexOf('event: state')).includes('"sms":true'));
+      assert.equal((await g.get('/api/wait/info')).json.sms, true);
+      await s.post('/api/staff/waitlist/sms', { url: '' });
+      await ev.until((x) => x.slice(x.lastIndexOf('event: state')).includes('"sms":false'));
+    } finally { ev.close(); }
+  });
+});
+
+test('late call SMS resend states the remaining whole minutes', async () => {
+  await withWaitStore(async (store, db) => {
+    store.setWaitSmsUrl('https://trigger.macrodroid.com/test');
+    const w = store.addWait('sms-late', '대기', 1, waitPhone(), true);
+    store.waitAction(w.id, 'call');
+    db.prepare('UPDATE waitlist SET called_at=? WHERE id=?').run(Date.now() - 8.5 * 60000, w.id);
+    assert.equal(store.waitSmsTarget(w.id).minutes, 2);
+    store.queueWaitSms(w.id);
+    assert.equal(store.waitSmsTarget(w.id).minutes, 2);
+  });
+});
+
+test('recall rejects a matching active phone without changing the no-show', async () => {
+  await withWaitStore(async (store, db) => {
+    store.setWaitAutoNext(false);
+    const phone = waitPhone();
+    const first = store.addWait('recall-old', '이전', 1, phone, true);
+    store.waitAction(first.id, 'call');
+    db.prepare('UPDATE waitlist SET called_at=? WHERE id=?').run(Date.now() - 11 * 60000, first.id);
+    store.sweepWait();
+    const second = store.addWait('recall-new', '새손님', 1, phone, true);
+    for (const status of ['waiting', 'called']) {
+      if (status === 'called') store.waitAction(second.id, 'call');
+      assert.throws(() => store.waitAction(first.id, 'recall'), (e) => e.status === 409 && e.code === 'dup_phone' && e.message === '같은 번호로 이미 대기 중인 손님이 있습니다.');
+      assert.equal(db.prepare('SELECT status,recalled FROM waitlist WHERE id=?').get(first.id).status, 'noshow');
+      assert.equal(db.prepare('SELECT recalled FROM waitlist WHERE id=?').get(first.id).recalled, 0);
+    }
+  });
+});
+
+test('no-show phone deadline freezes the timeout at transition, including 30 minutes', async () => {
+  await withWaitStore(async (store, db) => {
+    store.setWaitAutoNext(false);
+    const realNow = Date.now, stamp = realNow();
+    Date.now = () => stamp;
+    try {
+      store.setWaitTimeout(30);
+      const long = store.addWait('long-window', '긴대기', 1, waitPhone(), true);
+      store.waitAction(long.id, 'call');
+      db.prepare('UPDATE waitlist SET called_at=? WHERE id=?').run(stamp - 30 * 60000 - 1, long.id);
+      store.sweepWait();
+      const longRow = db.prepare('SELECT status,called_at,phone_until FROM waitlist WHERE id=?').get(long.id);
+      assert.deepEqual([longRow.status, longRow.phone_until], ['noshow', longRow.called_at + 60 * 60000]);
+      store.setWaitTimeout(1);
+      assert.ok(db.prepare('SELECT phone FROM waitlist WHERE id=?').get(long.id).phone);
+
+      const short = store.addWait('short-window', '짧은대기', 1, waitPhone(), true);
+      store.waitAction(short.id, 'call');
+      db.prepare('UPDATE waitlist SET called_at=? WHERE id=?').run(stamp - 2 * 60000, short.id);
+      store.sweepWait();
+      const shortRow = db.prepare('SELECT called_at,phone_until FROM waitlist WHERE id=?').get(short.id);
+      assert.equal(shortRow.phone_until, shortRow.called_at + 31 * 60000);
+      store.setWaitTimeout(30);
+      Date.now = () => stamp + 29 * 60000 + 1;
+      store.sweepWait();
+      assert.ok(db.prepare('SELECT phone FROM waitlist WHERE id=?').get(long.id).phone);
+      assert.equal(db.prepare('SELECT phone FROM waitlist WHERE id=?').get(short.id).phone, null);
+      Date.now = () => stamp + 30 * 60000;
+      store.sweepWait();
+      assert.equal(db.prepare('SELECT phone FROM waitlist WHERE id=?').get(long.id).phone, null);
+    } finally { Date.now = realNow; }
+  });
+});
+
+test('coupon move refuses a stale source seating without moving again', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const c = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '분할' })).json.coupon;
+    const route = `/api/staff/coupons/${c.code}/move`;
+    assert.equal((await s.post(route, { table: 2, fromTable: 1, fromSeat: 1 })).status, 200);
+    const stale = await s.post(route, { table: 3, fromTable: 1, fromSeat: 1 });
+    assert.deepEqual([stale.status, stale.json.error, stale.json.message], [409, 'coupon_moved', '다른 직원이 먼저 이 쿠폰을 옮겼습니다.']);
+    const db = kDb(srv);
+    try { assert.equal(db.prepare('SELECT table_id FROM coupons WHERE code=?').get(c.code).table_id, 2); } finally { db.close(); }
+  });
+});
+
+test('coupon move requires its displayed source and preserves audit on stale requests', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const c = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '출발지' })).json.coupon;
+    const route = `/api/staff/coupons/${c.code}/move`, db = kDb(srv);
+    try {
+      const before = db.prepare('SELECT COUNT(*) n FROM audit_log').get().n;
+      for (const body of [{ table: 2 }, { table: 2, fromTable: 1 }, { table: 2, fromTable: 1, fromSeat: 2 }]) {
+        const r = await s.post(route, body);
+        assert.deepEqual([r.status, r.json.error], [409, 'coupon_moved']);
+        assert.equal(db.prepare('SELECT table_id FROM coupons WHERE code=?').get(c.code).table_id, 1);
+        assert.equal(db.prepare('SELECT COUNT(*) n FROM audit_log').get().n, before);
+      }
+    } finally { db.close(); }
+  });
+});
+
+test('moved-away coupons still block seating and undoing the originating seat clear', async () => {
+  await withWaitStore(async (store, db) => {
+    const c = store.createManualCoupon(1, { type: 'item', label: '이동' });
+    store.moveCoupon(c.code, 2, 1, 1);
+    const w = store.addWait('moved-activity', '대기', 1, waitPhone(), true);
+    assert.throws(() => store.waitAction(w.id, 'seat', { table: 1 }), (e) => e.code === 'table_occupied' && e.extra.seat === 1);
+    store.clearTable(1, false);
+    const fresh = store.createManualCoupon(1, { type: 'item', label: '새 자리' });
+    store.moveCoupon(fresh.code, 2, 1, 2);
+    assert.throws(() => store.unclearTable(1), (e) => e.code === 'cannot_undo' && e.extra.reason === 'seat_in_use' && e.extra.used.coupons === 1);
+    assert.equal(db.prepare('SELECT seat FROM tables WHERE id=1').get().seat, 2);
+  });
+});
+
+test('a received coupon also counts as activity at its destination seat', async () => {
+  await withWaitStore(async (store) => {
+    const c = store.createManualCoupon(1, { type: 'item', label: '받은 쿠폰' });
+    store.moveCoupon(c.code, 2, 1, 1);
+    const w = store.addWait('received-activity', '대기', 1, waitPhone(), true);
+    assert.throws(() => store.waitAction(w.id, 'seat', { table: 2 }), (e) => e.code === 'table_occupied' && e.extra.seat === 1);
+  });
+});
+
+test('coupons have an earning-origin index after migration', async () => {
+  await withWaitStore(async (_store, db) => {
+    assert.ok(db.prepare("PRAGMA index_list('coupons')").all().some((x) => x.name === 'coupons_origin'));
+    assert.deepEqual(db.prepare("PRAGMA index_info('coupons_origin')").all().map((x) => x.name), ['origin_table', 'origin_seat']);
+  });
+});
+
+test('phone erasure truncates the live WAL on the next checkpoint', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-wal-'));
+  const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 });
+  try {
+    const phone = waitPhone(), w = store.addWait('wal-guest', '대기', 1, phone, true);
+    const wal = path.join(dir, 'booth.db-wal');
+    store.waitCancel(w.id, w.secret);
+    assert.ok(fs.readFileSync(wal).includes(Buffer.from(phone)), 'erased number was in the live journal');
+    store.checkpointWaitPhones();
+    assert.ok(!fs.readFileSync(wal).includes(Buffer.from(phone)), 'journal no longer has the number');
+  } finally { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('server timer checkpoints erased phone bytes out of the live WAL', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-wal-timer-'));
+  const hook = path.join(dir, 'fast-timer.cjs'), marker = path.join(dir, 'allow-checkpoint');
+  fs.writeFileSync(hook, `const fs=require('node:fs');const original=setInterval;global.setInterval=(fn,ms,...args)=>ms===30000?original(()=>{if(fs.existsSync(${JSON.stringify(marker)}))fn(...args)},50):original(fn,ms,...args);`);
+  const srv = await boot({ dir, env: { NODE_OPTIONS: '--require=' + hook } });
+  try {
+    const g = new Client(srv), phone = waitPhone();
+    const w = (await g.post('/api/wait', { nick: '대기', size: 1, phone, consent: true })).json;
+    const wal = path.join(srv.data, 'booth.db-wal');
+    assert.equal((await g.post(`/api/wait/${w.id}/cancel`, { secret: w.secret })).status, 200);
+    assert.ok(fs.readFileSync(wal).includes(Buffer.from(phone)));
+    fs.writeFileSync(marker, 'go');
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && fs.existsSync(wal) && fs.readFileSync(wal).includes(Buffer.from(phone))) await delay(20);
+    assert.ok(!fs.existsSync(wal) || !fs.readFileSync(wal).includes(Buffer.from(phone)));
+  } finally { await srv.stop(); }
+});
+
+test('guest wait ticket shows the permanent id separately from changing queue position', async () => {
+  const elements = {};
+  const node = (tag, attrs, ...children) => ({ tag, attrs, children: children.flat().map((c) => typeof c === 'string' ? { textContent: c, children: [] } : c),
+    replaceChildren(...next) { this.children = next.flat().map((c) => typeof c === 'string' ? { textContent: c, children: [] } : c); this.firstChild = this.children[0]; },
+    get firstChild() { return this.children[0]; }, set firstChild(_v) {},
+    contains() { return false; }, textContent: '' });
+  const main = node('main'); main.parentNode = { insertBefore() {} };
+  for (const id of ['main', 'called', 'conn', 'conn-t']) elements[id] = id === 'main' ? main : node(id);
+  let onState;
+  const SC = { BASE: '', h: node, $: (id) => elements[id.slice(1)], wake: { sync() {}, reason: () => '' },
+    audio: { beep() {} }, audioStrip: () => node('audio'), notif: { reason: () => '', show() {} }, prefs: { get: () => false },
+    api: async () => ({ status: 'waiting' }), live: (opts) => { onState = opts.onState; return { close() {} }; },
+    fill: (el, ...children) => el.replaceChildren(...children), flash() {} };
+  const context = { window: { SC }, localStorage: { getItem: () => JSON.stringify({ id: 12, secret: 'ticket' }) },
+    document: { title: '' }, Notification: { permission: 'default' }, navigator: {}, setInterval: () => 1, clearInterval() {}, encodeURIComponent };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'public/wait.js'), 'utf8'), context);
+  await Promise.resolve();
+  assert.equal(typeof onState, 'function');
+  onState({ id: 12, status: 'waiting', position: 3, ahead: 2, nick: '손님', size: 2, waitingTotal: 9, sms: false });
+  const visible = (n) => n ? [n.textContent || '', ...(n.children || []).map(visible)].join(' ') : '';
+  assert.match(visible(main), /대기 번호 12번/);
+  assert.match(visible(main), /3\s+번째/);
+  assert.match(visible(main), /이 화면을 열어 두면 호출 때 알려드려요/);
+  assert.doesNotMatch(visible(main), /문자로도 알려드려요/);
+  onState({ id: 12, status: 'waiting', position: 1, ahead: 0, nick: '손님', size: 2, waitingTotal: 7, sms: true });
+  assert.match(visible(main), /대기 번호 12번/);
+  assert.match(visible(main), /1\s+번째/);
+  assert.match(visible(main), /문자로도 알려드려요/);
+  for (const status of ['called', 'noshow']) {
+    onState({ id: 12, status, nick: '손님', size: 2, waitingTotal: 7, sms: true });
+    assert.match(visible(main), /대기 번호 12번/, status);
+  }
+});
+
+test('guest wait form keeps phone required and promises SMS only when configured', async () => {
+  const nodes = {};
+  const h = (tag, attrs, ...children) => ({ tag, attrs, children: children.flat().filter(Boolean).map((x) => typeof x === 'string' ? { textContent: x } : x),
+    get firstChild() { return this.children[0]; }, replaceChildren(...next) { this.children = next; }, textContent: '' });
+  const main = h('main'); main.parentNode = { insertBefore() {} };
+  for (const id of ['main', 'called', 'conn']) nodes[id] = id === 'main' ? main : h(id);
+  let pollInfo;
+  const SC = { BASE: '', h, $: (id) => nodes[id.slice(1)], wake: {}, api: async (_p) => ({ open: true, waitingTotal: 0, sms: false }),
+    audio: {}, notif: {}, prefs: {}, live() {} };
+  const context = { window: { SC }, localStorage: { getItem: () => null }, document: { title: '' },
+    setInterval: (fn) => { pollInfo = fn; return 1; }, clearInterval() {}, encodeURIComponent };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'public/wait.js'), 'utf8'), context);
+  await Promise.resolve();
+  const all = (n) => n ? [n.textContent || '', ...(n.children || []).map(all)].join(' ') : '';
+  const find = (n, pred) => n && (pred(n) ? n : (n.children || []).map((c) => find(c, pred)).find(Boolean));
+  const phone = find(main, (n) => n.tag === 'input' && n.attrs?.type === 'tel');
+  assert.equal(phone.attrs.required, true);
+  assert.match(all(main), /이 화면을 열어 두면 호출 때 알려드려요/);
+  assert.doesNotMatch(all(main), /문자로도 알려드려요/);
+  SC.api = async () => ({ open: true, waitingTotal: 0, sms: true });
+  pollInfo(); await Promise.resolve();
+  assert.match(all(main), /문자로도 알려드려요/);
+  assert.equal(phone.attrs.required, true);
+});
+
+test('every staff wait card status renders the permanent wait number', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'public/staff.js'), 'utf8');
+  const begin = src.indexOf('  function waitCard(x) {'), end = src.indexOf('\n  // =====', begin);
+  assert.ok(begin >= 0 && end > begin);
+  const h = (tag, attrs, ...children) => ({ tag, attrs, children,
+    appendChild(child) { this.children.push(child); } });
+  const waitCard = vm.runInNewContext(src.slice(begin, end) + '\nwaitCard', {
+    h, waitAct: () => h('button'), abtn: () => h('button'), SC: { timeEl: () => '' }, api() {}, refresh() {}, SO: {},
+  });
+  const visible = (n) => typeof n === 'string' ? n : n ? (n.children || []).map(visible).join(' ') : '';
+  for (const status of ['waiting', 'called', 'noshow']) {
+    const card = waitCard({ id: 12, status, nick: '대기', size: 2, createdAt: 1, calledAt: 2, recalled: false });
+    assert.match(visible(card), /대기 번호 12번/, status);
+  }
+});
+
+test('staff wait clear retry sends the seat from the occupied response', async () => {
+  const src = fs.readFileSync(path.join(__dirname, 'public/staff-ops.js'), 'utf8');
+  const begin = src.indexOf('  SO.seatWait = function (x) {'), end = src.indexOf('  SO.coverConflict =', begin);
+  const buttons = [], requests = [], SO = {};
+  const h = (tag, attrs, ...children) => { const n = { tag, attrs, children }; if (tag === 'button') buttons.push(n); return n; };
+  const X = { S: { data: { tables: [{ number: 1, status: 'occupied', people: 3 }] } },
+    api: async (url, body) => { requests.push({ url, body }); if (requests.length === 1) throw { code: 'table_occupied', data: { seat: 5 } }; return { partySet: true }; },
+    refresh: async () => {} };
+  const s = { dlg: { addEventListener() {} }, show() {}, close() {} };
+  vm.runInNewContext(src.slice(begin, end), { SO, X, SC: { toast() {}, confirm: async () => true },
+    openSheet: (_title, fn) => fn(s), view: () => null, h, note: () => null, toastErr() {} });
+  const result = SO.seatWait({ id: 12, nick: '대기', size: 2 });
+  const choose = buttons.find((b) => b.children[0] === '1');
+  assert.ok(choose);
+  choose.attrs.onclick(); await result;
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url, '/api/staff/wait/12/seat');
+  assert.deepEqual({ ...requests[0].body }, { table: 1 });
+  assert.deepEqual({ ...requests[1].body }, { table: 1, clear: true, seat: 5 });
+});
+
+test('staff coupon move sends the displayed source seating', async () => {
+  const src = fs.readFileSync(path.join(__dirname, 'public/staff-ops.js'), 'utf8');
+  const begin = src.indexOf('  SO.moveCoupon = function (c) {'), end = src.indexOf('  // ---------------------------------------------------------------- refunds', begin);
+  const buttons = [], requests = [], SO = {};
+  const h = (tag, attrs, ...children) => { const n = { tag, attrs, children, setAttribute() {} }; if (tag === 'button') buttons.push(n); return n; };
+  const X = { S: { data: { tables: [{ number: 1 }, { number: 2 }] } },
+    abtn: (_cls, _label, onclick) => { const n = { onclick, classList: { contains: () => false } }; buttons.push(n); return n; },
+    api: async (url, body) => { requests.push({ url, body }); return {}; }, refresh: async () => {} };
+  const s = { show() {}, close() {} };
+  vm.runInNewContext(src.slice(begin, end), { SO, X, SC: { toast() {}, confirm: async () => true },
+    openSheet: (_title, fn) => fn(s), view: () => null, h, note: () => null, toastErr() {}, encodeURIComponent });
+  SO.moveCoupon({ code: 'ABC123', table: 1, seat: 5, label: '쿠폰' });
+  buttons.find((b) => b.children?.[0] === '2').attrs.onclick();
+  await buttons.find((b) => b.classList).onclick();
+  assert.equal(requests[0].url, '/api/staff/coupons/ABC123/move');
+  assert.deepEqual({ ...requests[0].body }, { table: 2, fromTable: 1, fromSeat: 5 });
 });
