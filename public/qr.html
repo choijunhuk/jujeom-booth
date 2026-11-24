@@ -21,7 +21,9 @@
   .acts .btn { flex: 1 1 auto; }
   .urlline { font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
   /* Print card: black on white "window". Bitmap font only at multiples of 16px; QR stays pure black/white with a 4-module quiet zone. */
-  .card { position: relative; width: 95mm; height: 138mm; display: flex; flex-direction: column; outline: .25mm dashed #888; outline-offset: -.25mm; break-inside: avoid; page-break-inside: avoid; background: #fff; color: #000; font-family: var(--y-font-ui); }
+  /* staff.css also styles .card (padding 14px, 2px border, radius, 12px gap): reset them, or the two 69mm halves overflow the 138mm card and the bottom is cut */
+  .card { position: relative; width: 95mm; height: 138mm; display: flex; flex-direction: column; padding: 0; border: 0; border-radius: 0; gap: 0; outline: .25mm dashed #888; outline-offset: -.25mm; break-inside: avoid; page-break-inside: avoid; background: #fff; color: #000; font-family: var(--y-font-ui); }
+  .half { flex: 0 0 69mm; min-height: 0; }
   .half { height: 69mm; padding: 3mm; display: grid; }
   .half.flip { transform: rotate(180deg); }
   .win { border: 2px solid #000; display: grid; grid-template-rows: auto 1fr auto auto; background: #fff; min-height: 0; }
@@ -42,7 +44,7 @@
   .fold { position: absolute; left: 0; right: 0; top: 69mm; border-top: .25mm dashed #888; text-align: center; height: 0; }
   .fold span { position: relative; top: -1.7mm; background: #fff; padding: 0 2mm; font-size: 2.4mm; color: #666; }
   @media print {
-    @page { size: A4 portrait; margin: 9mm; }
+    @page { size: A4 portrait; margin: 6mm; } /* 2 rows x 138mm = 276mm of 285mm: room for browsers that add their own margins */
     html, body { background: #fff !important; color: #000 !important; }
     * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     .noprint, .top, .strip, .dlg, #toasts { display: none !important; }
