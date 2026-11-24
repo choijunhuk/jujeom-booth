@@ -788,6 +788,18 @@ test('BASE_PATH=/booth routing, __BASE__ replacement and cookie path', async () 
   } finally { await srv.stop(); }
 });
 
+test('staff flyer serves its page and script under BASE_PATH=/booth', async () => {
+  const srv = await boot({ base: '/booth', env: { PUBLIC_DIR: path.join(__dirname, 'public') } });
+  try {
+    const c = new Client(srv);
+    const page = await c.get('/staff/flyer');
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-type'), /^text\/html\b/);
+    assert.match(page.text, /src="\/booth\/static\/flyer\.js"/);
+    assert.equal((await c.get('/static/flyer.js')).status, 200);
+  } finally { await srv.stop(); }
+});
+
 test('request hygiene: content-type, bad json, size limit, csrf', async () => {
   const g = guest();
   const T = tok(1);

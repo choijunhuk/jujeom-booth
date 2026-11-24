@@ -1656,7 +1656,8 @@
     var el = h('div', { class: 'card' }, info, warnBox,
       srow('테이블 수', '1~50개', h('div', { class: 'stockctl' }, h('button', { class: 'btn', type: 'button', 'aria-label': '하나 줄이기', onclick: function () { nudge(-1); } }, '−'), num, h('button', { class: 'btn', type: 'button', 'aria-label': '하나 늘리기', onclick: function () { nudge(1); } }, '+'), apply)),
       h('p', { class: 'muted' }, '줄인 테이블의 QR은 잠시 쓸 수 없고, 다시 늘리면 같은 QR이 되살아나요. 한 테이블의 QR만 새로 만들고 싶으면 QR 인쇄 화면에서 "QR 재발급"을 쓰세요.'),
-      h('a', { class: 'btn', href: SC.BASE + '/staff/qr' }, 'QR 인쇄 화면으로'));
+      h('a', { class: 'btn', href: SC.BASE + '/staff/qr' }, 'QR 인쇄 화면으로'),
+      h('a', { class: 'btn', href: SC.BASE + '/staff/flyer' }, '전단지 인쇄'));
     function update(d) {
       var n = d.tableCount || d.tables.length;
       if (n !== cur) { cur = n; if (!dirty || !num.value) num.value = String(n); }

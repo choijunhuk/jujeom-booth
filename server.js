@@ -386,6 +386,7 @@ route('GET', '/t/([A-Za-z0-9_-]{8,64})', (c) => {
 route('GET', '/wait', (c) => { ensureDevice(c); return servePage(c, 'wait.html'); });
 route('GET', '/staff', (c) => servePage(c, 'staff.html'));
 route('GET', '/staff/qr', (c) => servePage(c, 'qr.html'));
+route('GET', '/staff/flyer', (c) => servePage(c, 'flyer.html'));
 route('GET', '/kitchen', (c) => servePage(c, 'kitchen.html'));
 route('GET', '/board', (c) => servePage(c, 'board.html'));
 route('GET', '/static/(.+)', serveStatic);

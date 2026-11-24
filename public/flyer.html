@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>전단지 인쇄 · COMHERE</title>
+<script src="__BASE__/static/base.js"></script>
+<script src="__BASE__/static/notify.js"></script>
+<link rel="stylesheet" href="__BASE__/static/brand/brand.css">
+<link rel="stylesheet" href="__BASE__/static/staff.css">
+<style>
+  .fl-main { max-width: calc(297mm + 36px); }
+  .fl-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .fl-controls label { display: grid; gap: 4px; font-weight: 700; }
+  .fl-controls input { min-width: 0; }
+  .fl-status { margin-bottom: 12px; }
+  .fl-sheet, .fl-sheet * { box-sizing: border-box; }
+  .fl-sheet { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .fl-page { width: 148.5mm; max-width: 100%; height: 210mm; padding: 8mm; background: #fff; color: #000; font-family: var(--y-font-ui); }
+  .fl-window { height: 100%; border: 2px solid #000; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+  .fl-title { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #000; color: #fff; font: 16px/20px var(--y-font-pixel); -webkit-font-smoothing: none; font-synthesis: none; }
+  .fl-title img { height: 17px; width: auto; filter: invert(1); }
+  .fl-buttons { margin-left: auto; display: flex; gap: 4px; }
+  .fl-buttons i { width: 10px; height: 10px; border: 2px solid #fff; }
+  .fl-hero { padding: 12px 14px 10px; text-align: center; }
+  .fl-headline { font: 64px/1 var(--y-font-pixel); -webkit-font-smoothing: none; font-synthesis: none; }
+  .fl-hook { margin-top: 8px; font-size: 21px; font-weight: 900; line-height: 1.25; word-break: keep-all; }
+  .fl-event { margin-top: 8px; font-size: 16px; font-weight: 700; line-height: 1.25; }
+  .fl-details { flex: 1; min-height: 0; margin: 0 14px; font-size: 16px; line-height: 1.2; }
+  .fl-details-content { display: grid; gap: .65em; }
+  .fl-section h2 { border-top: 2px solid #000; border-bottom: 1px solid #000; padding: .23em 0; margin-bottom: .32em; font-size: 1.05em; font-weight: 900; }
+  .fl-menu { columns: 2; column-gap: .85em; }
+  .fl-menu-group { break-inside: avoid; }
+  .fl-menu-group + .fl-menu-group { margin-top: .25em; }
+  .fl-compact .fl-menu { column-count: 3; }
+  .fl-compact .fl-menu-group { break-inside: auto; }
+  .fl-category { padding: .22em 0 .25em; font-size: .83em; break-after: avoid; }
+  .fl-item { padding: .21em 0; break-inside: avoid; }
+  .fl-item-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: .28em; font-weight: 800; word-break: keep-all; }
+  .fl-num { font-family: var(--y-font-num); font-variant-numeric: tabular-nums; }
+  .fl-price { white-space: nowrap; }
+  .fl-desc { margin-top: .16em; font-size: .82em; }
+  .fl-prizes { list-style: none; margin: 0; padding: 0; display: grid; gap: .2em; font-weight: 700; }
+  .fl-wait { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 8px 14px 0; border-top: 2px solid #000; }
+  .fl-qr { flex: 0 0 auto; width: 49mm; height: 49mm; }
+  .fl-qr svg { display: block; width: 100%; height: 100%; }
+  .fl-wait strong { display: block; font-size: 24px; line-height: 1.2; word-break: keep-all; }
+  .fl-wait p { margin-top: 6px; font-size: 15px; font-weight: 700; word-break: keep-all; }
+  .fl-footer { text-align: center; padding-bottom: 8px; font-size: 12px; font-weight: 800; letter-spacing: .12em; }
+  @media screen and (max-width: 1158px) {
+    .fl-sheet { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+  }
+  @media screen and (max-width: 585px) {
+    .fl-controls { grid-template-columns: minmax(0, 1fr); }
+    .fl-page { height: auto; padding: 12px; }
+    .fl-headline { font-size: 48px; }
+    .fl-hook { font-size: 17px; }
+    .fl-details { flex: auto; font-size: 15px; }
+    .fl-menu, .fl-compact .fl-menu { columns: 1; }
+    .fl-wait { gap: 8px; }
+    .fl-qr { width: min(38vw, 49mm); height: auto; aspect-ratio: 1; }
+    .fl-wait strong { font-size: 19px; }
+  }
+  @page { size: A4 landscape; margin: 0; }
+  @media print {
+    html, body { margin: 0; background: #fff !important; color: #000 !important; }
+    .noprint, .top, .strip, .dlg, #toasts { display: none !important; }
+    .fl-main { padding: 0; max-width: none; margin: 0; }
+    .fl-sheet { width: 297mm; gap: 0; grid-template-columns: repeat(2, 148.5mm); break-inside: avoid; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    .fl-sheet::after { content: ""; position: absolute; top: 8mm; bottom: 8mm; left: 50%; border-left: .3mm dashed #000; }
+    .fl-page { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<noscript class="noprint"><p>이 페이지는 JavaScript가 필요합니다.</p></noscript>
+<div id="login" class="login noprint" hidden></div>
+<div id="app" hidden>
+  <main id="main" class="fl-main">
+    <div class="view-head noprint">
+      <h2>전단지 인쇄</h2>
+      <button class="btn btn-primary" id="fl-print" type="button" disabled>인쇄</button>
+    </div>
+    <div class="fl-controls noprint">
+      <label>날짜 <input id="fl-date" class="field" type="text" maxlength="60"></label>
+      <label>시간 <input id="fl-time" class="field" type="text" maxlength="60"></label>
+      <label>장소 <input id="fl-location" class="field" type="text" maxlength="60"></label>
+    </div>
+    <p class="fl-status muted noprint" id="fl-status" role="status"></p>
+    <div class="fl-sheet" id="fl-sheet"></div>
+  </main>
+</div>
+<div id="toasts" class="noprint" role="status" aria-live="polite"></div>
+<script src="__BASE__/static/vendor/qr.js"></script>
+<script src="__BASE__/static/staff-common.js"></script>
+<script src="__BASE__/static/alarm.js"></script>
+<script src="__BASE__/static/shell.js"></script>
+<script src="__BASE__/static/flyer.js"></script>
+</body>
+</html>
