@@ -15,6 +15,15 @@ const { createStore } = require('./db');
 const SERVER = path.join(__dirname, 'server.js');
 const PIN = '654321';
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+let waitPhoneSeq = 0;
+const waitPhone = () => '010' + String(++waitPhoneSeq).padStart(8, '0');
+
+async function withWaitStore(fn, opts = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-wait-'));
+  const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2, ...opts });
+  const db = new DatabaseSync(path.join(dir, 'booth.db'));
+  try { return await fn(store, db, dir); } finally { db.close(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+}
 
 const MENU = {
   categories: ['안주', '음료'],
@@ -869,23 +878,23 @@ test('nicknames: sanitized, length-limited, profanity rejected, shown on the boa
   assert.equal(board.rewards.find((r) => r.id === 'drink').remaining, 1); // race issued 3, then staff raised stock to 4
   assert.ok(board.rewards.length > 0);
   for (const r of board.rewards) {
-    assert.deepEqual(Object.keys(r).sort(), ['id', 'label', 'remaining', 'stock']);
+    assert.deepEqual(Object.keys(r).sort(), ['amount', 'game', 'id', 'label', 'remaining', 'stock', 'threshold', 'type']);
     assert.ok(r.remaining >= 0 && r.remaining <= r.stock);
   }
 });
 
 test('waitlist: register, position, call, seat, cancel', async () => {
   const a = guest(); const b = guest();
-  const w1 = await a.post('/api/wait', { nick: '손님A', size: 3 });
+  const w1 = await a.post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님A', size: 3 });
   assert.equal(w1.status, 201);
-  const w2 = await b.post('/api/wait', { nick: '손님B', size: 2 });
+  const w2 = await b.post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님B', size: 2 });
   const s1 = (await a.get(`/api/wait/${w1.json.id}?secret=${w1.json.secret}`)).json;
   const s2 = (await b.get(`/api/wait/${w2.json.id}?secret=${w2.json.secret}`)).json;
   assert.equal(s1.position, 1); assert.equal(s1.ahead, 0);
   assert.equal(s2.position, 2); assert.equal(s2.ahead, 1);
   assert.equal((await a.get(`/api/wait/${w1.json.id}?secret=nope`)).status, 404);
-  assert.equal((await a.post('/api/wait', { nick: '손님', size: 11 })).status, 400);
-  assert.equal((await a.post('/api/wait', { nick: '씨발', size: 2 })).status, 400);
+  assert.equal((await a.post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님', size: 11 })).status, 400);
+  assert.equal((await a.post('/api/wait', { phone: waitPhone(), consent: true, nick: '씨발', size: 2 })).status, 400);
   const ev = await openSse(main, `/api/wait/${w2.json.id}/events?secret=${w2.json.secret}`);
   try {
     await ev.until((x) => x.includes('"position":2'));
@@ -1084,10 +1093,10 @@ test('wait list: global insert rate cap per minute', async () => {
   const srv = await boot();
   try {
     for (let i = 0; i < 30; i++) {
-      const r = await new Client(srv).post('/api/wait', { nick: 'w' + i, size: 2 });
+      const r = await new Client(srv).post('/api/wait', { phone: waitPhone(), consent: true, nick: 'w' + i, size: 2 });
       assert.equal(r.status, 201, `${i}: ${r.text}`);
     }
-    const r = await new Client(srv).post('/api/wait', { nick: 'late', size: 2 });
+    const r = await new Client(srv).post('/api/wait', { phone: waitPhone(), consent: true, nick: 'late', size: 2 });
     assert.equal(r.status, 429); assert.equal(r.json.error, 'wait_rate');
   } finally { await srv.stop(); }
 });
@@ -1096,12 +1105,12 @@ test('store: old cancelled/seated wait rows are pruned; backups keep hourly copi
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-store-'));
   const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 });
   try {
-    const w = store.addWait('dev1', 'a', 2);
+    const w = store.addWait('dev1', 'a', 2, waitPhone(), true);
     store.waitCancel(w.id, w.secret);
     const raw = new DatabaseSync(path.join(dir, 'booth.db'));
     raw.exec('PRAGMA busy_timeout=3000');
     raw.prepare('UPDATE waitlist SET created_at=? WHERE id=?').run(Date.now() - 4 * 3600e3, w.id);
-    const w2 = store.addWait('dev1', 'b', 2);
+    const w2 = store.addWait('dev1', 'b', 2, waitPhone(), true);
     assert.equal(raw.prepare('SELECT COUNT(*) n FROM waitlist WHERE id=?').get(w.id).n, 0);
     assert.equal(raw.prepare('SELECT COUNT(*) n FROM waitlist WHERE id=?').get(w2.id).n, 1);
     raw.close();
@@ -1362,14 +1371,14 @@ test('waitlist switch: closing refuses registrations, clear cancels everyone', a
   try {
     const s = await staffLogin(srv);
     const a = new Client(srv); const b = new Client(srv);
-    const w1 = await a.post('/api/wait', { nick: '가', size: 2 });
-    const w2 = await b.post('/api/wait', { nick: '나', size: 2 });
+    const w1 = await a.post('/api/wait', { phone: waitPhone(), consent: true, nick: '가', size: 2 });
+    const w2 = await b.post('/api/wait', { phone: waitPhone(), consent: true, nick: '나', size: 2 });
     assert.equal(w1.status, 201);
     assert.deepEqual((await a.get('/api/wait/info')).json, { open: true, waitingTotal: 2, notice: null });
     assert.equal((await s.get('/api/staff/state')).json.waitOpen, true);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: 'no' })).status, 400);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: false })).json.waitOpen, false);
-    const closed = await new Client(srv).post('/api/wait', { nick: '다', size: 2 });
+    const closed = await new Client(srv).post('/api/wait', { phone: waitPhone(), consent: true, nick: '다', size: 2 });
     assert.equal(closed.status, 403); assert.equal(closed.json.error, 'wait_closed');
     assert.equal((await a.get('/api/wait/info')).json.open, false);
     assert.equal((await s.get('/api/staff/state')).json.waitOpen, false);
@@ -1382,7 +1391,7 @@ test('waitlist switch: closing refuses registrations, clear cancels everyone', a
     assert.deepEqual((await s.get('/api/staff/state')).json.waitlist, []);
     assert.equal((await new Client(srv).post('/api/staff/waitlist/clear')).status, 401);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: true })).status, 200);
-    assert.equal((await new Client(srv).post('/api/wait', { nick: '라', size: 2 })).status, 201);
+    assert.equal((await new Client(srv).post('/api/wait', { phone: waitPhone(), consent: true, nick: '라', size: 2 })).status, 201);
     // reset re-opens
     await s.post('/api/staff/waitlist/open', { open: false });
     await s.post('/api/staff/reset', { confirm: '초기화' });
@@ -4609,7 +4618,7 @@ test('H9 notice banner: shown in guest, wait and board state, validated, cleared
     assert.deepEqual((await g.get('/api/wait/info')).json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
     assert.deepEqual((await g.get('/api/board')).json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
     assert.deepEqual((await s.get('/api/staff/state')).json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
-    const w = (await g.post('/api/wait', { nick: '대기', size: 2 })).json;
+    const w = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '대기', size: 2 })).json;
     assert.deepEqual((await g.get(`/api/wait/${w.id}?secret=${w.secret}`)).json.notice, { text: '주문이 밀려 20분 걸려요', level: 'warn' });
     assert.deepEqual((await s.post('/api/staff/notice', { text: '곧 마감' })).json.notice, { text: '곧 마감', level: 'info' }, 'level defaults to info');
     assert.equal((await s.post('/api/staff/notice', { text: 'x'.repeat(81) })).json.error, 'bad_text');
@@ -4725,7 +4734,7 @@ test('H11 manual coupons: discount or item, at most 20 per hour, void blocks use
 test('H12 wait no-show: called parties become no-show after the timeout (setting), staff may recall once', async () => {
   await withBooth(async ({ srv, s }) => {
     const st0 = (await s.get('/api/staff/state')).json;
-    assert.equal(st0.waitCallTimeoutMin, 5, 'default 5 minutes');
+    assert.equal(st0.waitCallTimeoutMin, 10, 'default 10 minutes');
     assert.equal((await s.post('/api/staff/waitlist/timeout', { minutes: 0 })).json.error, 'bad_minutes');
     assert.equal((await s.post('/api/staff/waitlist/timeout', { minutes: 31 })).json.error, 'bad_minutes');
     assert.equal((await s.post('/api/staff/waitlist/timeout', { minutes: 2.5 })).json.error, 'bad_minutes');
@@ -4733,7 +4742,7 @@ test('H12 wait no-show: called parties become no-show after the timeout (setting
     assert.equal((await s.post('/api/staff/waitlist/timeout', { minutes: 3 })).json.minutes, 3);
     assert.equal((await s.get('/api/staff/state')).json.waitCallTimeoutMin, 3);
     const g = new Client(srv);
-    const w = (await g.post('/api/wait', { nick: '손님', size: 2 })).json;
+    const w = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님', size: 2 })).json;
     const wid = w.id;
     assert.equal((await s.post(`/api/staff/wait/${wid}/recall`, {})).json.error, 'not_noshow');
     assert.equal((await s.post(`/api/staff/wait/${wid}/call`, {})).status, 200);
@@ -4758,7 +4767,7 @@ test('H12 wait no-show: called parties become no-show after the timeout (setting
     assert.equal((await s.post(`/api/staff/wait/${wid}/cancel`, {})).status, 200);
     assert.equal(await status(), 'cancelled');
     // seating a called party before the timeout is unaffected
-    const w2 = (await g.post('/api/wait', { nick: '둘째', size: 1 })).json;
+    const w2 = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '둘째', size: 1 })).json;
     await s.post(`/api/staff/wait/${w2.id}/call`, {});
     assert.equal((await s.post(`/api/staff/wait/${w2.id}/seat`, {})).status, 200);
     db.prepare('UPDATE waitlist SET called_at=called_at-? WHERE id=?').run(60 * 60000, w2.id);
@@ -4775,8 +4784,9 @@ test('H12 the no-show timeout default comes from WAIT_CALL_TIMEOUT_MIN (1..30, a
 test('H12 a timer marks no-shows without anyone reading the queue', async () => {
   // the server sweeps every 30 s; here the sweep is proven through the staff snapshot on the SSE-free path
   await withBooth(async ({ srv, s }) => {
+    await s.post('/api/staff/waitlist/timeout', { minutes: 5 });
     const g = new Client(srv);
-    const w = (await g.post('/api/wait', { nick: '손님', size: 1 })).json;
+    const w = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님', size: 1 })).json;
     await s.post(`/api/staff/wait/${w.id}/call`, {});
     const db = dbOf(srv);
     db.prepare('UPDATE waitlist SET called_at=called_at-? WHERE id=?').run(6 * 60000, w.id);
@@ -5201,7 +5211,7 @@ test('upgrade from Release 1: a booth.db created by the production schema (cf5d0
     assert.deepEqual(st.refunds.map((r) => r.reason), ['legacy_cancelled'], 'dated with the cancellation (updatedAt of the order), not with the boot');
     assert.ok(st.refunds[0].createdAt < Date.now() - 30000, 'not stamped with the boot time');
     assert.deepEqual(st.menu.items.map((i) => [i.id, i.stockLeft, i.stockAuto]), [['legacy-item', null, false]]);
-    assert.equal(st.waitCallTimeoutMin, 5);
+    assert.equal(st.waitCallTimeoutMin, 10);
     assert.deepEqual([st.notice, (await s.get('/api/staff/day/reports')).json.reports, (await s.get('/api/staff/audit')).json.entries.map((e) => e.action)], [null, [], ['login', 'migrated']], 'empty new tables; the audit log has this login and the migration note');
     assert.equal((await stTables(s))[0].unclearUntil, null);
     // everything new works on the migrated rows
@@ -5408,7 +5418,9 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
   const src = fs.readFileSync(SERVER, 'utf8');
   const routes = [...src.matchAll(/route\('POST', '(\/api\/staff\/[^']*)'/g)].map((m) => m[1]);
   assert.ok(routes.length > 30, `found ${routes.length} routes`);
-  await withBooth(async ({ srv, s, tk }) => {
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-audit-sms-')), stub = path.join(stubDir, 'fetch.cjs');
+  fs.writeFileSync(stub, 'global.fetch=async()=>({status:204,body:{cancel:async()=>{}}});');
+  try { await withBooth(async ({ srv, s, tk }) => {
     const o = (await staffOrder(s, 1, [{ id: 'tteokbokki', qty: 1 }, { id: 'cola', qty: 1 }])).json.order;
     await s.post(`/api/staff/orders/${o.id}/paid`, { paid: true });
     const it = await mkItem(s, '감사용', 1000);
@@ -5418,7 +5430,7 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
     const refundId = (await s.get('/api/staff/state')).json.refunds[0].id;
     const cp = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '감사' })).json.coupon;
     const cp2 = (await s.post('/api/staff/tables/1/coupons', { type: 'item', label: '감사2' })).json.coupon;
-    const w = (await new Client(srv).post('/api/wait', { nick: '대기', size: 1 })).json;
+    const w = (await new Client(srv).post('/api/wait', { phone: waitPhone(), consent: true, nick: '대기', size: 1 })).json;
     const g = new Client(srv); await g.post(`/api/t/${tk[3]}/calls`, { type: '물' });
     const call = (await s.get('/api/staff/state')).json.calls[0];
     const sms = JSON.parse((await hookPost(srv, (await s.get('/api/staff/deposit-hook')).json.secret, { text: smsText(5000, '아무개', 31) })).text);
@@ -5459,8 +5471,13 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
       '/api/staff/tables/count': ['/api/staff/tables/count', { count: 30 }],
       '/api/staff/tables/(\\d{1,4})/rotate': ['/api/staff/tables/5/rotate', {}],
       '/api/staff/tables/move': ['/api/staff/tables/move', { from: 6, to: 7 }],
+      '/api/staff/waitlist/sms': ['/api/staff/waitlist/sms', { url: 'https://trigger.macrodroid.com/audit-test-abcd' }],
+      '/api/staff/waitlist/sms/test': ['/api/staff/waitlist/sms/test', { phone: waitPhone() }],
+      '/api/staff/waitlist/auto-next': ['/api/staff/waitlist/auto-next', { on: false }],
+      '/api/staff/board': ['/api/staff/board', { wait: false }],
       '/api/staff/waitlist/open': ['/api/staff/waitlist/open', { open: false }],
       '/api/staff/wait/(\\d{1,9})/(call|seat|cancel|recall)': [`/api/staff/wait/${w.id}/call`, {}],
+      '/api/staff/wait/(\\d{1,9})/sms': [`/api/staff/wait/${w.id}/sms`, {}],
       '/api/staff/waitlist/clear': ['/api/staff/waitlist/clear', {}],
       '/api/staff/tables/(\\d{1,4})/clear': ['/api/staff/tables/8/clear', {}],
       '/api/staff/calls/(\\d{1,9})/resolve': [`/api/staff/calls/${call.id}/resolve`, {}],
@@ -5532,11 +5549,11 @@ test('R2-7 every staff POST route in server.js writes an audit row (or is read-o
     assert.match(find('deposit_auto_setting').summary, /autoConfirm true→true.*max 30000→20000|max 30000→20000/);
     assert.match(find('ordering').summary, /true→false/);
     assert.match(find('table_count').summary, /→30/);
-    assert.match(find('wait_timeout').summary, /5→7 min/);
+    assert.match(find('wait_timeout').summary, /10→7 min/);
     assert.match(find('notice').summary, /\(none\) → warn: 감사 공지/);
     assert.ok(!text.includes((await s.get('/api/staff/deposit-hook')).json.secret) && !text.includes(pay.account || 'no-account') && !text.includes(PIN));
     for (const token of tk.slice(0, 5)) assert.ok(!text.includes(token));
-  });
+  }, { env: { NODE_OPTIONS: '--require=' + stub } }); } finally { fs.rmSync(stubDir, { recursive: true, force: true }); }
 });
 
 test('R2-12 CSV cells that start with = + - @ are neutralised', async () => {
@@ -5704,7 +5721,7 @@ test('R3-3 board and wait payloads carry the staff notice; wait status exposes n
     try { const buf = await sse.until((b) => b.includes('event: state')); assert.ok(buf.includes('"notice":{"text":"전광판 공지","level":"warn"}'), buf); } finally { sse.close(); }
     await s.post('/api/staff/notice', { text: '' });
     assert.equal((await g.get('/api/board')).json.notice, null);
-    const w = (await g.post('/api/wait', { nick: '손님', size: 1 })).json;
+    const w = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님', size: 1 })).json;
     const st = async () => (await g.get(`/api/wait/${w.id}?secret=${w.secret}`)).json;
     assert.equal((await st()).canRecall, false);
     await s.post(`/api/staff/wait/${w.id}/call`, {});
@@ -5954,16 +5971,16 @@ test('I1 staff headcount: any time, audit row with before->after, stale guard', 
 test('I1 waitlist seat with a table: the party size becomes the headcount when the seat has none, the entry records the table', async () => {
   await withBooth(async ({ srv, s }) => {
     const g = new Client(srv);
-    const w1 = (await g.post('/api/wait', { nick: '손님', size: 4 })).json;
+    const w1 = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님', size: 4 })).json;
     await s.post(`/api/staff/wait/${w1.id}/call`, {});
     const r = await s.post(`/api/staff/wait/${w1.id}/seat`, { table: 2 });
     assert.deepEqual([r.status, r.json.partySet, r.json.table], [200, true, 2]);
     assert.equal((await tableIn(s, 2)).people, 4);
     const db = dbOf(srv); assert.equal(db.prepare('SELECT seated_table t FROM waitlist WHERE id=?').get(w1.id).t, 2); db.close();
-    const w2 = (await g.post('/api/wait', { nick: '둘째', size: 2 })).json;
+    const w2 = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '둘째', size: 2 })).json;
     const r2 = await s.post(`/api/staff/wait/${w2.id}/seat`, { table: 2 });
     assert.deepEqual([r2.json.partySet, (await tableIn(s, 2)).people], [false, 4], 'an existing headcount is not overwritten');
-    const w3 = (await g.post('/api/wait', { nick: '셋째', size: 3 })).json;
+    const w3 = (await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '셋째', size: 3 })).json;
     for (const table of [0, 99, 'x', 1.5]) assert.equal((await s.post(`/api/staff/wait/${w3.id}/seat`, { table })).json.error, 'bad_table', String(table));
     const plain = await s.post(`/api/staff/wait/${w3.id}/seat`, {});
     assert.deepEqual([plain.status, plain.json.partySet], [200, undefined], 'without a table nothing changes');
@@ -7135,7 +7152,7 @@ test('K3 headcount ownership (setBy / setAt) and the seat binding: a stale page 
     assert.equal((await tableIn(s, 1)).partySetBy, 'staff', 'a staff change takes over the ownership');
     assert.equal((await g.get(`/api/t/${tk[0]}`)).json.party.setBy, 'staff');
     // waitlist
-    const w = (await new Client(srv).post('/api/wait', { nick: '대기', size: 2 })).json;
+    const w = (await new Client(srv).post('/api/wait', { phone: waitPhone(), consent: true, nick: '대기', size: 2 })).json;
     await s.post(`/api/staff/wait/${w.id}/seat`, { table: 2 });
     assert.deepEqual([(await tableIn(s, 2)).people, (await tableIn(s, 2)).partySetBy], [2, 'waitlist']);
     assert.ok((await auditOf(s)).some((e) => e.action === 'party_set' && /손님/.test(e.summaryKo) || /입력\(손님\)/.test(e.summaryKo)));
@@ -7994,7 +8011,7 @@ test('L1 per-seat "people" limit counts only a TRUSTED headcount: guest-entered 
     assert.equal((await g8.post(`/api/t/${tk[7]}/party`, { people: 4, seat: seat8 })).status, 200);
     assert.deepEqual(await lim(8), [1, 'people', false], 'a cover nobody paid does not count');
     // a waitlist seat is trusted too
-    const w = (await (await guestWithDevice(srv)).post('/api/wait', { nick: '손님', size: 3 })).json.id;
+    const w = (await (await guestWithDevice(srv)).post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님', size: 3 })).json.id;
     assert.equal((await s.post(`/api/staff/wait/${w}/seat`, { table: 9 })).json.partySet, true);
     assert.equal((await tableIn(s, 9)).partySetBy, 'waitlist');
   }, { env: KENV });
@@ -8464,4 +8481,396 @@ test('set menu: a corrupt components value counts as no components', async () =>
       }
     } finally { db.close(); }
   }, { menu: SET_MENU });
+});
+
+// Wait phone/SMS contract: public projections and archives must never expose the phone column.
+test('SMS wait registration: strict phone, literal consent, normalization and active duplicate protection', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const g = new Client(srv), other = new Client(srv), phone = '01012345678';
+    for (const bad of [undefined, null, 1012345678, {}, '', '0212345678', '01212345678', '010123456', '010123456789', '+821012345678', '010.1234.5678', '0101234a678']) {
+      const r = await g.post('/api/wait', { nick: '전화검사', size: 2, phone: bad, consent: true });
+      assert.equal(r.status, 400); assert.equal(r.json.error, 'bad_phone');
+      assert.equal(r.json.message, '휴대폰 번호를 정확히 입력해 주세요.');
+    }
+    for (const consent of [undefined, false, 'true', 1, null]) {
+      const r = await g.post('/api/wait', { nick: '동의검사', size: 2, phone, consent });
+      assert.equal(r.status, 400); assert.equal(r.json.error, 'need_consent');
+      assert.equal(r.json.message, '문자 호출을 위해 개인정보 수집에 동의해 주세요.');
+    }
+    const r = await g.post('/api/wait', { nick: '민감정보검사', size: 2, phone: ' 010-1234-5678 ', consent: true });
+    assert.equal(r.status, 201, r.text);
+    const dup = () => other.post('/api/wait', { nick: '중복검사', size: 1, phone, consent: true });
+    assert.equal((await dup()).json.error, 'dup_phone');
+    await s.post(`/api/staff/wait/${r.json.id}/call`, {});
+    const duplicate = await dup();
+    assert.equal(duplicate.status, 409); assert.equal(duplicate.json.message, '이미 이 번호로 대기 중입니다.');
+    const staffState = (await s.get('/api/staff/state')).json;
+    assert.equal(staffState.waitlist[0].phoneMasked, '010-****-5678');
+    assert.equal(staffState.waitlist[0].smsState, null);
+    for (const p of [`/api/wait/${r.json.id}?secret=${r.json.secret}`, '/api/wait/info', '/api/board', '/api/staff/state', '/api/staff/audit']) {
+      const out = await s.get(p);
+      assert.ok(!out.text.includes(phone) && !out.text.includes('010-1234-5678'), p);
+      if (!p.startsWith('/api/staff/')) assert.ok(!out.text.includes('phone'), p);
+    }
+    assert.ok(!srv.log().includes(phone));
+    await g.post(`/api/wait/${r.json.id}/cancel`, { secret: r.json.secret });
+    assert.equal((await dup()).status, 201, 'cancelled phone may register again');
+  });
+});
+
+test('SMS phones: all allowed mobile prefixes normalize without accepting other characters', async () => {
+  const { normalizePhone } = require('./db');
+  for (const prefix of ['010', '011', '016', '017', '018', '019']) for (const suffix of ['1234567', '12345678']) assert.equal(normalizePhone(prefix + '-' + suffix), prefix + suffix);
+  assert.throws(() => normalizePhone('010/1234/5678'), (e) => e.code === 'bad_phone');
+});
+
+test('SMS phones: seat, guest/staff cancel, clear, reset and day close immediately erase the number', async () => {
+  await withWaitStore(async (store, db) => {
+    const add = () => store.addWait(crypto.randomUUID(), '손님', 2, waitPhone(), true);
+    const raw = (id) => db.prepare('SELECT * FROM waitlist WHERE id=?').get(id);
+    for (const action of ['seat', 'table-seat', 'guest-cancel', 'cancel', 'clear']) {
+      const w = add();
+      assert.ok(raw(w.id).phone);
+      if (action === 'table-seat') store.waitAction(w.id, 'seat', { table: 1 });
+      else if (action === 'guest-cancel') store.waitCancel(w.id, w.secret);
+      else if (action === 'clear') store.clearWait();
+      else store.waitAction(w.id, action);
+      assert.equal(raw(w.id).phone, null, action);
+    }
+    const beforeReset = add();
+    store.reset();
+    assert.equal(raw(beforeReset.id), undefined);
+    const beforeClose = add();
+    assert.notEqual(beforeClose.id, beforeReset.id, 'old queued ids must not target a new guest after reset');
+    store.closeDay(true);
+    assert.equal(raw(beforeClose.id), undefined);
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM waitlist WHERE phone IS NOT NULL').get().n, 0);
+  });
+});
+
+test('SMS phone sweep retains only active calls and unrecalled no-shows within 30 minutes', async () => {
+  await withWaitStore(async (store, db) => {
+    store.setWaitAutoNext(false);
+    const rows = Array.from({ length: 8 }, (_, i) => store.addWait('retention' + i, '손님', 1, waitPhone(), true));
+    const stamp = Date.now(), realNow = Date.now;
+    Date.now = () => stamp;
+    try {
+      const update = db.prepare('UPDATE waitlist SET status=?, recalled=?, called_at=? WHERE id=?');
+      update.run('called', 0, stamp, rows[1].id);
+      update.run('noshow', 0, stamp - 30 * 60000 + 1, rows[2].id);
+      update.run('noshow', 0, stamp - 30 * 60000 - 1, rows[3].id);
+      update.run('noshow', 1, stamp - 1000, rows[4].id);
+      update.run('cancelled', 0, stamp, rows[5].id);
+      update.run('seated', 0, stamp, rows[6].id);
+      update.run('noshow', 0, null, rows[7].id);
+      assert.ok(store.sweepWait());
+      assert.deepEqual(rows.map((w) => !!db.prepare('SELECT phone FROM waitlist WHERE id=?').get(w.id).phone), [true, true, true, false, false, false, false, false]);
+      assert.ok(store.waitSmsTarget(rows[1].id));
+      assert.equal(store.waitSmsTarget(rows[3].id), null);
+      assert.equal(store.sweepWait(), 0, 'idempotent once scrubbed');
+    } finally { Date.now = realNow; }
+  });
+});
+
+test('SMS auto-next: transactional oldest-first replacement, id-only events, recall, default 10 and off switch', async () => {
+  await withWaitStore(async (store, db) => {
+    assert.equal(store.staffState().waitCallTimeoutMin, 10);
+    assert.equal(store.staffState().waitAutoNext, true);
+    const rows = Array.from({ length: 5 }, (_, i) => store.addWait('auto' + i, '손님', 1, waitPhone(), true));
+    for (const w of rows.slice(0, 2)) store.waitAction(w.id, 'call');
+    assert.deepEqual(store.drainEvents().filter((e) => e.type === 'wait_sms'), rows.slice(0, 2).map((w) => ({ type: 'wait_sms', data: { id: w.id } })));
+    db.prepare("UPDATE waitlist SET called_at=? WHERE status='called'").run(Date.now() - 11 * 60000);
+    assert.ok(store.sweepWait());
+    assert.deepEqual(store.staffState().waitlist.map((w) => w.status), ['noshow', 'noshow', 'called', 'called', 'waiting']);
+    assert.deepEqual(store.drainEvents().filter((e) => e.type === 'wait_sms'), rows.slice(2, 4).map((w) => ({ type: 'wait_sms', data: { id: w.id } })));
+    store.waitAction(rows[0].id, 'recall');
+    assert.deepEqual(store.drainEvents().filter((e) => e.type === 'wait_sms'), [{ type: 'wait_sms', data: { id: rows[0].id } }]);
+    store.setWaitAutoNext(false);
+    db.prepare("UPDATE waitlist SET called_at=? WHERE status='called'").run(Date.now() - 11 * 60000);
+    store.sweepWait();
+    assert.equal(store.staffState().waitlist.at(-1).status, 'waiting');
+    assert.deepEqual(store.drainEvents().filter((e) => e.type === 'wait_sms'), []);
+    assert.equal(db.prepare('SELECT phone FROM waitlist WHERE id=?').get(rows[0].id).phone, null, 'second no-show is no longer recallable');
+    assert.throws(() => store.setWaitAutoNext('false'), (e) => e.code === 'bad_auto_next');
+  });
+});
+
+test('SMS status updates are call-bound, staff-only, and skipped when cancelled before sending', async () => {
+  await withWaitStore(async (store, db) => {
+    const w = store.addWait('status', '손님', 1, waitPhone(), true);
+    assert.throws(() => store.queueWaitSms(w.id), (e) => e.code === 'not_called');
+    store.waitAction(w.id, 'call');
+    const target = store.waitSmsTarget(w.id);
+    assert.equal(target.minutes, 10);
+    assert.equal(store.setWaitSms(w.id, true, target.calledAt + 1), 0, 'old call completion ignored');
+    store.setWaitSms(w.id, true, target.calledAt);
+    let row = store.staffState().waitlist[0];
+    assert.equal(row.smsState, 'sent'); assert.ok(row.smsAt > 0); assert.equal(row.phone, undefined);
+    store.queueWaitSms(w.id);
+    store.setWaitSms(w.id, false, target.calledAt);
+    assert.equal(store.staffState().waitlist[0].smsState, 'failed');
+    store.waitCancel(w.id, w.secret);
+    assert.equal(store.waitSmsTarget(w.id), null);
+    assert.equal(store.setWaitSms(w.id, true, target.calledAt), 0);
+    assert.equal(db.prepare('SELECT phone FROM waitlist WHERE id=?').get(w.id).phone, null);
+  });
+});
+
+test('SMS settings: HTTPS MacroDroid only, no credential echoes, audited once, test/resend authorization', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const g = new Client(srv), phone = waitPhone();
+    for (const [p, body] of [['/api/staff/waitlist/sms', { url: '' }], ['/api/staff/waitlist/sms/test', { phone }], ['/api/staff/waitlist/auto-next', { on: false }], ['/api/staff/board', { wait: false }], ['/api/staff/wait/1/sms', {}]]) assert.equal((await g.post(p, body)).status, 401, p);
+    assert.equal((await s.post('/api/staff/waitlist/sms/test', { phone })).json.error, 'sms_not_set');
+    const url = 'https://trigger.macrodroid.com/credential-test-abcd';
+    for (const bad of [null, 1, 'garbage', 'http://trigger.macrodroid.com/abcd', 'https://other.example/abcd', 'https://trigger.macrodroid.com.evil.example/abcd', 'https://user:pass@trigger.macrodroid.com/abcd', url + '?a=1', url + '#frag', url + '?', url + '#', 'https://trigger.macrodroid.com/', 'https://trigger.macrodroid.com/' + 'a'.repeat(280)]) {
+      const r = await s.post('/api/staff/waitlist/sms', { url: bad });
+      assert.equal(r.status, 400, String(bad)); assert.equal(r.json.error, 'bad_sms_url');
+      assert.ok(!r.text.includes('credential-test'));
+    }
+    const before = (await auditOf(s)).length;
+    assert.equal((await s.post('/api/staff/waitlist/sms', { url })).status, 200);
+    assert.deepEqual((await s.get('/api/staff/state')).json.waitSms, { configured: true, hint: 'abcd' });
+    assert.equal((await auditOf(s)).length, before + 1, 'store audit replaces generic route audit');
+    for (const phone of [null, '02012345678']) assert.equal((await s.post('/api/staff/waitlist/sms/test', { phone })).json.error, 'bad_phone');
+    for (const p of ['/api/staff/state', '/api/staff/audit', '/api/board']) assert.ok(!(await s.get(p)).text.includes('credential-test'), p);
+    assert.equal((await s.post('/api/staff/waitlist/sms', { url: '' })).status, 200);
+    assert.deepEqual((await s.get('/api/staff/state')).json.waitSms, { configured: false, hint: '' });
+    assert.equal((await s.post('/api/staff/waitlist/auto-next', { on: 0 })).status, 400);
+    const w = (await g.post('/api/wait', { nick: '손님', size: 1, phone, consent: true })).json;
+    assert.equal((await s.post(`/api/staff/wait/${w.id}/sms`, {})).status, 409);
+    await s.post(`/api/staff/wait/${w.id}/call`, {});
+    assert.equal((await s.post(`/api/staff/wait/${w.id}/sms`, {})).status, 200);
+    assert.equal((await s.get('/api/staff/state')).json.waitlist[0].smsState, null, 'unconfigured sends leave state null');
+    assert.ok(!srv.log().includes('credential-test') && !srv.log().includes(phone));
+  });
+});
+
+test('SMS sender: serial, at least 2500ms between starts, encoded fields, manual redirects and cancelled bodies', async () => {
+  const { createSmsSender } = require('./sms');
+  let clock = 0, active = 0, maxActive = 0, cancelled = 0;
+  const starts = [], bodies = [], signals = [];
+  const sender = createSmsSender({ nowFn: () => clock, sleep: async (ms) => { clock += ms; }, fetchFn: async (url, opts) => {
+    active++; maxActive = Math.max(maxActive, active); starts.push(clock); bodies.push(new URL(url)); signals.push(opts.signal);
+    assert.equal(opts.method, 'GET'); assert.equal(opts.redirect, 'manual');
+    clock += 100;
+    await Promise.resolve(); active--;
+    return { status: starts.length === 2 ? 302 : 204, body: { cancel: async () => { cancelled++; } } };
+  } });
+  const target = () => ({ url: 'https://trigger.macrodroid.com/unit', phone: '01012345678', msg: '[컴히어] 1번 & ? # 입장' });
+  const results = await Promise.all([sender.send(target, 1), sender.send(target, 2), sender.send(target, 3)]);
+  assert.deepEqual(results, [{ ok: true }, { ok: false, error: '302' }, { ok: true }]);
+  assert.deepEqual(starts, [0, 2500, 5000]); assert.equal(maxActive, 1); assert.equal(cancelled, 3);
+  for (const url of bodies) { assert.equal(url.searchParams.get('phone'), '01012345678'); assert.equal(url.searchParams.get('msg'), target().msg); assert.equal(url.hash, ''); }
+  assert.ok(signals.every((s) => s instanceof AbortSignal));
+});
+
+test('SMS sender: queue capped at 50, target resolved at send time, skips erased phones and recovers after errors', async () => {
+  const { createSmsSender } = require('./sms');
+  let release, clock = 0, calls = 0, alive = true;
+  const blocked = new Promise((r) => { release = r; });
+  const target = () => alive ? { url: 'https://trigger.macrodroid.com/unit', phone: waitPhone(), msg: '호출' } : null;
+  const sender = createSmsSender({ nowFn: () => clock, sleep: async (ms) => { clock += ms; }, fetchFn: async () => { calls++; await blocked; return { status: 200 }; } });
+  const jobs = Array.from({ length: 50 }, (_, i) => sender.send(target, i));
+  assert.deepEqual(await sender.send(target, 51), { ok: false, error: 'queue_full' });
+  await Promise.resolve(); alive = false; release();
+  const results = await Promise.all(jobs);
+  assert.equal(calls, 1); assert.equal(results[0].ok, true); assert.ok(results.slice(1).every((r) => r.skipped));
+  let failures = 0;
+  const retry = createSmsSender({ nowFn: () => clock, sleep: async (ms) => { clock += ms; }, fetchFn: async () => { if (!failures++) throw new TypeError('private phone URL must not be returned'); return { status: 200 }; } });
+  alive = true;
+  assert.deepEqual(await retry.send(target, 1), { ok: false, error: 'TypeError' });
+  assert.deepEqual(await retry.send(target, 1), { ok: true });
+});
+
+test('SMS sender: a test queue deadline prevents a timed-out job from sending later', async () => {
+  const { createSmsSender } = require('./sms');
+  let release, calls = 0, clock = 0, targetCalls = 0;
+  const sender = createSmsSender({ nowFn: () => clock, sleep: async (ms) => { clock += ms; }, fetchFn: async () => { calls++; await new Promise((r) => { release = r; }); return { status: 200 }; } });
+  const target = () => { targetCalls++; return { url: 'https://trigger.macrodroid.com/unit', phone: waitPhone(), msg: '호출' }; };
+  const first = sender.send(target, 1);
+  await Promise.resolve();
+  assert.deepEqual(await sender.send(target, 0, 20), { ok: false, error: 'TimeoutError' });
+  release(); await first; await Promise.resolve();
+  assert.equal(calls, 1); assert.equal(targetCalls, 1, 'expired queued test never looks up its phone');
+});
+
+test('SMS board: live wait numbers only, sorted and capped, memo invalidation and live reward details', async () => {
+  await withWaitStore(async (store) => {
+    assert.deepEqual(store.boardState().wait, { open: true, waitingTotal: 0, calling: [] });
+    const rows = Array.from({ length: 9 }, (_, i) => store.addWait('board' + i, '비공개손님', 1, waitPhone(), true));
+    assert.equal(store.boardState().wait.waitingTotal, 9, 'new wait invalidates 1.5s memo');
+    for (const w of rows.slice(0, 8).reverse()) store.waitAction(w.id, 'call');
+    assert.deepEqual(store.boardState().wait, { open: true, waitingTotal: 1, calling: rows.slice(0, 6).map((w) => w.id) });
+    const waitText = JSON.stringify(store.boardState().wait);
+    assert.ok(!waitText.includes('nick') && !waitText.includes('phone') && !waitText.includes('비공개손님'));
+    store.waitAction(rows[0].id, 'seat');
+    assert.deepEqual(store.boardState().wait.calling, rows.slice(1, 7).map((w) => w.id));
+    store.waitCancel(rows[8].id, rows[8].secret);
+    assert.equal(store.boardState().wait.waitingTotal, 0);
+    store.setWaitOpen(false); assert.equal(store.boardState().wait.open, false);
+    let reward = store.boardState().rewards.find((r) => r.id === 'd1000');
+    assert.deepEqual([reward.game, reward.threshold, reward.type, reward.amount], ['cheers', 700, 'discount', 1000]);
+    store.updateReward('d1000', { threshold: 800, amount: 2000 });
+    reward = store.boardState().rewards.find((r) => r.id === 'd1000');
+    assert.deepEqual([reward.threshold, reward.amount], [800, 2000]);
+  });
+});
+
+test('SMS board settings: boolean-only merged subsets hide data server-side and persist', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const defaults = { wait: true, stock: true, rewardDetail: true, member: true, hourly: true, games: true };
+    assert.deepEqual((await s.get('/api/staff/state')).json.boardShow, defaults);
+    for (const body of [{ unknown: true }, { wait: 1 }, { stock: 'false' }, { games: null }, { wait: false, stock: 1 }]) {
+      const r = await s.post('/api/staff/board', body);
+      assert.equal(r.status, 400); assert.equal(r.json.error, 'bad_board');
+    }
+    assert.equal((await s.post('/api/staff/board', { rewardDetail: false })).status, 200);
+    assert.deepEqual((await s.get('/api/staff/state')).json.boardShow, { ...defaults, rewardDetail: false });
+    let board = (await s.get('/api/board')).json;
+    for (const r of board.rewards) assert.deepEqual(Object.keys(r).sort(), ['id', 'label', 'remaining', 'stock']);
+    await s.post('/api/staff/board', { wait: false, stock: false, member: false, hourly: false, games: false });
+    board = (await s.get('/api/board')).json;
+    for (const key of ['wait', 'rewards', 'member', 'hourly', 'prevHour', 'games', 'gameInfo']) assert.equal(Object.hasOwn(board, key), false, key);
+    const db = dbOf(srv);
+    try { assert.deepEqual(JSON.parse(db.prepare("SELECT v FROM settings WHERE k='board_show'").get().v), Object.fromEntries(Object.keys(defaults).map((k) => [k, false]))); } finally { db.close(); }
+    assert.ok((await auditOf(s)).some((e) => e.action === 'board_show'));
+    await s.post('/api/staff/board', { wait: true });
+    board = (await s.get('/api/board')).json;
+    assert.ok(board.wait); assert.equal(Object.hasOwn(board, 'rewards'), false);
+  });
+});
+
+test('SMS board member: advertises only configured, enabled and positive usable discount settings', async () => {
+  await withWaitStore(async (store) => assert.equal(Object.hasOwn(store.boardState(), 'member'), false));
+  await withWaitStore(async (store) => {
+    assert.deepEqual(store.boardState().member, { mode: 'percent', pct: 10, amount: 1000 });
+    store.setMemberSettings({ enabled: false }); assert.equal(Object.hasOwn(store.boardState(), 'member'), false);
+    store.setMemberSettings({ enabled: true, pct: 0 }); assert.equal(Object.hasOwn(store.boardState(), 'member'), false);
+    store.setMemberSettings({ mode: 'fixed', amount: 0 }); assert.equal(Object.hasOwn(store.boardState(), 'member'), false);
+    store.setMemberSettings({ amount: 1000 }); assert.equal(store.boardState().member.amount, 1000);
+    store.setBoardShow({ member: false }); assert.equal(Object.hasOwn(store.boardState(), 'member'), false);
+  }, { memberEnabled: true });
+});
+
+test('SMS board SSE refreshes on registration/cancel and lazy timeout auto-next', async () => {
+  await withBooth(async ({ srv, s }) => {
+    const ev = await openSse(srv, '/api/board/events');
+    try {
+      await ev.until((x) => x.includes('"waitingTotal":0'));
+      const g = new Client(srv), w = (await g.post('/api/wait', { nick: '숨김닉', size: 1, phone: waitPhone(), consent: true })).json;
+      await ev.until((x) => x.includes('"waitingTotal":1'));
+      await s.post(`/api/staff/wait/${w.id}/call`, {});
+      await ev.until((x) => x.includes(`"calling":[${w.id}]`));
+      const next = (await g.post('/api/wait', { nick: '다음손님', size: 1, phone: waitPhone(), consent: true })).json;
+      const db = dbOf(srv);
+      try { db.prepare('UPDATE waitlist SET called_at=? WHERE id=?').run(Date.now() - 11 * 60000, w.id); } finally { db.close(); }
+      await g.get('/api/wait/info');
+      await ev.until((x) => x.includes(`"calling":[${next.id}]`));
+      await g.post(`/api/wait/${next.id}/cancel`, { secret: next.secret });
+      const text = await ev.until((x) => x.includes(`"calling":[${next.id}]`) && x.slice(x.lastIndexOf('event: state')).includes('"calling":[]'));
+      assert.ok(!text.includes('숨김닉') && !text.includes('phone') && !text.includes('wait_sms'));
+    } finally { ev.close(); }
+  });
+});
+
+test('SMS backups erase phone bytes without changing the live active queue', async () => {
+  await withWaitStore(async (store, db, dir) => {
+    const phone = waitPhone(), w = store.addWait('backup', '손님', 1, phone, true);
+    const dest = path.join(dir, 'backup');
+    await store.backup(dest);
+    const files = fs.readdirSync(dest);
+    assert.ok(files.length > 0); assert.ok(files.every((f) => f.endsWith('.db')), 'no unsanitized temp snapshot remains');
+    for (const file of files) {
+      const full = path.join(dest, file), copy = new DatabaseSync(full);
+      try { assert.equal(copy.prepare('SELECT phone FROM waitlist WHERE id=?').get(w.id).phone, null); } finally { copy.close(); }
+      assert.ok(!fs.readFileSync(full).includes(Buffer.from(phone)), 'number absent even in freed pages');
+    }
+    assert.equal(db.prepare('SELECT phone FROM waitlist WHERE id=?').get(w.id).phone, phone);
+  });
+});
+
+test('SMS HTTP sender: test awaits result, call text excludes nickname, resend fails visibly, no PII in audit/logs', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-sms-http-'));
+  const hookFile = path.join(dir, 'fetch.cjs'), sendsFile = path.join(dir, 'sends.jsonl'), statusFile = path.join(dir, 'status');
+  fs.writeFileSync(statusFile, '204');
+  fs.writeFileSync(hookFile, `const fs=require('node:fs');const real=global.fetch;global.fetch=async(url,opts)=>{if(new URL(url).hostname!=='trigger.macrodroid.com')return real(url,opts);fs.appendFileSync(${JSON.stringify(sendsFile)},JSON.stringify({phone:new URL(url).searchParams.get('phone'),msg:new URL(url).searchParams.get('msg'),at:Date.now(),redirect:opts.redirect})+'\\n');return {status:Number(fs.readFileSync(${JSON.stringify(statusFile)},'utf8')),body:{cancel:async()=>{}}};};`);
+  const srv = await boot({ dir, env: { NODE_OPTIONS: '--require=' + hookFile } });
+  try {
+    const s = await staffLogin(srv), g = new Client(srv), phone = waitPhone(), credential = 'https://trigger.macrodroid.com/http-private-abcd';
+    await s.post('/api/staff/waitlist/sms', { url: credential });
+    const tested = await s.post('/api/staff/waitlist/sms/test', { phone });
+    assert.deepEqual(tested.json, { ok: true });
+    const sends = () => fs.readFileSync(sendsFile, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(sends()[0].msg, '[컴히어] 문자 호출 테스트예요.');
+    assert.equal(sends()[0].phone, phone);
+    const w = (await g.post('/api/wait', { nick: '닉네임악용', size: 1, phone, consent: true })).json;
+    const ev = await openSse(srv, '/api/staff/events', { cookie: s.cookieHeader() });
+    try {
+      await s.post(`/api/staff/wait/${w.id}/call`, {});
+      await ev.until((x) => x.includes('"smsState":"sent"'), 6500);
+      assert.equal(sends()[1].msg, `[컴히어] ${w.id}번 입장 차례예요! 10분 안에 부스로 와 주세요.`);
+      fs.writeFileSync(statusFile, '503');
+      await s.post(`/api/staff/wait/${w.id}/sms`, {});
+      const text = await ev.until((x) => x.includes('"smsState":"failed"'), 6500);
+      assert.ok(!text.includes(phone) && !text.includes(credential) && !text.includes('event: wait_sms'));
+      const recorded = sends();
+      assert.equal(recorded.length, 3);
+      assert.ok(recorded.slice(1).every((r, i) => r.at - recorded[i].at >= 2500), 'wall-clock starts respect spacing');
+      assert.ok(recorded.every((r) => r.redirect === 'manual'));
+      assert.ok(srv.log().includes(`sms failed #${w.id} 503`));
+      assert.ok(!srv.log().includes(phone) && !srv.log().includes(credential));
+      const audit = JSON.stringify(await auditOf(s));
+      assert.ok(!audit.includes(phone) && !audit.includes('http-private'));
+    } finally { ev.close(); }
+  } finally { await srv.stop(); }
+});
+
+test('SMS backup recovery removes only orphan temporary snapshots and sidecars before serving', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-sms-recovery-')), backup = path.join(dir, 'backup');
+  fs.mkdirSync(backup);
+  const temporary = ['booth-20261124-060000-001.db.tmp', 'booth-20261124-060000-001.db.tmp-journal', 'booth-20261124-060000.db.tmp-wal', 'booth-20261124-060000.db.tmp-shm'];
+  const keep = ['booth-20261124-060000-001.db', 'notes.tmp'];
+  for (const f of [...temporary, ...keep]) fs.writeFileSync(path.join(backup, f), 'synthetic-private-data');
+  const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 });
+  try { assert.deepEqual(fs.readdirSync(backup).sort(), keep.sort()); } finally { store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('SMS legacy wait migration keeps existing rows and adds nullable private columns', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'booth-sms-legacy-')), file = path.join(dir, 'booth.db');
+  const old = new DatabaseSync(file);
+  old.exec("CREATE TABLE waitlist(id INTEGER PRIMARY KEY AUTOINCREMENT,nick TEXT NOT NULL,size INTEGER NOT NULL,secret TEXT NOT NULL,device TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'waiting',created_at INTEGER NOT NULL,called_at INTEGER,recalled INTEGER NOT NULL DEFAULT 0); INSERT INTO waitlist(nick,size,secret,device,created_at) VALUES('기존손님',2,'old-secret','old-device',1)");
+  old.close();
+  const store = createStore({ dataDir: dir, menu: MENU, rewards: REWARDS, tableCount: 2 }), db = new DatabaseSync(file);
+  try {
+    const row = db.prepare('SELECT * FROM waitlist').get();
+    assert.deepEqual([row.nick, row.phone, row.sms_state, row.sms_at], ['기존손님', null, null, null]);
+    assert.equal(store.staffState().waitlist[0].phoneMasked, null);
+    assert.equal(store.waitStatus(1, 'old-secret').status, 'waiting');
+  } finally { db.close(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('SMS auto-next rolls back all replacements and emits no send if the transaction fails', async () => {
+  await withWaitStore(async (store, db) => {
+    const first = store.addWait('rollback-first', '손님', 1, waitPhone(), true);
+    store.addWait('rollback-next', '손님', 1, waitPhone(), true);
+    store.waitAction(first.id, 'call'); store.drainEvents();
+    db.prepare('UPDATE waitlist SET called_at=? WHERE id=?').run(Date.now() - 11 * 60000, first.id);
+    db.exec("CREATE TRIGGER fail_auto BEFORE UPDATE ON waitlist WHEN NEW.status='called' AND OLD.status='waiting' BEGIN SELECT RAISE(ABORT, 'blocked auto-next'); END");
+    assert.throws(() => store.sweepWait(), /blocked auto-next/);
+    assert.deepEqual(db.prepare('SELECT status FROM waitlist ORDER BY id').all().map((r) => r.status), ['called', 'waiting']);
+    assert.deepEqual(store.drainEvents(), []);
+    db.exec('DROP TRIGGER fail_auto');
+    assert.ok(store.sweepWait());
+    assert.equal(store.drainEvents().filter((e) => e.type === 'wait_sms').length, 1);
+  });
+});
+
+test('SMS sender rechecks spacing if sleep wakes before the requested interval', async () => {
+  const { createSmsSender } = require('./sms');
+  let clock = 0, early = true;
+  const starts = [], sleeps = [];
+  const sender = createSmsSender({ nowFn: () => clock, sleep: async (ms) => { sleeps.push(ms); clock += early ? ms - 1 : ms; early = false; }, fetchFn: async () => { starts.push(clock); return { status: 204 }; } });
+  const target = () => ({ url: 'https://trigger.macrodroid.com/unit', phone: waitPhone(), msg: '호출' });
+  await Promise.all([sender.send(target, 1), sender.send(target, 2)]);
+  assert.deepEqual(starts, [0, 2500]); assert.deepEqual(sleeps, [2500, 1]);
 });

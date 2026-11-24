@@ -1210,7 +1210,7 @@
     } };
   };
   SO.waitTimeoutSection = function () {
-    var minutes = 5, dirty = false;
+    var minutes = 10, dirty = false;
     var num = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '1', max: '30', step: '1', 'aria-label': '호출 후 대기 시간(분)', oninput: function () { dirty = true; } });
     var apply = X.abtn('btn btn-primary', '적용', function () {
       var m = Number(num.value);
@@ -1220,14 +1220,57 @@
     function nudge(d) { num.value = String(Math.max(1, Math.min(30, (parseInt(num.value, 10) || minutes) + d))); dirty = true; }
     var box = h('div', { class: 'card' }, h('p', { class: 'muted' }, '대기 손님을 "입장 호출"한 뒤 이 시간 안에 앉지 않으면 "노쇼"로 표시돼요. 노쇼는 한 번 다시 부를 수 있어요.'),
       h('div', { class: 'stockctl' }, h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { nudge(-1); }, 'aria-label': '1분 줄이기' }, '−'), num, h('span', null, '분'), h('button', { class: 'btn btn-sm', type: 'button', onclick: function () { nudge(1); }, 'aria-label': '1분 늘리기' }, '+'), apply));
-    return { el: box, update: function (d) { minutes = d.waitCallTimeoutMin || 5; if (!dirty && document.activeElement !== num) num.value = String(minutes); } };
+    return { el: box, update: function (d) { minutes = d.waitCallTimeoutMin || 10; if (!dirty && document.activeElement !== num) num.value = String(minutes); } };
+  };
+  SO.waitSmsSection = function () {
+    var configured = false, info = h('p', { class: 'muted' });
+    var url = h('input', { class: 'field', type: 'password', autocomplete: 'off', 'aria-label': 'MacroDroid 웹훅 URL', placeholder: 'https://trigger.macrodroid.com/…' });
+    var phone = h('input', { class: 'field', type: 'tel', inputmode: 'numeric', autocomplete: 'tel', 'aria-label': '테스트 문자 받을 휴대폰 번호', placeholder: '010-1234-5678' });
+    var save = X.abtn('btn btn-primary', '주소 저장', function () {
+      if (!url.value.trim()) { SC.toast('웹훅 주소를 입력해 주세요.', 'error'); return Promise.resolve(); }
+      return X.api('/api/staff/waitlist/sms', { url: url.value.trim() }).then(function () { url.value = ''; SC.toast('문자 호출 주소를 저장했어요', 'ok'); return X.refresh(); }, toastErr);
+    });
+    var clear = X.abtn('btn btn-danger', '주소 해제', function () {
+      return X.api('/api/staff/waitlist/sms', { url: '' }).then(function () { url.value = ''; SC.toast('문자 호출 주소를 해제했어요', 'ok'); return X.refresh(); }, toastErr);
+    });
+    var testBtn = X.abtn('btn', '테스트 문자 보내기', function () {
+      var digits = phone.value.replace(/[\s-]/g, '');
+      if (!/^01[016789]\d{7,8}$/.test(digits)) { SC.toast('휴대폰 번호를 정확히 입력해 주세요.', 'error'); phone.focus(); return Promise.resolve(); }
+      return X.api('/api/staff/waitlist/sms/test', { phone: digits }).then(function (r) { SC.toast(r.ok ? '테스트 문자를 보냈어요' : '문자 전송에 실패했어요' + (r.error ? ' (' + r.error + ')' : ''), r.ok ? 'ok' : 'error'); }, toastErr);
+    });
+    var toggle = h('button', { class: 'btn al-sw', type: 'button', onclick: function () {
+      X.api('/api/staff/waitlist/auto-next', { on: toggle.getAttribute('aria-pressed') !== 'true' }).then(function () { SC.toast('자동 다음 호출 설정을 바꿨어요', 'ok'); X.refresh(); }, toastErr);
+    } });
+    var box = h('div', { class: 'card' }, info, h('label', { class: 'lab' }, 'MacroDroid 웹훅 URL', url), h('div', { class: 'al-seg' }, save, clear),
+      h('label', { class: 'lab' }, '테스트 번호', phone), testBtn,
+      h('div', { class: 'al-row' }, h('div', { class: 'al-txt' }, h('b', null, '자동 다음 호출'), h('span', { class: 'muted' }, '노쇼가 되면 기다리는 다음 팀을 불러요.')), toggle));
+    return { el: box, update: function (d) {
+      var sms = d.waitSms || {}; configured = !!sms.configured;
+      info.textContent = configured ? '설정됨 …' + (sms.hint || '') : '문자 호출 주소가 설정되지 않았어요.';
+      clear.disabled = !configured; testBtn.disabled = !configured;
+      toggle.setAttribute('aria-pressed', String(d.waitAutoNext !== false)); toggle.textContent = d.waitAutoNext !== false ? '켜짐' : '꺼짐';
+    } };
+  };
+  SO.boardShowSection = function () {
+    var names = { wait: '대기 현황', stock: '상품 남은 개수', rewardDetail: '상품 점수·할인 상세', member: '회원 할인', hourly: '정시 1등 경품', games: '게임 순위' };
+    var boxes = {}, row = Object.keys(names).map(function (key) {
+      var input = h('input', { type: 'checkbox', onchange: function () {
+        input.disabled = true;
+        X.api('/api/staff/board', { [key]: input.checked }).then(function () { SC.toast('전광판 표시를 저장했어요', 'ok'); return X.refresh(); }, function (e) { input.checked = !input.checked; toastErr(e); }).finally(function () { input.disabled = false; });
+      } });
+      boxes[key] = input;
+      return h('label', { class: 'al-row' }, h('span', { class: 'al-txt' }, h('b', null, names[key])), input);
+    });
+    return { el: h('div', { class: 'card' }, row), update: function (d) {
+      Object.keys(boxes).forEach(function (key) { if (!boxes[key].disabled) boxes[key].checked = !d.boardShow || d.boardShow[key] !== false; });
+    } };
   };
   var AUDIT_LABEL = {
     order_create_staff: '직원 주문', order_status: '주문 상태', order_paid: '입금 받음', order_unpaid: '입금 취소', order_cancel: '주문 취소', order_edit: '주문 수정', order_service: '서비스 추가', order_move: '주문 이동',
     table_clear: '테이블 정리', table_unclear: '정리 되돌리기', table_move: '자리 이동', refund_done: '환불 완료', coupon_manual: '쿠폰 직접 발급', coupon_void: '쿠폰 무효', coupon_redeem: '쿠폰 사용',
     deposit_assign: '입금 연결', deposit_attach: '입금 알림 연결', deposit_dismiss: '입금 알림 무시', deposit_auto: '입금 자동 확인', deposit_auto_setting: '자동 확인 설정', deposit_secret_rotate: '알림 주소 재발급',
     menu_create: '메뉴 추가', menu_update: '메뉴 변경', pay_settings: '결제 설정', member_discount: '회원 할인 설정', notice: '공지', ordering: '주문 받기 켜기/끄기', table_count: '테이블 수', table_rotate: 'QR 교체',
-    wait_timeout: '노쇼 시간', party_set: '인원 변경', cover_settings: '입장료 설정', cover_create: '입장료 생성', cover_update: '입장료 변경', cover_waive: '입장료 면제', cover_restore: '입장료 면제 취소', cover_intent_cancel: '낼게요 취소', payment_void: '결제 기록 취소', reset: '전체 초기화', day_close: '영업 마감', login: '로그인', lockout: '로그인 잠금', staff_action: '직원 작업',
+    wait_timeout: '노쇼 시간', wait_sms_url: '문자 호출 설정', wait_auto_next: '자동 다음 호출', board_show: '전광판 표시', party_set: '인원 변경', cover_settings: '입장료 설정', cover_create: '입장료 생성', cover_update: '입장료 변경', cover_waive: '입장료 면제', cover_restore: '입장료 면제 취소', cover_intent_cancel: '낼게요 취소', payment_void: '결제 기록 취소', reset: '전체 초기화', day_close: '영업 마감', login: '로그인', lockout: '로그인 잠금', staff_action: '직원 작업',
   };
   SO.auditSection = function () {
     var list = h('div', { class: 'list' }), more = h('button', { class: 'btn btn-block', type: 'button' }, '더 보기'), next = null, loaded = false, opened = false;

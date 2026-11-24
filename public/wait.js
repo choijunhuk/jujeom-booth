@@ -41,28 +41,35 @@
     stopLive(); entry = null; prevStatus = null;
     document.title = '대기 등록 · COMHERE';
     var nick = h('input', { class: 'y2k-field', type: 'text', maxlength: '10', autocomplete: 'nickname', required: true, 'aria-label': '대기 이름', placeholder: '예: 맥주왕 (최대 10자)' });
+    var phone = h('input', { class: 'y2k-field', type: 'tel', inputmode: 'numeric', autocomplete: 'tel', required: true, 'aria-label': '휴대폰 번호', placeholder: '010-1234-5678' });
+    var consent = h('input', { type: 'checkbox', required: true, 'aria-label': '문자 호출을 위한 개인정보 수집 동의' });
     var out = h('output', { class: 'lcd-sm', 'aria-live': 'polite' }, String(size), h('small', null, '명'));
     var err = h('p', { class: 'err', role: 'alert' }, msg || '');
     function setSize(n) { size = Math.max(1, Math.min(10, n)); out.firstChild.textContent = String(size); minus.disabled = size <= 1; plus.disabled = size >= 10; }
     var minus = h('button', { class: 'y2k-btn', type: 'button', 'aria-label': '인원 줄이기', onclick: function () { setSize(size - 1); } }, '−');
     var plus = h('button', { class: 'y2k-btn', type: 'button', 'aria-label': '인원 늘리기', onclick: function () { setSize(size + 1); } }, '+');
     var go = h('button', { class: 'y2k-btn y2k-btn--primary', type: 'submit' }, '대기 등록');
-    var form = h('form', { class: 'w-form', onsubmit: function (e) {
+    var form = h('form', { class: 'w-form', novalidate: true, onsubmit: function (e) {
       e.preventDefault();
       var name = nick.value.trim();
       if (!name) { err.textContent = '이름(닉네임)을 입력해 주세요.'; nick.focus(); return; }
+      var digits = phone.value.replace(/[\s-]/g, '');
+      if (!/^01[016789]\d{7,8}$/.test(digits)) { err.textContent = '휴대폰 번호를 정확히 입력해 주세요.'; phone.focus(); return; }
+      if (!consent.checked) { err.textContent = '문자 호출을 위해 개인정보 수집에 동의해 주세요.'; consent.focus(); return; }
       err.textContent = '';
       SC.audio.unlock(); // user gesture: lets us beep when called
       SC.act(go, function () {
-        return SC.api('/api/wait', { body: { nick: name, size: size }, noAuthRedirect: true }).then(function (r) {
+        return SC.api('/api/wait', { body: { nick: name, size: size, phone: digits, consent: consent.checked }, noAuthRedirect: true }).then(function (r) {
           entry = { id: r.id, secret: r.secret }; save(entry); start();
         }, function (e2) { err.textContent = e2.code === 'wait_rate' ? '잠시 후 다시 시도해 주세요.' : e2.code === 'wait_closed' ? '지금은 대기 접수를 받지 않아요.' : e2.message; });
       });
     } },
       h('label', { class: 'lab' }, '이름 (닉네임)', nick),
       h('div', { class: 'lab' }, '인원', h('div', { class: 'stepper' }, minus, out, plus)),
+      h('label', { class: 'lab' }, '휴대폰 번호', phone),
+      h('label', { class: 'consent' }, consent, h('span', null, '호출 문자를 보내려고 휴대폰 번호를 받아요. 문자는 부스 휴대폰 자동화 앱(MacroDroid) 서버를 거쳐 보내지고, 입장하거나 취소하면 번호는 바로 지워요. 동의합니다.')),
       err, go,
-      h('p', { class: 'hint' }, '전화번호는 받지 않아요. 자리가 나면 이 화면이 바뀌고 진동으로 알려 드려요. 화면을 켜 두거나, 이 페이지를 닫지 말아 주세요.'));
+      h('p', { class: 'hint' }, '호출되면 문자로도 알려드려요. 이 화면과 진동으로도 알려 드려요.'));
     var notice = h('p', { class: 'w-sub', role: 'status', 'aria-live': 'polite' }, '대기를 등록하면 순번을 알려 드려요.');
     main.replaceChildren(win('대기 등록 - COMHERE.exe', [h('h1', { class: 'w-h' }, '자리가 날 때까지', h('br'), '여기서 기다려 주세요'), notice, form]));
     setSize(size);
@@ -92,7 +99,7 @@
       SC.audioStrip(),
       win('내 순번 - COMHERE.exe', [
         h('div', { class: 'ticket' }, h('div', { class: 'k' }, '내 순번'), h('div', { class: 'lcd' }, T.pos), T.ahead, h('div', { class: 'perf' }), T.who, T.total),
-        h('p', { class: 'hint' }, '순서가 되면 이 화면이 "입장하세요"로 바뀌어요. 다른 앱을 쓰다 와도 괜찮지만 이 페이지는 닫지 말아 주세요.'),
+        h('p', { class: 'hint' }, '호출되면 문자로도 알려드려요. 순서가 되면 이 화면이 "입장하세요"로 바뀌어요.'),
         alertControls(),
         cancel]));
   }

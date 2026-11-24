@@ -555,11 +555,14 @@
       if (!called) btns.appendChild(waitAct(x, 'call', '입장 호출', x.nick + ' 호출했어요', 'btn btn-primary'));
       btns.appendChild(waitAct(x, 'seat', '착석 완료', '', called ? 'btn btn-primary' : 'btn'));
     }
+    if (called) btns.appendChild(abtn('btn btn-sm', '문자 다시 보내기', function () { return api('/api/staff/wait/' + x.id + '/sms').then(function () { SC.toast('문자 전송을 요청했어요', 'ok'); return refresh(); }, function (e) { SC.toast(SC.errText(e), 'error'); }); }));
     btns.appendChild(waitAct(x, 'cancel', '취소', '', 'btn btn-danger'));
     return h('div', { class: 'row-card ' + (called ? 'called' : '') + (noshow ? ' noshow' : '') },
       h('div', { class: 'grow' },
         h('span', { class: 'big' }, (x._n ? x._n + '. ' : '') + x.nick + ' · ' + x.size + '명'),
-        h('span', { class: 'muted' }, '대기 ', SC.timeEl(x.createdAt, 'dur'), called || noshow ? ' · 호출 ' : '', (called || noshow) && x.calledAt ? SC.timeEl(x.calledAt, 'ago') : null, noshow ? (x.recalled ? ' · 이미 한 번 다시 불렀어요' : ' · 한 번 다시 부를 수 있어요') : '')),
+        h('span', { class: 'muted' }, '대기 ', SC.timeEl(x.createdAt, 'dur'), called || noshow ? ' · 호출 ' : '', (called || noshow) && x.calledAt ? SC.timeEl(x.calledAt, 'ago') : null, noshow ? (x.recalled ? ' · 이미 한 번 다시 불렀어요' : ' · 한 번 다시 부를 수 있어요') : ''),
+        x.phoneMasked ? h('span', { class: 'muted' }, x.phoneMasked) : null,
+        x.smsState === 'sent' ? h('span', { class: 'tag ok' }, '문자 보냄') : x.smsState === 'failed' ? h('span', { class: 'tag bad' }, '문자 실패') : null),
       noshow ? h('span', { class: 'tag bad solid' }, '노쇼') : called ? h('span', { class: 'tag ok' }, '호출함') : h('span', { class: 'tag warn' }, '대기 중'),
       btns);
   }
@@ -1890,6 +1893,8 @@
   SETTINGS_SECTIONS.push({ id: 'couponlimit', title: '쿠폰 제한', build: SO.couponLimitSection });
   SETTINGS_SECTIONS.push({ id: 'notice', title: '손님 공지', build: SO.noticeSection });
   SETTINGS_SECTIONS.push({ id: 'waittimeout', title: '대기 호출 노쇼 시간', build: SO.waitTimeoutSection });
+  SETTINGS_SECTIONS.push({ id: 'waitsms', title: '대기 문자 호출', build: SO.waitSmsSection });
+  SETTINGS_SECTIONS.push({ id: 'board', title: '전광판 표시', build: SO.boardShowSection });
   SETTINGS_SECTIONS.push({ id: 'audit', title: '작업 기록', build: SO.auditSection });
   // future sections: SETTINGS_SECTIONS.push({ id: 'pay', title: '결제', build: ... }) (테이블, 입금 알림 ...)
 

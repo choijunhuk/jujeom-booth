@@ -83,6 +83,8 @@
     var d = state;
     if (!d) return;
     var rank = (d.hour && d.hour.ranking) || [];
+    $('#games').hidden = !d.games;
+    $('.b-main').classList.toggle('no-games', !d.games);
     renderLead(rank[0] || null, d.hourly);
     $('#hour-range').textContent = d.hour ? SC.clock(d.hour.start) + '~' + SC.clock(d.hour.end) : '';
     hourList.update(rank.slice(1, 5).map(function (r, i) { return Object.assign({}, r, { rank: i + 2 }); }), function (r) { return r.table; });
@@ -102,9 +104,19 @@
       if (!list.length) { if (!g.empty.parentNode) g.list.el.appendChild(g.empty); } else if (g.empty.parentNode) g.empty.remove();
     });
     var pw = d.prevHour && d.prevHour.winner;
+    $('#prev').hidden = !d.prevHour;
     SC.fill($('#prev'), pw ? ['지난 시간 1등 ', h('b', null, pw.table + '번 테이블' + (pw.nick ? ' · ' + pw.nick : '')), d.prevHour.awarded ? ' · 시상 완료' : ''] : null);
+    renderWait();
     renderStock();
+    $('#stock-row').hidden = $('#stock').hidden && $('#prev').hidden;
     renderTicker();
+  }
+
+  function renderWait() {
+    var w = state && state.wait, el = $('#wait-strip');
+    el.hidden = !w || (!w.open && !w.waitingTotal && !(w.calling || []).length);
+    if (el.hidden) return;
+    el.textContent = ((w.calling || []).length ? '지금 입장 ' + w.calling.map(function (id) { return id + '번'; }).join(' · ') + ' | ' : '') + '대기 ' + w.waitingTotal + '팀';
   }
 
   function renderStock() {
@@ -116,8 +128,9 @@
       var left = r.remaining != null ? r.remaining : r.stock, total = r.stock || 0;
       var on = total > 0 ? Math.min(10, Math.ceil(left / total * 10)) : 0;
       var segs = []; for (var i = 0; i < 10; i++) segs.push(h('i', { class: i < on ? 'on' : '' }));
+      var detail = r.game && r.threshold != null ? r.game + ' ' + nf(r.threshold) + '점 이상' + (r.type === 'discount' ? ' · ' + nf(r.amount) + '원 할인' : '') : '';
       return h('div', { class: 'stock' + (left <= 0 ? ' out' : left / (total || 1) <= 0.2 ? ' low' : '') },
-        h('span', { class: 'lab' }, r.label), h('span', { class: 'y2k-progress', role: 'img', 'aria-label': r.label + ' 남은 수량 ' + left + '개' }, segs), h('span', { class: 'n' }, left <= 0 ? '소진' : left + '개'));
+        h('span', { class: 'stock-name' }, h('span', { class: 'lab' }, r.label), detail ? h('small', { class: 'stock-detail' }, detail) : null), h('span', { class: 'y2k-progress', role: 'img', 'aria-label': r.label + ' 남은 수량 ' + left + '개' }, segs), h('span', { class: 'n' }, left <= 0 ? '소진' : left + '개'));
     }));
   }
 
@@ -129,6 +142,7 @@
     parts.push('QR 찍고 도전!');
     parts.push('테이블 QR로 게임하고 쿠폰을 받아 가세요');
     if (state && state.hourly && state.hourly.label && state.hourly.enabled !== false) parts.push('매 정시 1등 테이블에게 ' + state.hourly.label);
+    if (state && state.member) parts.push('COMS 회원 ' + (state.member.mode === 'percent' ? nf(state.member.pct) + '%' : nf(state.member.amount) + '원') + ' 할인');
     var t = (n && n.level === 'warn' ? 'W|' : '') + parts.join('   ★   ');
     if (t !== lastTicker) {
       lastTicker = t;

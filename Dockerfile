@@ -1,6 +1,6 @@
 FROM node:26-slim
 WORKDIR /app
-COPY --chown=node:node package.json server.js db.js menu.json rewards.json tables.json ./
+COPY --chown=node:node package.json server.js db.js sms.js menu.json rewards.json tables.json ./
 COPY --chown=node:node public ./public
 RUN mkdir -p /data && chown node:node /data
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=8787 DATA_DIR=/data BASE_PATH=/booth

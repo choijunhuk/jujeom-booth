@@ -38,6 +38,8 @@
   .clock small { display: block; color: var(--dim); font-size: .9rem; font-weight: 800; }
   .clock b { font: 800 var(--px)/1.1 var(--y-font-num); color: var(--y-cyan); font-variant-numeric: tabular-nums; }
   .b-main { max-width: none; margin: 0; padding: 0; display: grid; grid-template-columns: .9fr 2.1fr; gap: 1.3rem; min-height: 0; }
+  .b-main.no-games { grid-template-columns: 1fr; }
+  .games[hidden], .stocks[hidden], .wait-strip[hidden], .prev[hidden] { display: none; }
   .y2k-title { font-size: 16px; padding-top: 8px; padding-bottom: 8px; }
   @media (min-width: 1600px) { .y2k-title { font-size: 32px; min-height: 52px; line-height: 36px; } }
   .y2k-title-t { font-family: var(--y-font-pixel); }
@@ -93,6 +95,9 @@
   .stocks { display: flex; gap: 1.6rem; align-items: center; flex-wrap: wrap; min-height: 2rem; }
   .stock { display: flex; gap: .7rem; align-items: center; font-weight: 800; font-size: 1.15rem; }
   .stock .lab { color: var(--dim); }
+  .stock-name { display: grid; gap: .1rem; }
+  .stock-detail { font-size: .8rem; color: var(--y-cyan); font-weight: 700; }
+  .wait-strip { padding: .35rem .8rem; background: var(--y-term-bg); color: var(--y-term-hi); border: 2px solid var(--y-cyan); font-size: 1.25rem; font-weight: 900; text-align: center; }
   .stock .y2k-progress { width: 12rem; padding: 3px; gap: 2px; }
   .stock .y2k-progress > i { height: 1.2rem; background: #2a2a55; }
   .stock .y2k-progress > i.on { background: var(--y-lime); }
@@ -135,7 +140,8 @@
   <div class="games" id="games"></div>
 </main>
 <footer class="b-foot">
-  <div class="stocks"><div class="stocks" id="stock" hidden></div><div class="prev" id="prev"></div></div>
+  <div class="wait-strip" id="wait-strip" role="status" hidden></div>
+  <div class="stocks" id="stock-row"><div class="stocks" id="stock" hidden></div><div class="prev" id="prev"></div></div>
   <div class="y2k-marquee" role="marquee" aria-label="안내"><span id="ticker"></span></div>
 </footer>
 <div class="conn b-conn" id="conn" data-s="wait"><span class="dot"></span><span id="conn-t">연결 중</span></div>

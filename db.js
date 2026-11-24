@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS nicks(device TEXT NOT NULL, table_id INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS calls(id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER);
 CREATE TABLE IF NOT EXISTS waitlist(
   id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL, size INTEGER NOT NULL, secret TEXT NOT NULL, device TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'waiting', created_at INTEGER NOT NULL, called_at INTEGER, recalled INTEGER NOT NULL DEFAULT 0);
+  status TEXT NOT NULL DEFAULT 'waiting', created_at INTEGER NOT NULL, called_at INTEGER, recalled INTEGER NOT NULL DEFAULT 0,
+  phone TEXT, sms_state TEXT, sms_at INTEGER);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS login_keys(hash TEXT PRIMARY KEY, fails INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS deposit_notices(
@@ -197,10 +198,20 @@ function sameDepositor(noticeName, orderName) {
 }
 const PAY_DEFAULT = { bank: '', account: '', holder: '', tossEnabled: false, kakaoPayUrl: '', requireDepositor: false, changedAt: null };
 
-function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbBytes = 256 * 1024 * 1024, backupSkipBytes = 128 * 1024 * 1024, memberEnabled = false, photoMaxBytes = 40 * 1024 * 1024, payEnv = {}, waitCallTimeoutMin = 5 }) {
+function normalizePhone(value) {
+  const phone = typeof value === 'string' ? value.replace(/[\s-]/g, '') : '';
+  if (!/^01[016789]\d{7,8}$/.test(phone)) fail(400, 'bad_phone', '휴대폰 번호를 정확히 입력해 주세요.');
+  return phone;
+}
+
+function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbBytes = 256 * 1024 * 1024, backupSkipBytes = 128 * 1024 * 1024, memberEnabled = false, photoMaxBytes = 40 * 1024 * 1024, payEnv = {}, waitCallTimeoutMin = 10 }) {
   const L = { seatPlayGapMs: 1000, seatPlayMax: 300, seatOpenMax: 20, memberOrderMax: 20, ...limits };
   const waitTimes = []; // ponytail: in-memory insert times for the global wait-list rate cap (resets on restart)
   fs.mkdirSync(dataDir, { recursive: true });
+  const cleanBackupTemps = (dir) => {
+    if (fs.existsSync(dir)) for (const f of fs.readdirSync(dir)) if (/^booth-\d{8}-\d{6}(-\d{3})?\.db\.tmp(?:-(?:journal|wal|shm))?$/.test(f)) fs.unlinkSync(path.join(dir, f));
+  };
+  cleanBackupTemps(path.join(dataDir, 'backup')); // A killed backup must not leave an unsanitized phone snapshot behind.
   const db = new DatabaseSync(path.join(dataDir, 'booth.db'));
   db.exec(SCHEMA);
   // migrations for databases created by older code (CREATE TABLE IF NOT EXISTS does not touch existing tables)
@@ -240,6 +251,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   if (!colsOf('menu_items').includes('stock_auto')) db.exec('ALTER TABLE menu_items ADD COLUMN stock_auto INTEGER NOT NULL DEFAULT 0');
   if (!colsOf('menu_items').includes('components')) db.exec('ALTER TABLE menu_items ADD COLUMN components TEXT'); // set menu: JSON [{id, qty}] of items whose stock the set consumes
   if (!colsOf('waitlist').includes('recalled')) db.exec('ALTER TABLE waitlist ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0');
+  for (const [col, ddl] of [['phone', 'TEXT'], ['sms_state', 'TEXT'], ['sms_at', 'INTEGER']]) if (!colsOf('waitlist').includes(col)) db.exec(`ALTER TABLE waitlist ADD COLUMN ${col} ${ddl}`);
   for (const [col, ddl] of [['duplicate_of', 'INTEGER'], ['reasons', 'TEXT'], ['amount_guessed', 'INTEGER NOT NULL DEFAULT 0'], ['repeat_count', 'INTEGER NOT NULL DEFAULT 1'], ['last_at', 'INTEGER']]) {
     if (!colsOf('deposit_notices').includes(col)) db.exec(`ALTER TABLE deposit_notices ADD COLUMN ${col} ${ddl}`);
   }
@@ -729,6 +741,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     won('amount', 'bad_amount', 50000); won('minOrder', 'bad_min_order', 1000000); won('maxDiscount', 'bad_max_discount', 1000000);
     if (has('perMemberLimit')) { if (!Number.isInteger(body.perMemberLimit) || body.perMemberLimit < 1 || body.perMemberLimit > 100) fail(400, 'bad_per_member_limit', 'perMemberLimit은 1~100 사이 정수여야 합니다.'); cur.perMemberLimit = body.perMemberLimit; }
     tx(() => { run("INSERT INTO settings(k,v) VALUES('member_discount',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", JSON.stringify(cur)); audit('member_discount', 'settings', `${cur.enabled ? 'on' : 'off'}, ${cur.mode} ${cur.mode === 'percent' ? cur.pct + '%' : cur.amount + ' won'}, min ${cur.minOrder}, cap ${cur.maxDiscount}`, `회원 할인 설정 · ${cur.enabled ? '켜짐' : '꺼짐'} · ${cur.mode === 'percent' ? `${cur.pct}%` : W(cur.amount)} · 최소 주문 ${W(cur.minOrder)} · 상한 ${cur.maxDiscount ? W(cur.maxDiscount) : '없음'}`); });
+    invalidate();
     return cur;
   }
   // staff banner shown on the guest page, the wait page and the board
@@ -2142,7 +2155,32 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
 
   const waitOpen = () => setting('wait_open', '1') === '1';
-  function setWaitOpen(open) { run('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v', 'wait_open', open ? '1' : '0'); }
+  function setWaitOpen(open) { run('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v', 'wait_open', open ? '1' : '0'); invalidate(); }
+  const waitAutoNext = () => setting('wait_auto_next', '1') === '1';
+  function setWaitAutoNext(on) {
+    if (typeof on !== 'boolean') fail(400, 'bad_auto_next', '자동 다음 호출 설정이 올바르지 않습니다.');
+    tx(() => { run("INSERT INTO settings(k,v) VALUES('wait_auto_next',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", on ? '1' : '0'); audit('wait_auto_next', 'settings', on ? 'on' : 'off', `자동 다음 호출 ${on ? '켬' : '끔'}`); });
+    return on;
+  }
+  const waitSmsUrl = () => setting('wait_sms_url', '');
+  function setWaitSmsUrl(value) {
+    if (typeof value !== 'string' || value.length > 300) fail(400, 'bad_sms_url', '문자 웹훅 주소가 올바르지 않습니다.');
+    if (value) {
+      let u;
+      try { u = new URL(value); } catch { fail(400, 'bad_sms_url', '문자 웹훅 주소가 올바르지 않습니다.'); }
+      if (u.protocol !== 'https:' || u.hostname !== 'trigger.macrodroid.com' || u.username || u.password || value.includes('?') || value.includes('#') || !u.pathname || u.pathname === '/') fail(400, 'bad_sms_url', '문자 웹훅 주소가 올바르지 않습니다.');
+    }
+    tx(() => { run("INSERT INTO settings(k,v) VALUES('wait_sms_url',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", value); audit('wait_sms_url', 'settings', value ? 'configured' : 'cleared', `문자 웹훅 ${value ? '설정됨' : '해제'}`); });
+    return { configured: !!value, hint: value ? new URL(value).pathname.slice(-4) : '' };
+  }
+  const boardShow = () => { try { return { wait: true, stock: true, rewardDetail: true, member: true, hourly: true, games: true, ...JSON.parse(setting('board_show', '{}')) }; } catch { return { wait: true, stock: true, rewardDetail: true, member: true, hourly: true, games: true }; } };
+  function setBoardShow(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((k) => !Object.hasOwn(boardShow(), k) || typeof body[k] !== 'boolean')) fail(400, 'bad_board', '전광판 표시 설정이 올바르지 않습니다.');
+    const next = { ...boardShow(), ...body };
+    tx(() => { run("INSERT INTO settings(k,v) VALUES('board_show',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", JSON.stringify(next)); audit('board_show', 'settings', Object.entries(next).map(([k, v]) => `${k}:${v}`).join(', '), '전광판 표시 설정 변경'); });
+    invalidate();
+    return next;
+  }
   const waitTimeoutMin = () => Number(setting('wait_call_timeout_min', String(waitCallTimeoutMin)));
   function setWaitTimeout(min) {
     if (!Number.isInteger(min) || min < 1 || min > 30) fail(400, 'bad_minutes', '호출 후 대기 시간은 1~30분 사이 정수여야 합니다.');
@@ -2150,14 +2188,34 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     sweepWait();
     return min;
   }
-  // a called party that was not seated in time becomes a no-show (checked lazily on reads and on a timer); returns the number changed
-  function sweepWait() { return run("UPDATE waitlist SET status='noshow' WHERE status='called' AND called_at<?", now() - waitTimeoutMin() * 60000).changes; }
-  function clearWait() { sweepWait(); return run("UPDATE waitlist SET status='cancelled' WHERE status IN ('waiting','called','noshow')").changes; }
+  // Expired calls and phones are updated together; only committed calls enter the SMS outbox.
+  function sweepWait() {
+    const changed = tx(() => {
+      const t = now();
+      const expired = run("UPDATE waitlist SET status='noshow' WHERE status='called' AND called_at<?", t - waitTimeoutMin() * 60000).changes;
+      if (expired && waitAutoNext()) {
+        for (const w of all("SELECT id FROM waitlist WHERE status='waiting' ORDER BY id LIMIT ?", expired)) {
+          run("UPDATE waitlist SET status='called', called_at=?, sms_state=NULL, sms_at=NULL WHERE id=?", t, w.id);
+          emit('wait_sms', { id: w.id });
+        }
+      }
+      const scrubbed = run("UPDATE waitlist SET phone=NULL WHERE phone IS NOT NULL AND NOT (status IN ('waiting','called') OR (status='noshow' AND recalled=0 AND called_at IS NOT NULL AND called_at>=?))", t - 30 * 60000).changes;
+      if (expired || scrubbed) emit('wait_changed', {});
+      return expired + scrubbed;
+    });
+    if (changed) invalidate();
+    return changed;
+  }
+  function clearWait() { const n = run("UPDATE waitlist SET status='cancelled', phone=NULL WHERE status IN ('waiting','called','noshow')").changes; if (n) invalidate(); return n; }
   const waitInfo = () => { sweepWait(); return { open: waitOpen(), waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, notice: bannerOut() }; };
-  function addWait(device, nick, size) {
+  function addWait(device, nick, size, phoneInput, consent) {
     if (!waitOpen()) fail(403, 'wait_closed', '지금은 대기 등록을 받지 않습니다.');
+    const phone = normalizePhone(phoneInput);
+    if (consent !== true) fail(400, 'need_consent', '문자 호출을 위해 개인정보 수집에 동의해 주세요.');
     const n = cleanNick(nick);
     if (!Number.isInteger(size) || size < 1 || size > 10) fail(400, 'bad_size', '인원은 1~10명으로 입력해 주세요.');
+    sweepWait();
+    if (get("SELECT 1 FROM waitlist WHERE phone=? AND status IN ('waiting','called')", phone)) fail(409, 'dup_phone', '이미 이 번호로 대기 중입니다.');
     if (get("SELECT COUNT(*) n FROM waitlist WHERE device=? AND status IN ('waiting','called')", device).n >= 3) fail(429, 'too_many', '이 기기에서 등록할 수 있는 대기 수를 넘었습니다.');
     if (get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n >= 300) fail(503, 'wait_full', '대기 명단이 가득 찼습니다.');
     const t = now();
@@ -2166,7 +2224,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     run("DELETE FROM waitlist WHERE status IN ('seated','cancelled','noshow') AND created_at<?", t - WAIT_KEEP_MS);
     waitTimes.push(t);
     const secret = crypto.randomBytes(12).toString('base64url');
-    const id = Number(run('INSERT INTO waitlist(nick,size,secret,device,created_at) VALUES(?,?,?,?,?)', n, size, secret, device, now()).lastInsertRowid);
+    const id = Number(run('INSERT INTO waitlist(nick,size,secret,device,created_at,phone) VALUES(?,?,?,?,?,?)', n, size, secret, device, now(), phone).lastInsertRowid);
+    invalidate();
     return { id, secret };
   }
   function waitRow(id, secret) {
@@ -2187,7 +2246,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   function waitCancel(id, secret) {
     const w = waitRow(id, secret);
-    if (w.status === 'waiting' || w.status === 'called' || w.status === 'noshow') run("UPDATE waitlist SET status='cancelled' WHERE id=?", id);
+    if (w.status === 'waiting' || w.status === 'called' || w.status === 'noshow') { run("UPDATE waitlist SET status='cancelled', phone=NULL WHERE id=?", id); invalidate(); }
   }
   function waitAction(id, action, opts = {}) {
     sweepWait();
@@ -2196,7 +2255,8 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (action === 'recall') { // a no-show may be called back once
       if (w.status !== 'noshow') fail(409, 'not_noshow', '미입장 처리된 대기만 다시 부를 수 있습니다.');
       if (w.recalled) fail(409, 'already_recalled', '이미 한 번 다시 불렀습니다.');
-      run("UPDATE waitlist SET status='called', called_at=?, recalled=1 WHERE id=?", now(), id);
+      tx(() => { run("UPDATE waitlist SET status='called', called_at=?, recalled=1, sms_state=NULL, sms_at=NULL WHERE id=?", now(), id); emit('wait_sms', { id }); });
+      invalidate();
       return {};
     }
     if (action === 'call' && w.status === 'noshow') fail(409, 'wait_noshow', '미입장 처리된 대기입니다. 다시 부르기(recall)를 사용하세요.');
@@ -2210,13 +2270,32 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
           partySet = true;
           audit('party_set', `table ${t.id}`, `people null→${w.size} (waitlist #${id})`, `${t.id}번 테이블 인원 입력(대기 입장) · ${w.size}명`);
         }
-        run("UPDATE waitlist SET status='seated', seated_table=? WHERE id=?", t.id, id);
+        run("UPDATE waitlist SET status='seated', seated_table=?, phone=NULL WHERE id=?", t.id, id);
+        invalidate();
         return { partySet, table: t.id };
       });
     }
     const to = { call: 'called', seat: 'seated', cancel: 'cancelled' }[action];
-    run('UPDATE waitlist SET status=?, called_at=? WHERE id=?', to, to === 'called' ? now() : w.called_at, id);
+    if (to === 'called') tx(() => { run("UPDATE waitlist SET status='called', called_at=?, sms_state=NULL, sms_at=NULL WHERE id=?", now(), id); emit('wait_sms', { id }); });
+    else run('UPDATE waitlist SET status=?, phone=NULL WHERE id=?', to, id);
+    invalidate();
     return {};
+  }
+  function waitSmsTarget(id) {
+    sweepWait();
+    const w = get("SELECT phone, called_at FROM waitlist WHERE id=? AND status='called' AND phone IS NOT NULL", id);
+    return w ? { phone: w.phone, minutes: waitTimeoutMin(), calledAt: w.called_at } : null;
+  }
+  function setWaitSms(id, ok, calledAt) {
+    const params = [ok ? 'sent' : 'failed', now(), id];
+    const sql = "UPDATE waitlist SET sms_state=?, sms_at=? WHERE id=? AND status='called'" + (calledAt == null ? '' : ' AND called_at=?');
+    if (calledAt != null) params.push(calledAt);
+    return run(sql, ...params).changes;
+  }
+  function queueWaitSms(id) {
+    sweepWait();
+    tx(() => { if (!get("SELECT 1 FROM waitlist WHERE id=? AND status='called' AND phone IS NOT NULL", id)) fail(409, 'not_called', '호출 중인 대기만 문자를 보낼 수 있습니다.'); emit('wait_sms', { id }); });
+    return { ok: true };
   }
 
   // ---------- snapshots ----------
@@ -2269,8 +2348,11 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       orders: loadOrders(all("SELECT o.* FROM orders o JOIN tables t ON t.id=o.table_id AND t.seat=o.seat WHERE t.id<=? AND (o.status!='cancelled' OR o.updated_at>?) ORDER BY o.id", tableCount, now() - 600000)),
       tables: tablesView(),
       calls: all('SELECT id, table_id, type, created_at FROM calls WHERE resolved_at IS NULL AND table_id BETWEEN 1 AND ? ORDER BY id', tableCount).map((c) => ({ id: c.id, table: c.table_id, type: c.type, createdAt: c.created_at })),
-      waitlist: (sweepWait(), all("SELECT * FROM waitlist WHERE status IN ('waiting','called','noshow') ORDER BY id").map((w) => ({ id: w.id, nick: w.nick, size: w.size, status: w.status, createdAt: w.created_at, calledAt: w.called_at, recalled: !!w.recalled }))),
+      waitlist: (sweepWait(), all("SELECT id,nick,size,status,created_at,called_at,recalled,phone,sms_state,sms_at FROM waitlist WHERE status IN ('waiting','called','noshow') ORDER BY id").map((w) => ({ id: w.id, nick: w.nick, size: w.size, status: w.status, createdAt: w.created_at, calledAt: w.called_at, recalled: !!w.recalled, phoneMasked: w.phone ? `${w.phone.slice(0, 3)}-****-${w.phone.slice(-4)}` : null, smsState: w.sms_state, smsAt: w.sms_at }))),
       waitCallTimeoutMin: waitTimeoutMin(),
+      waitAutoNext: waitAutoNext(),
+      waitSms: { configured: !!waitSmsUrl(), hint: waitSmsUrl() ? new URL(waitSmsUrl()).pathname.slice(-4) : '' },
+      boardShow: boardShow(),
       notice: bannerOut(),
       refunds: all('SELECT r.*, o.table_id, o.updated_at AS order_updated_at FROM refunds r JOIN orders o ON o.id=r.order_id ORDER BY (o.table_id=0), (r.done_at IS NULL) DESC, r.id DESC LIMIT 200').map(refundOut), // real refunds first: test ones can never push them out of the window
       coupons: all("SELECT c.* FROM coupons c JOIN tables t ON t.id=c.table_id AND t.seat=c.seat WHERE c.status='issued' AND t.id BETWEEN 1 AND ? ORDER BY c.created_at DESC", tableCount).map(couponOut),
@@ -2311,23 +2393,27 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
 
   function boardState() {
+    sweepWait();
     if (memo.board && now() - memo.boardAt < MEMO_MS) return memo.board;
+    const show = boardShow();
     const cur = hourStartOf(now());
     const g = {};
-    for (const name of Object.keys(games)) {
+    for (const name of show.games ? Object.keys(games) : []) {
       g[name] = all('SELECT table_id, nick, MAX(score) score, finished_at FROM plays WHERE game=? AND score IS NOT NULL AND table_id BETWEEN 1 AND ? GROUP BY table_id ORDER BY score DESC, finished_at LIMIT 10', name, tableCount)
         .map((r, i) => ({ rank: i + 1, table: r.table_id, nick: r.nick, score: r.score }));
     }
     const h = hourInfo(cur);
-    const p = hourInfo(cur - HOUR);
+    const p = show.hourly ? hourInfo(cur - HOUR) : null;
+    const ms = memberSettings();
     memo.boardAt = now();
     return memo.board = {
-      hour: { start: h.start, end: h.end, ranking: h.ranking, awarded: h.awarded },
-      prevHour: { start: p.start, winner: p.top, awarded: p.awarded },
-      hourly: hourlyReward(),
-      games: g,
-      gameInfo: games,
-      rewards: rewardsView().filter((r) => r.active).map((r) => ({ id: r.id, label: r.label, remaining: r.remaining, stock: r.stock })),
+      hour: { start: h.start, end: h.end, ranking: h.ranking, ...(show.hourly ? { awarded: h.awarded } : {}) },
+      ...(show.hourly ? { prevHour: { start: p.start, winner: p.top, awarded: p.awarded }, hourly: hourlyReward() } : {}),
+      ...(show.games ? { games: g, gameInfo: games } : {}),
+      ...(show.stock ? { rewards: rewardsView().filter((r) => r.active).map((r) => ({ id: r.id, label: r.label, remaining: r.remaining, stock: r.stock,
+        ...(show.rewardDetail ? { game: games[r.game]?.label || r.game, threshold: r.threshold, type: r.type, amount: r.amount } : {}) })) } : {}),
+      ...(show.member && ms.enabled && memberEnabled && (ms.mode === 'percent' ? ms.pct > 0 : ms.amount > 0) ? { member: { mode: ms.mode, pct: ms.pct, amount: ms.amount } } : {}),
+      ...(show.wait ? { wait: { open: waitOpen(), waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, calling: all("SELECT id FROM waitlist WHERE status='called' ORDER BY id LIMIT 6").map((r) => r.id) } } : {}),
       notice: bannerOut(),
     };
   }
@@ -2540,7 +2626,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     for (const t of ['order_items', 'orders', 'payments', 'seat_info', 'seat_coupon_limit', 'cover_intents', 'coupons', 'plays', 'nicks', 'calls', 'waitlist', 'deposit_notices', 'refunds', 'table_clears']) run(`DELETE FROM ${t}`); // notices go; the hook secret and pay settings stay
     run('UPDATE menu_items SET sold_out=0, stock_auto=0 WHERE 1'); // sold-out flags reset; stock counters keep their numbers
     run('UPDATE menu_items SET sold_out=1, stock_auto=1 WHERE stock_left=0'); // ...so an item that ran out by count stays sold out
-    run("DELETE FROM sqlite_sequence WHERE name IN ('cover_intents','orders','plays','calls','waitlist','deposit_notices','refunds','table_clears')");
+    run("DELETE FROM sqlite_sequence WHERE name IN ('cover_intents','orders','plays','calls','deposit_notices','refunds','table_clears')"); // wait IDs must not be reused while an SMS is queued
     run('UPDATE tables SET seat=1');
     run("DELETE FROM settings WHERE k IN ('ordering_open','wait_open','notice')");
     run('UPDATE rewards SET issued=0'); // definitions, active flags and configured stock stay; remaining returns to the configured stock
@@ -2628,8 +2714,15 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       return false;
     }
     fs.mkdirSync(dir, { recursive: true });
+    cleanBackupTemps(dir);
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').replace('.', '-').slice(0, 19);
-    await sqliteBackup(db, path.join(dir, `booth-${stamp}.db`));
+    const dest = path.join(dir, `booth-${stamp}.db`), tmp = dest + '.tmp';
+    try {
+      await sqliteBackup(db, tmp);
+      const copy = new DatabaseSync(tmp);
+      try { copy.exec('PRAGMA secure_delete=ON; UPDATE waitlist SET phone=NULL; VACUUM'); } finally { copy.close(); }
+      fs.renameSync(tmp, dest);
+    } catch (e) { try { fs.unlinkSync(tmp); } catch { /* absent */ } throw e; }
     const files = fs.readdirSync(dir).filter((f) => /^booth-\d{8}-\d{6}(-\d{3})?\.db$/.test(f)).sort();
     const stampMs = (f) => { const m = /^booth-(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d)/.exec(f); return Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]); };
     const older = files.slice(0, Math.max(0, files.length - keep));
@@ -2735,7 +2828,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     setCouponLimits, setSeatCouponLimit, couponLimits,
     setTableCount, rotateToken, tableCountNow: () => tableCount, payInfo, staffPay: payAll, setPay, setDepositor, ingestDeposit, previewDeposit, listDeposits, depositCounts, assignDeposit, attachDeposit, dismissDeposit, setAutoConfirm, depositSecret, rotateDepositSecret, checkDepositSecret, deviceSecret, setPhoto, deletePhoto, photosDir, createReward, updateReward, deleteReward, hourlyReward, setHourlyReward, memberSettings, setMemberSettings, listRewards, createItem, updateItem, deleteItem, createCategory, renameCategory, deleteCategory, reorderMenu, memberPct,
     startPlay, finishPlay, redeem, awardHour, setStock, setNick, addCall, resolveCall,
-    addWait, waitStatus, waitCancel, waitAction, setWaitOpen, clearWait, waitInfo,
+    addWait, waitStatus, waitCancel, waitAction, setWaitOpen, clearWait, waitInfo, normalizePhone, waitSmsUrl, setWaitSmsUrl, waitSmsTarget, setWaitSms, queueWaitSms, setWaitAutoNext, setBoardShow,
     newLoginKey, validLoginKey, loginKeyOk, loginKeyFail,
     guestState, staffState, kitchenState, boardState, clearTable, moveTable, sales, salesCsv, reset,
     newSession, validSession, endSession, tokens, guestTokens, testSettings, setTestSettings, rotateTestToken, resetTest, TEST_FAKE_MEMBER_ID, backup, orderById,
@@ -2743,4 +2836,4 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   };
 }
 
-module.exports = { createStore, HttpError, CALL_TYPES, parseDeposit, sameDepositor };
+module.exports = { createStore, HttpError, CALL_TYPES, parseDeposit, sameDepositor, normalizePhone };
