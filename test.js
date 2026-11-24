@@ -5727,13 +5727,13 @@ test('R3-3 board and wait payloads carry the staff notice; wait status exposes n
     assert.equal((await st()).canRecall, false);
     await s.post(`/api/staff/wait/${w.id}/call`, {});
     const db = dbOf(srv);
-    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(10 * 60000);
+    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(11 * 60000); // past the (now 10 min) default timeout, not on its edge
     let x = await st();
     assert.deepEqual([x.status, x.canRecall], ['noshow', true]);
     await s.post(`/api/staff/wait/${w.id}/recall`, {});
     x = await st();
     assert.deepEqual([x.status, x.canRecall], ['called', false]);
-    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(10 * 60000);
+    db.prepare('UPDATE waitlist SET called_at=called_at-?').run(11 * 60000); // past the (now 10 min) default timeout, not on its edge
     x = await st();
     assert.deepEqual([x.status, x.canRecall], ['noshow', false], 'recalled once already');
     db.close();
@@ -8549,7 +8549,7 @@ test('SMS phones: seat, guest/staff cancel, clear, reset and day close immediate
   });
 });
 
-test('SMS phone sweep retains only active calls and unrecalled no-shows within 30 minutes', async () => {
+test('SMS phone sweep retains only active calls and unrecalled no-shows within 30 minutes after their call ran out', async () => {
   await withWaitStore(async (store, db) => {
     store.setWaitAutoNext(false);
     const rows = Array.from({ length: 8 }, (_, i) => store.addWait('retention' + i, '손님', 1, waitPhone(), true));
@@ -8558,8 +8558,8 @@ test('SMS phone sweep retains only active calls and unrecalled no-shows within 3
     try {
       const update = db.prepare('UPDATE waitlist SET status=?, recalled=?, called_at=? WHERE id=?');
       update.run('called', 0, stamp, rows[1].id);
-      update.run('noshow', 0, stamp - 30 * 60000 + 1, rows[2].id);
-      update.run('noshow', 0, stamp - 30 * 60000 - 1, rows[3].id);
+      update.run('noshow', 0, stamp - (10 + 30) * 60000 + 1, rows[2].id); // spec change (review): window = call timeout (default 10) + 30 min, so a recall can still text
+      update.run('noshow', 0, stamp - (10 + 30) * 60000 - 1, rows[3].id);
       update.run('noshow', 1, stamp - 1000, rows[4].id);
       update.run('cancelled', 0, stamp, rows[5].id);
       update.run('seated', 0, stamp, rows[6].id);
@@ -8646,7 +8646,7 @@ test('SMS settings: HTTPS MacroDroid only, no credential echoes, audited once, t
   });
 });
 
-test('SMS sender: serial, at least 2500ms between starts, encoded fields, manual redirects and cancelled bodies', async () => {
+test('SMS sender: serial, at least 2500ms after the previous send finished, encoded fields, manual redirects and cancelled bodies', async () => {
   const { createSmsSender } = require('./sms');
   let clock = 0, active = 0, maxActive = 0, cancelled = 0;
   const starts = [], bodies = [], signals = [];
@@ -8660,7 +8660,7 @@ test('SMS sender: serial, at least 2500ms between starts, encoded fields, manual
   const target = () => ({ url: 'https://trigger.macrodroid.com/unit', phone: '01012345678', msg: '[컴히어] 1번 & ? # 입장' });
   const results = await Promise.all([sender.send(target, 1), sender.send(target, 2), sender.send(target, 3)]);
   assert.deepEqual(results, [{ ok: true }, { ok: false, error: '302' }, { ok: true }]);
-  assert.deepEqual(starts, [0, 2500, 5000]); assert.equal(maxActive, 1); assert.equal(cancelled, 3);
+  assert.deepEqual(starts, [0, 2600, 5200]); assert.equal(maxActive, 1); // spec change: the 2.5 s gap runs from the previous send's END (each mock send takes 100 ms) assert.equal(cancelled, 3);
   for (const url of bodies) { assert.equal(url.searchParams.get('phone'), '01012345678'); assert.equal(url.searchParams.get('msg'), target().msg); assert.equal(url.hash, ''); }
   assert.ok(signals.every((s) => s instanceof AbortSignal));
 });
@@ -9086,4 +9086,23 @@ test('SMS sender rechecks spacing if sleep wakes before the requested interval',
   const target = () => ({ url: 'https://trigger.macrodroid.com/unit', phone: waitPhone(), msg: '호출' });
   await Promise.all([sender.send(target, 1), sender.send(target, 2)]);
   assert.deepEqual(starts, [0, 2500]); assert.deepEqual(sleeps, [2500, 1]);
+});
+
+test('SMS review fixes: webhook URL with a port is refused; a second call tap neither re-texts nor restarts the timer; a no-show keeps its number for timeout + 30 min', async () => {
+  await withWaitStore(async (store, db) => {
+    assert.throws(() => store.setWaitSmsUrl('https://trigger.macrodroid.com:8443/x'), (e) => e.code === 'bad_sms_url');
+    store.setWaitAutoNext(false);
+    const w = store.addWait('fix-dev', '손님', 2, waitPhone(), true);
+    store.drainEvents();
+    store.waitAction(w.id, 'call');
+    assert.equal(store.drainEvents().filter((e) => e.type === 'wait_sms').length, 1);
+    const calledAt = db.prepare('SELECT called_at FROM waitlist WHERE id=?').get(w.id).called_at;
+    store.waitAction(w.id, 'call');
+    assert.equal(store.drainEvents().filter((e) => e.type === 'wait_sms').length, 0, 'no second text');
+    assert.equal(db.prepare('SELECT called_at FROM waitlist WHERE id=?').get(w.id).called_at, calledAt, 'timer not restarted');
+    db.prepare('UPDATE waitlist SET called_at=? WHERE id=?').run(Date.now() - 35 * 60000, w.id); // timed out 25 min ago
+    store.sweepWait();
+    const row = db.prepare('SELECT status, phone FROM waitlist WHERE id=?').get(w.id);
+    assert.equal(row.status, 'noshow'); assert.ok(row.phone, 'still reachable for one recall');
+  });
 });

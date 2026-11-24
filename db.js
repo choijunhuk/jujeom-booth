@@ -51,6 +51,7 @@ const SCHEMA = `
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 PRAGMA busy_timeout=5000;
+PRAGMA secure_delete=ON;
 CREATE TABLE IF NOT EXISTS tables(id INTEGER PRIMARY KEY, token TEXT NOT NULL UNIQUE, seat INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS orders(
   id INTEGER PRIMARY KEY AUTOINCREMENT, table_id INTEGER NOT NULL, seat INTEGER NOT NULL, key TEXT NOT NULL,
@@ -2184,7 +2185,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     if (value) {
       let u;
       try { u = new URL(value); } catch { fail(400, 'bad_sms_url', '문자 웹훅 주소가 올바르지 않습니다.'); }
-      if (u.protocol !== 'https:' || u.hostname !== 'trigger.macrodroid.com' || u.username || u.password || value.includes('?') || value.includes('#') || !u.pathname || u.pathname === '/') fail(400, 'bad_sms_url', '문자 웹훅 주소가 올바르지 않습니다.');
+      if (u.protocol !== 'https:' || u.hostname !== 'trigger.macrodroid.com' || u.username || u.password || u.port || value.includes('?') || value.includes('#') || !u.pathname || u.pathname === '/') fail(400, 'bad_sms_url', '문자 웹훅 주소가 올바르지 않습니다.');
     }
     tx(() => { run("INSERT INTO settings(k,v) VALUES('wait_sms_url',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", value); audit('wait_sms_url', 'settings', value ? 'configured' : 'cleared', `문자 웹훅 ${value ? '설정됨' : '해제'}`); });
     return { configured: !!value, hint: value ? new URL(value).pathname.slice(-4) : '' };
@@ -2215,7 +2216,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
           emit('wait_sms', { id: w.id });
         }
       }
-      const scrubbed = run("UPDATE waitlist SET phone=NULL WHERE phone IS NOT NULL AND NOT (status IN ('waiting','called') OR (status='noshow' AND recalled=0 AND called_at IS NOT NULL AND called_at>=?))", t - 30 * 60000).changes;
+      const scrubbed = run("UPDATE waitlist SET phone=NULL WHERE phone IS NOT NULL AND NOT (status IN ('waiting','called') OR (status='noshow' AND recalled=0 AND called_at IS NOT NULL AND called_at>=?))", t - (waitTimeoutMin() + 30) * 60000).changes; // a no-show keeps the number 30 min after its call ran out, so one recall can still text
       if (expired || scrubbed) emit('wait_changed', {});
       return expired + scrubbed;
     });
@@ -2231,14 +2232,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     const n = cleanNick(nick);
     if (!Number.isInteger(size) || size < 1 || size > 10) fail(400, 'bad_size', '인원은 1~10명으로 입력해 주세요.');
     sweepWait();
-    if (get("SELECT 1 FROM waitlist WHERE phone=? AND status IN ('waiting','called')", phone)) fail(409, 'dup_phone', '이미 이 번호로 대기 중입니다.');
     if (get("SELECT COUNT(*) n FROM waitlist WHERE device=? AND status IN ('waiting','called')", device).n >= 3) fail(429, 'too_many', '이 기기에서 등록할 수 있는 대기 수를 넘었습니다.');
     if (get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n >= 300) fail(503, 'wait_full', '대기 명단이 가득 찼습니다.');
     const t = now();
     while (waitTimes.length && waitTimes[0] < t - 60000) waitTimes.shift();
     if (waitTimes.length >= MAX_WAIT_PER_MIN) fail(429, 'wait_rate', '대기 등록이 몰리고 있습니다. 잠시 후 다시 시도해 주세요.');
     run("DELETE FROM waitlist WHERE status IN ('seated','cancelled','noshow') AND created_at<?", t - WAIT_KEEP_MS);
-    waitTimes.push(t);
+    waitTimes.push(t); // counted before the duplicate check: probing whether a number is waiting costs the same rate budget as registering
+    if (get("SELECT 1 FROM waitlist WHERE phone=? AND status IN ('waiting','called')", phone)) fail(409, 'dup_phone', '이미 이 번호로 대기 중입니다.');
     const secret = crypto.randomBytes(12).toString('base64url');
     const id = Number(run('INSERT INTO waitlist(nick,size,secret,device,created_at,phone) VALUES(?,?,?,?,?,?)', n, size, secret, device, now(), phone).lastInsertRowid);
     invalidate();
@@ -2275,6 +2276,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       invalidate();
       return {};
     }
+    if (action === 'call' && w.status === 'called') return {}; // a double tap or a second phone must not text twice or restart the timer; resend is its own route
     if (action === 'call' && w.status === 'noshow') fail(409, 'wait_noshow', '미입장 처리된 대기입니다. 다시 부르기(recall)를 사용하세요.');
     if (action === 'seat' && opts.table != null) { // seated at a table: the party size becomes that seat's headcount when it has none yet
       if (!Number.isInteger(opts.table) || opts.table < 1 || opts.table > tableCount) fail(400, 'bad_table', `테이블 번호는 1~${tableCount} 사이여야 합니다.`);

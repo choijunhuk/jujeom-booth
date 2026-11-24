@@ -192,6 +192,10 @@ const touchTable = (id) => touch('staff', 'kitchen', 'board', 'g:' + id);
 const touchAll = () => touch('staff', 'kitchen', 'board', 'g:*', 'w:*');
 const smsSender = createSmsSender();
 function sendWaitSms(id) {
+  try { return sendWaitSmsUnsafe(id).catch((e) => { console.error(`sms failed #${id} ${e.message}`); return { ok: false }; }); } // a DB error here must not fail the committed action or drop the other queued texts
+  catch (e) { console.error(`sms failed #${id} ${e.message}`); return Promise.resolve({ ok: false }); }
+}
+function sendWaitSmsUnsafe(id) {
   if (!store.waitSmsUrl()) return Promise.resolve({ skipped: true });
   const calledAt = store.waitSmsTarget(id)?.calledAt; // bind the queued call to this row version; reset may reuse an id
   if (calledAt == null) return Promise.resolve({ skipped: true });
