@@ -546,7 +546,7 @@
       '<label class="fld">쿠폰<select id="cc"></select></label><p class="note" id="clim" hidden></p><div class="cmp" id="ccmp" hidden></div>' +
       '<label class="fld"><span id="cdpl">입금자명</span><input id="cdp" maxlength="10" autocomplete="name" enterkeyhint="done" placeholder="예: 홍길동"></label><p class="note" style="margin:4px 0 0">보내는 분 이름과 같아야 입금이 자동 확인돼요</p>' +
       '<label class="fld">요청사항 (선택)<input id="cn" maxlength="100" placeholder="예: 덜 맵게" autocomplete="off"></label>' +
-      '<p class="note" id="cmin" hidden></p><div class="memrow" id="cnm" hidden><span id="cnmt"></span><span class="mr-btns"><button class="y2k-btn sm" data-a="mlogin">COMS 로그인</button><button class="y2k-btn sm" data-a="mrecheck">다시 확인</button></span></div>' +
+      '<p class="note" id="cmin" hidden></p><div class="memrow" id="cnm" hidden><span id="cnmt"></span><span class="mr-btns">' + (inlineLogin() ? '<button class="y2k-btn sm" data-a="mlogin">COMS 로그인</button>' : '<a class="y2k-btn sm" href="/" target="_blank" rel="noopener noreferrer">COMS 로그인</a>') + '<button class="y2k-btn sm" data-a="mrecheck">다시 확인</button></span></div>' +
       '<div class="sum"><span>상품 금액</span><span id="cs"></span></div><div class="sum" id="cmr"><span>COMS 회원 할인</span><span id="cm"></span></div><div class="sum" id="cdr"><span>쿠폰 할인</span><span id="cd"></span></div>' +
       '<div class="sum tot"><span>결제 금액</span><span id="ct"></span></div>' +
       '<button class="y2k-btn y2k-btn--primary big" id="csub" data-a="submit"></button><p class="err" id="cerr" role="alert"></p>');
@@ -741,15 +741,20 @@
       function () { openPay(S.orders.filter(function (x) { return x.id === o.id; })[0] || o, false); });
   }
   // COMS login in place. Posts to the COMS backend at the origin root (not the booth API); the booth server never sees the password.
+  // Only when the booth is served under a sub-path over HTTPS, i.e. behind the shared COMS proxy: opened directly (dev, bare host:port)
+  // /api/auth/login would be the booth listener itself and the password would go to the wrong server, maybe in clear text.
+  function inlineLogin() { return !!BASE && location.protocol === 'https:'; }
+  var loginBusy = false; // one attempt at a time across reopened sheets: a late response could otherwise overwrite a newer account's cookie
   function openLogin() {
+    if (!inlineLogin()) return;
     var sh = openSheet('COMS 로그인',
       '<h2>COMS 로그인</h2><p class="note" style="margin:-6px 0 4px">COMS 동아리 계정으로 로그인하면 회원 할인이 바로 적용돼요.</p>' +
-      '<form id="lf"><label class="fld">아이디(학번 또는 이메일)<input class="inp" id="li" maxlength="100" autocomplete="username" autocapitalize="off" spellcheck="false" aria-label="아이디(학번 또는 이메일)"></label>' +
+      '<form id="lf"><label class="fld">아이디(학번 또는 이메일)<input class="inp" id="li" maxlength="255" autocomplete="username" autocapitalize="off" spellcheck="false" aria-label="아이디(학번 또는 이메일)"></label>' +
       '<label class="fld">비밀번호<input class="inp" id="lp" type="password" maxlength="128" autocomplete="current-password" enterkeyhint="go" aria-label="비밀번호"></label>' +
       '<p class="err" id="le" role="alert"></p><button class="y2k-btn big" id="lb" type="submit">로그인</button></form>' +
       '<p class="note" style="margin:10px 0 0;text-align:center"><a href="/login" target="_blank" rel="noopener noreferrer">회원가입 · 비밀번호 찾기는 COMS 사이트에서</a></p>',
       function () { openCart(); });
-    var li = $('#li', sh), lp = $('#lp', sh), lb = $('#lb', sh), le = $('#le', sh), busy = false;
+    var li = $('#li', sh), lp = $('#lp', sh), lb = $('#lb', sh), le = $('#le', sh);
     var GENERIC = '로그인하지 못했어요. 잠시 후 다시 시도해 주세요.';
     li.focus();
     function live() { return document.body.contains(lb); }
@@ -762,26 +767,27 @@
       }
     }
     $('#lf', sh).addEventListener('submit', function (e) {
-      e.preventDefault(); if (busy) return;
+      e.preventDefault(); if (loginBusy) { fail('앞선 로그인을 처리하고 있어요. 잠시만 기다려 주세요'); return; }
       var id = li.value.trim(), pw = lp.value;
       if (!id || !pw) { fail('아이디와 비밀번호를 입력해 주세요'); return; }
-      busy = true; lb.disabled = true; fail('');
+      loginBusy = true; lb.disabled = true; fail('');
       fetch('/api/auth/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifier: id, password: pw, rememberMe: false }) })
         .then(function (res) {
           return res.json().then(function (d) { return d; }, function () { return null; }).then(function (d) { return { ok: res.ok, d: d }; });
         })
         .then(function (r) {
           lp.value = '';
-          if (r.ok) {
-            if (live()) closeSheet(); // the guest may have closed this sheet (and opened another) while the request was in flight
-            return checkMember(false).then(function () {
+          if (r.ok) { // confirm membership before the cart reopens, or its total is stale and checkout gets 409 price_changed
+            return checkMember(false).then(null, function () {}).then(function () {
+              if (live()) closeSheet(); // the guest may have closed this sheet (and opened another) while the request was in flight
               toast(isMember() ? '회원 확인됐어요. 할인이 적용돼요' : '로그인은 됐지만 회원 확인이 안 됐어요. 잠시 후 다시 확인을 눌러 주세요');
             });
           }
           var m = r.d && r.d.message;
           fail(typeof m === 'string' && /[가-힣]/.test(m) ? m.slice(0, 120) : GENERIC);
         }, function () { lp.value = ''; fail(GENERIC); })
-        .then(function () { busy = false; lb.disabled = false; if (live() && le.textContent) lp.focus(); });
+        .then(null, function () {}) // never leave the attempt locked
+        .then(function () { loginBusy = false; lb.disabled = false; if (live() && le.textContent) lp.focus(); });
     });
   }
   function askNick(cb) {
