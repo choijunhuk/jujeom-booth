@@ -1,13 +1,13 @@
 {
   "categories": ["세트", "식사", "안주"],
   "items": [
-    { "id": "set-ramen-sausage", "name": "라면 + 소세지 세트", "price": 12000, "cat": "세트", "desc": "라면 1개 + 의성 프랑크 2개 (따로 사면 13,000원)", "components": [{ "id": "ramen", "qty": 1 }, { "id": "sausage", "qty": 1 }] },
-    { "id": "set-modum", "name": "모둠 세트", "price": 19000, "cat": "세트", "desc": "소세지 + 피카츄 돈까스 + 나쵸 치즈 (따로 사면 21,000원)", "components": [{ "id": "sausage", "qty": 1 }, { "id": "donkatsu", "qty": 1 }, { "id": "nachos", "qty": 1 }] },
-    { "id": "ramen", "name": "라면", "price": 6000, "cat": "식사", "desc": "1개", "stock": 40 },
-    { "id": "odeng", "name": "어묵탕", "price": 13000, "cat": "안주", "desc": "어묵 250g, 큰 냄비", "stock": 16 },
-    { "id": "jeyuk", "name": "제육", "price": 13000, "cat": "안주", "desc": "250g", "stock": 24 },
-    { "id": "sausage", "name": "소세지", "price": 7000, "cat": "안주", "desc": "의성 프랑크 2개", "stock": 30 },
-    { "id": "nachos", "name": "나쵸 치즈", "price": 8000, "cat": "안주", "desc": "칩 110g + 치즈소스", "stock": 16 },
-    { "id": "donkatsu", "name": "피카츄 돈까스", "price": 6000, "cat": "안주", "desc": "2개", "stock": 30 }
+    { "id": "set-ramen-sausage", "name": "1촌 세트", "price": 12000, "cat": "세트", "desc": "라면 + 소시지 2개 (따로 사면 13,000원)", "components": [{ "id": "ramen", "qty": 1 }, { "id": "sausage", "qty": 1 }] },
+    { "id": "set-modum", "name": "파도타기 세트", "price": 19000, "cat": "세트", "desc": "소시지 2개 + 피카츄 돈까스 2개 + 나쵸 치즈 (따로 사면 21,000원)", "components": [{ "id": "sausage", "qty": 1 }, { "id": "donkatsu", "qty": 1 }, { "id": "nachos", "qty": 1 }] },
+    { "id": "ramen", "name": "PC방 라면", "price": 6000, "cat": "식사", "stock": 40 },
+    { "id": "odeng", "name": "포차 어묵탕", "price": 13000, "cat": "안주", "stock": 16 },
+    { "id": "jeyuk", "name": "술도둑 제육", "price": 13000, "cat": "안주", "stock": 24 },
+    { "id": "sausage", "name": "매점 소시지", "price": 7000, "cat": "안주", "desc": "2개", "stock": 30 },
+    { "id": "nachos", "name": "나쵸 치즈", "price": 8000, "cat": "안주", "stock": 16 },
+    { "id": "donkatsu", "name": "문방구 피카츄", "price": 6000, "cat": "안주", "desc": "2개", "stock": 30 }
   ]
 }
