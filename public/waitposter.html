@@ -14,7 +14,7 @@
   .wp-status { margin-bottom: 12px; overflow-wrap: anywhere; }
   .wp-origin { color: var(--accent); font-weight: 700; }
   .wp-poster {
-    width: 194mm; max-width: 100%; min-height: 280mm; margin: 0 auto;
+    width: 194mm; max-width: 100%; min-height: 262mm; margin: 0 auto;
     display: flex; flex-direction: column;
     border: 2px solid #000; background: #fff; color: #000; color-scheme: light;
     font-family: var(--y-font-ui); word-break: keep-all;
@@ -23,7 +23,7 @@
   .wp-title img { height: 16px; width: auto; filter: invert(1); }
   .wp-content {
     display: flex; flex: 1; flex-direction: column; justify-content: space-between;
-    gap: 4mm; padding: 5mm 7mm;
+    gap: 3mm; padding: 5mm 7mm;
   }
   .wp-hero {
     display: flex; justify-content: space-between; align-items: center; gap: 3mm;
@@ -34,11 +34,11 @@
   .wp-art { display: block; object-fit: contain; image-rendering: pixelated; }
   .wp-hourglass { width: 30mm; height: 30mm; }
   .wp-scan {
-    width: 144mm; max-width: 100%; margin: 0 auto;
+    width: 138mm; max-width: 100%; margin: 0 auto;
     padding: 0 3mm 2.5mm; text-align: center;
     border: 2px solid #000; box-shadow: 4px 4px var(--y-hot);
   }
-  .wp-qr { width: 136mm; max-width: 100%; aspect-ratio: 1; margin: auto; background: #fff; }
+  .wp-qr { width: 130mm; max-width: 100%; aspect-ratio: 1; margin: auto; background: #fff; }
   .wp-qr svg { display: block; width: 100%; height: 100%; }
   .wp-url {
     display: block; color: var(--y-title-a); overflow-wrap: anywhere;
@@ -85,7 +85,8 @@
     :root, body { margin: 0; color-scheme: light; background: #fff !important; color: #000 !important; }
     .noprint, .top, .strip, .dlg, #toasts { display: none !important; }
     .wp-main { width: 194mm; max-width: none; padding: 0; margin: 0; }
-    .wp-poster { margin: 0; break-inside: avoid; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    /* 262mm, not the 281mm the 8mm @page margin allows: browsers that add their own margins or headers/footers (Safari, up to ~12.7mm) or Letter paper must still get ONE page */
+    .wp-poster { margin: 0; height: 262mm; min-height: 0; overflow: hidden; break-inside: avoid; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
   }
 </style>
 </head>
