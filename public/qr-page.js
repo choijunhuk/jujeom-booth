@@ -15,17 +15,16 @@
   }
 
   // ---------- DOM card ----------
-  function half(c, flip) {
+  function cardEl(c) {
     var box = h('div', { class: 'qrbox', role: 'img', 'aria-label': c.caption + ' QR 코드' });
     box.innerHTML = QR.svg(c.url, { margin: 4 }); // SVG built locally by our own encoder; no user text is interpolated. 4-module quiet zone.
-    return h('div', { class: 'half' + (flip ? ' flip' : '') }, h('div', { class: 'win' },
+    return h('div', { class: 'card' }, h('div', { class: 'win' },
       h('div', { class: 'tbar' }, h('img', { src: SC.BASE + '/static/brand/coms-logo.svg', alt: '' }), h('span', { class: 'tt' }, 'COMHERE.exe'), h('span', { class: 'tb3', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'))),
-      h('div', { class: 'hbody' }, h('div', { class: 'id' }, h('span', { class: 'l' }, c.label), h('span', { class: 'n ' + c.cls }, c.big)), box),
+      h('div', { class: 'id' }, h('span', { class: 'l' }, c.label), h('span', { class: 'n ' + c.cls }, c.big)),
+      box,
       h('div', { class: 'cap' }, c.caption),
+      h('div', { class: 'sub' }, c.sub),
       h('div', { class: 'foot' }, "COM's")));
-  }
-  function cardEl(c) {
-    return h('div', { class: 'card' }, half(c, true), h('div', { class: 'fold', 'aria-hidden': 'true' }, h('span', null, '접는 선')), half(c, false));
   }
 
   // ---------- PNG rendering (canvas, white background) ----------
@@ -60,37 +59,37 @@
       var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
       var ctx = cv.getContext('2d');
       ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
-      function bottomHalf() { // one half, drawn at y 69..138 mm; the top half is this rotated 180 degrees about the card centre
-        var oy = 69, wx = 3, wy = oy + 3, ww = 89, wh = 63, tb = 6.4;
-        ctx.fillStyle = '#fff'; ctx.fillRect(wx * s, wy * s, ww * s, wh * s);
-        ctx.strokeStyle = '#000'; ctx.lineWidth = 0.55 * k; ctx.strokeRect(wx * s + ctx.lineWidth / 2, wy * s + ctx.lineWidth / 2, ww * s - ctx.lineWidth, wh * s - ctx.lineWidth);
-        ctx.fillStyle = '#000'; ctx.fillRect(wx * s, wy * s, ww * s, tb * s);
-        var lx = (wx + 1.6) * s;
-        if (logo) { // black logo recoloured white
-          var lh = 4.2 * s, lw = lh * logo.naturalWidth / logo.naturalHeight, t = document.createElement('canvas'); t.width = Math.ceil(lw); t.height = Math.ceil(lh);
-          var tc = t.getContext('2d'); tc.drawImage(logo, 0, 0, t.width, t.height); tc.globalCompositeOperation = 'source-in'; tc.fillStyle = '#fff'; tc.fillRect(0, 0, t.width, t.height);
-          ctx.drawImage(t, lx, (wy + (tb - 4.2) / 2) * s); lx += lw + 1.4 * s;
-        }
-        ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = fpx(16) + 'px ' + PIX;
-        ctx.fillText('COMHERE.exe', lx, (wy + tb / 2) * s + 2);
-        for (var i = 0; i < 3; i++) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5 * k; var bx = (wx + ww - 2 - (3 - i) * 3.1) * s; ctx.strokeRect(bx, (wy + tb / 2 - 1.2) * s, 2.4 * s, 2.4 * s); }
-        var cx = 26.5, cy = wy + tb + 20;
-        ctx.textAlign = 'center'; ctx.fillStyle = '#000';
-        ctx.font = '800 ' + Math.round(14 * k) + 'px ' + UI; ctx.fillText(c.label, cx * s, (wy + tb + 3.4) * s);
-        var css = c.cls === 'w' ? 60 : c.cls === 'd1' ? 128 : c.cls === 'd2' ? 96 : 64;
-        ctx.font = '900 ' + Math.round(css * k) + 'px ' + UI; // digits and Korean words both use the bold system face: the bitmap font's 4 reads as 9
-        ctx.fillText(c.big, cx * s, (oy + 33.5) * s);
-        drawQR(ctx, c.url, 48 * s, (wy + tb + 2.2) * s, 42 * s, 4);
-        ctx.font = '900 ' + Math.round(5.4 * s) + 'px ' + UI; ctx.fillText(c.caption, (wx + ww / 2) * s, (oy + 58.4) * s);
-        ctx.font = '700 ' + Math.round(11 * k) + 'px ' + UI; ctx.fillText("COM's", (wx + ww / 2) * s, (oy + 63.6) * s);
+      // mm layout mirrors qr.html: 3 mm margin, window 89 x 132, rows 24px bar / 30 id / 72 QR / 9 caption / 6.5 sub / foot
+      var wx = 3, wy = 3, ww = 89, wh = 132, tb = 24 / 3.7795, cx = wx + ww / 2;
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 2 * k; ctx.strokeRect(wx * s + ctx.lineWidth / 2, wy * s + ctx.lineWidth / 2, ww * s - ctx.lineWidth, wh * s - ctx.lineWidth);
+      ctx.fillStyle = '#000'; ctx.fillRect(wx * s, wy * s, ww * s, tb * s);
+      var lx = (wx + 1.6) * s;
+      if (logo) { // black logo recoloured white
+        var lh = 4.2 * s, lw = lh * logo.naturalWidth / logo.naturalHeight, t = document.createElement('canvas'); t.width = Math.ceil(lw); t.height = Math.ceil(lh);
+        var tc = t.getContext('2d'); tc.drawImage(logo, 0, 0, t.width, t.height); tc.globalCompositeOperation = 'source-in'; tc.fillStyle = '#fff'; tc.fillRect(0, 0, t.width, t.height);
+        ctx.drawImage(t, lx, (wy + (tb - 4.2) / 2) * s); lx += lw + 1.4 * s;
       }
-      bottomHalf();
-      ctx.save(); ctx.translate(W, H); ctx.rotate(Math.PI); bottomHalf(); ctx.restore();
-      ctx.strokeStyle = '#888'; ctx.lineWidth = 3; ctx.setLineDash([14, 10]);
-      ctx.beginPath(); ctx.moveTo(0, 69 * s); ctx.lineTo(W, 69 * s); ctx.stroke();
-      ctx.strokeRect(2, 2, W - 4, H - 4);
-      ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.fillRect(W / 2 - 4 * s, 69 * s - 1.8 * s, 8 * s, 3.6 * s);
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#666'; ctx.font = Math.round(2.4 * s) + 'px ' + UI; ctx.fillText('접는 선', W / 2, 69 * s);
+      ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = fpx(16) + 'px ' + PIX;
+      ctx.fillText('COMHERE.exe', lx, (wy + tb / 2) * s + 2);
+      for (var i = 0; i < 3; i++) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5 * k; var bx = (wx + ww - 2 - (3 - i) * 3.1) * s; ctx.strokeRect(bx, (wy + tb / 2 - 1.2) * s, 2.4 * s, 2.4 * s); }
+      // label + big number on one baseline, centred as a pair
+      var idTop = wy + tb, base = (idTop + 24) * s, gap = 3 * s;
+      var css = c.cls === 'w' ? 80 : c.cls === 'd3' ? 88 : 108;
+      var lf = '800 ' + Math.round(7 * s) + 'px ' + UI, nf = '900 ' + Math.round(css * k) + 'px ' + UI; // digits use the bold system face: the bitmap font's 4 reads as 9
+      ctx.font = lf; var lwid = ctx.measureText(c.label).width;
+      ctx.font = nf; var nwid = ctx.measureText(c.big).width;
+      var x0 = cx * s - (lwid + gap + nwid) / 2;
+      ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left'; ctx.fillStyle = '#000';
+      ctx.font = lf; ctx.fillText(c.label, x0, base);
+      ctx.font = nf; ctx.fillText(c.big, x0 + lwid + gap, base);
+      var qy = idTop + 30;
+      drawQR(ctx, c.url, (cx - 36) * s, qy * s, 72 * s, 4);
+      ctx.textAlign = 'center';
+      ctx.font = '900 ' + Math.round(6 * s) + 'px ' + UI; ctx.fillText(c.caption, cx * s, (qy + 72 + 8.4) * s);
+      ctx.textBaseline = 'middle';
+      ctx.font = '700 ' + Math.round(4 * s) + 'px ' + UI; ctx.fillText(c.sub, cx * s, (qy + 72 + 9 + 3.25) * s);
+      ctx.font = '700 ' + Math.round(11 * k) + 'px ' + UI; ctx.fillText("COM's", cx * s, (qy + 72 + 9 + 6.5 + (wy + wh - (qy + 72 + 15.5)) / 2) * s);
+      ctx.strokeStyle = '#888'; ctx.lineWidth = 3; ctx.setLineDash([14, 10]); ctx.strokeRect(2, 2, W - 4, H - 4); ctx.setLineDash([]); // cut line
       return cv;
     });
   }
@@ -185,7 +184,7 @@
       return el;
     });
     $('#cards').replaceChildren.apply($('#cards'), els);
-    var info = [h('p', { class: 'muted' }, '카드 ' + list.length + '장 (대기 1 + 테이블 ' + d.tables.length + '). 가운데 점선으로 접어 세우면 양쪽 손님이 읽을 수 있어요. 인쇄 설정에서 배율 100%(실제 크기), A4 세로로 인쇄하세요. 한 장에 4개씩 나와요.')];
+    var info = [h('p', { class: 'muted' }, '카드 ' + list.length + '장 (대기 1 + 테이블 ' + d.tables.length + '). 접지 않는 한 면 카드예요. 바깥 점선을 따라 잘라 코팅하세요 (A6 코팅지·A6 아크릴 꽂이에 맞는 크기). 무광 코팅이면 조명 반사가 적어 QR이 더 잘 찍혀요. 인쇄 설정에서 배율 100%(실제 크기), A4 세로로 인쇄하세요. 한 장에 4개씩 나와요.')];
     if (!d.origin) info.push(h('div', { class: 'warn' }, '서버에 PUBLIC_ORIGIN이 설정되어 있지 않아 지금 열린 주소(' + location.origin + ')로 QR을 만들었어요. 실제 행사 주소에서 이 페이지를 열어 인쇄해야 손님 휴대폰에서 열려요.'));
     SC.fill($('#info'), info);
     syncBar();
