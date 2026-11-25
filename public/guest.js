@@ -600,6 +600,7 @@
   var expectOverride = null;
   function submit() {
     if (sending || !S.orderingOpen) { expectOverride = null; return; }
+    if (loginBusy && !pend) { expectOverride = null; toast('회원 확인 중이에요. 잠시 후 다시 눌러 주세요'); return; } // total may still change once the new club login is verified
     if (!pend) {   // freeze body + key at first attempt; every retry (even after reload) resends exactly this
       var L = lines().filter(function (l) { return !l.soldOut; });
       if (!L.length) { expectOverride = null; return; }
