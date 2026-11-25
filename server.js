@@ -393,6 +393,7 @@ route('GET', '/staff/qr', (c) => servePage(c, 'qr.html'));
 route('GET', '/staff/flyer', (c) => servePage(c, 'flyer.html'));
 route('GET', '/staff/menuboard', (c) => servePage(c, 'menuboard.html'));
 route('GET', '/staff/waitposter', (c) => servePage(c, 'waitposter.html'));
+route('GET', '/staff/poster', (c) => servePage(c, 'poster.html'));
 route('GET', '/kitchen', (c) => servePage(c, 'kitchen.html'));
 route('GET', '/board', (c) => servePage(c, 'board.html'));
 route('GET', '/static/(.+)', serveStatic);

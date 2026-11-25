@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>부스 포스터 · COMHERE</title>
+<script src="__BASE__/static/base.js"></script>
+<script src="__BASE__/static/notify.js"></script>
+<link rel="stylesheet" href="__BASE__/static/brand/brand.css">
+<link rel="stylesheet" href="__BASE__/static/staff.css">
+<style>
+  .bp-main { max-width: calc(194mm + 24px); }
+  .bp-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .bp-controls label { display: grid; gap: 4px; font-weight: 700; }
+  .bp-controls input { min-width: 0; width: 100%; }
+  .bp-status { margin-bottom: 12px; overflow-wrap: anywhere; }
+  .bp-notice { color: var(--accent); font-weight: 700; }
+  .bp-poster {
+    width: 194mm; max-width: 100%; height: 250mm; margin: auto;
+    display: flex; flex-direction: column; padding: 4px; gap: 4px;
+    border: 2px solid #000; color: #090927; background: var(--y-face);
+    box-shadow: var(--y-bevel-out); color-scheme: light;
+    font-family: var(--y-font-ui); word-break: keep-all; overflow-wrap: anywhere;
+  }
+  .bp-title { min-height: 40px; padding: 3px 8px; }
+  .bp-title .y2k-tb { width: 27px; height: 24px; font-size: 17px; }
+  .bp-brand {
+    display: flex; align-items: center; justify-content: space-between; gap: 3mm;
+    padding: 2.5mm 5mm; color: #090927; background: var(--y-face-mid);
+    box-shadow: var(--y-bevel-in);
+  }
+  .bp-wordmark { font-size: 48px; line-height: 1; letter-spacing: -.025em; color: var(--y-title-a); }
+  .bp-identity { text-align: right; font-size: 16px; line-height: 1.35; }
+  .bp-identity p { color: #343449; }
+  .bp-hero {
+    flex: 1 1 auto; min-height: 0; position: relative; isolation: isolate; display: grid;
+    grid-template-columns: 3fr 2fr; align-items: center; overflow: hidden;
+    border: 2px solid #090927; background: #fffae8;
+    background-image: linear-gradient(#09092712 1px, transparent 1px), linear-gradient(90deg, #09092712 1px, transparent 1px);
+    background-size: 16px 16px;
+  }
+  .bp-hook { z-index: 1; padding: 5mm 0 5mm 6mm; }
+  .bp-warning { display: flex; align-items: center; gap: 10px; margin-bottom: 3mm; }
+  .bp-warning svg { width: 52px; height: 46px; flex: none; }
+  .bp-warning span {
+    background: var(--y-term-hi); border: 2px solid #090927; padding: 4px 8px;
+    box-shadow: 3px 3px #090927; line-height: 1;
+  }
+  .bp-hero h1 { font-size: 64px; line-height: 1.02; letter-spacing: -.045em; }
+  .bp-hero h1 span { display: block; }
+  .bp-artwork { position: relative; align-self: stretch; min-height: 0; }
+  .bp-artwork img { position: absolute; display: block; object-fit: contain; image-rendering: pixelated; }
+  .bp-bottle { inset: 3% 8% 3% 10%; width: 74%; height: 94%; }
+  .bp-sparkles { top: 9%; right: 7%; width: 24%; height: 28%; }
+  .bp-glasses { bottom: 6%; right: 6%; width: 41%; height: 28%; }
+  .bp-cover {
+    padding: 2mm 4mm 3mm; text-align: center; background: var(--y-lime);
+    border: 2px solid #090927; box-shadow: inset 0 0 0 2px #fff9;
+  }
+  .bp-price-label { font-size: 16px; font-weight: 850; line-height: 1.2; }
+  .bp-price {
+    display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline;
+    gap: 0 3mm; font-size: 30px; line-height: 1; font-weight: 900;
+  }
+  .bp-value { font-size: 88px; letter-spacing: -.065em; line-height: 1; white-space: nowrap; }
+  .bp-benefit { max-width: 100%; font-size: 22px; }
+  .bp-benefit::before { content: "· "; }
+  .bp-menu {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 1mm 4mm; align-items: baseline;
+    padding: 2mm 3mm; text-align: center; background: var(--y-face-mid); box-shadow: var(--y-bevel-in);
+  }
+  .bp-items { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 3mm; margin: 0; padding: 0; list-style: none; }
+  .bp-items li { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 39mm; font-size: 16px; font-weight: 750; }
+  .bp-reward { background: var(--y-hot); color: #080827; border: 1px solid currentColor; padding: 0 5px; font-size: 15px; font-weight: 900; }
+  .bp-scan {
+    display: grid; grid-template-columns: minmax(0, 1fr) max-content; align-items: center;
+    gap: 2mm; background: var(--y-title-a); color: #fff; border: 2px solid #090927;
+  }
+  .bp-scan-text { padding: 3mm; text-align: center; }
+  .bp-scan h2 { margin-bottom: 4mm; font-size: 48px; line-height: 1.1; }
+  .bp-scan h2 span { display: block; margin-bottom: 2mm; font: 800 22px/1.15 var(--y-font-ui); }
+  .bp-confirm {
+    min-width: 42mm; min-height: 12mm; color: #090927; background: var(--y-face);
+    outline: 1px dotted #090927; outline-offset: -6px;
+  }
+  .bp-qr { width: 76mm; aspect-ratio: 1; background: #fff; }
+  .bp-qr svg { display: block; width: 100%; height: 100%; }
+  .bp-event {
+    padding: 1.6mm 3mm; text-align: center; font-size: 16px; font-weight: 800;
+    line-height: 1.2; background: var(--y-face-mid); box-shadow: var(--y-bevel-in);
+  }
+  @media screen and (max-width: 745px) {
+    .bp-poster { height: auto; }
+    .bp-hero { min-height: 300px; }
+    .bp-value { font-size: clamp(44px, 12vw, 88px); }
+  }
+  @media screen and (max-width: 570px) {
+    .bp-controls { grid-template-columns: 1fr; }
+    .bp-brand { align-items: flex-start; flex-direction: column; gap: 4px; }
+    .bp-wordmark { font-size: 32px; }
+    .bp-identity { text-align: left; font-size: 14px; }
+    .bp-hero { min-height: 250px; }
+    .bp-hook { padding-left: 10px; }
+    .bp-hero h1 { font-size: 32px; }
+    .bp-warning svg { width: 36px; height: 32px; }
+    .bp-price { font-size: 21px; }
+    .bp-benefit { font-size: 18px; }
+    .bp-scan { grid-template-columns: 1fr; text-align: center; }
+    .bp-scan-text { padding: 12px 8px; }
+    .bp-scan h2 { font-size: 32px; }
+    .bp-qr { max-width: 100%; justify-self: center; }
+  }
+  @page { size: A4 portrait; margin: 8mm; }
+  @media print {
+    :root, body { margin: 0; color-scheme: light; background: #fff !important; }
+    .noprint, .top, .strip, .dlg, #toasts { display: none !important; }
+    .bp-main { width: 100%; max-width: 194mm; margin: 0 auto; padding: 0; }
+    /* Letter with two 12.7mm margins leaves 254mm of printable height. */
+    .bp-poster {
+      width: 100%; overflow: hidden; break-inside: avoid;
+      print-color-adjust: exact; -webkit-print-color-adjust: exact;
+    }
+  }
+</style>
+</head>
+<body>
+<noscript class="noprint"><p>이 페이지는 JavaScript가 필요합니다.</p></noscript>
+<div id="login" class="login noprint" hidden></div>
+<div id="app" hidden>
+  <main id="main" class="bp-main">
+    <div class="view-head noprint">
+      <h2>부스 포스터</h2>
+      <button class="btn btn-primary" id="bp-print" type="button" disabled>포스터 인쇄</button>
+    </div>
+    <div class="bp-controls noprint">
+      <label>날짜 <input id="fl-date" class="field" type="text" maxlength="60" placeholder="비워 두면 오늘 날짜"></label>
+      <label>시간 <input id="fl-time" class="field" type="text" maxlength="60"></label>
+      <label>장소 <input id="fl-location" class="field" type="text" maxlength="60"></label>
+    </div>
+    <div class="bp-status noprint" role="status">
+      <p class="muted">A4 세로 · 배율 100%(실제 크기) · 한 장</p>
+      <p id="bp-status"></p>
+      <p class="bp-notice" id="bp-origin" hidden></p>
+      <p class="bp-notice" id="bp-cover-off" hidden>입장료 받기가 꺼져 있어요. 이 상태에서도 설정된 금액이 0원보다 크면 포스터에 표시돼요.</p>
+    </div>
+    <article class="bp-poster" id="bp-poster" aria-labelledby="bp-heading" hidden>
+      <header class="bp-title y2k-title">
+        <span class="y2k-title-t">소주 무한.exe</span>
+        <span class="y2k-title-btns" aria-hidden="true"><span class="y2k-tb">_</span><span class="y2k-tb">□</span><span class="y2k-tb">×</span></span>
+      </header>
+      <div class="bp-brand">
+        <p class="bp-wordmark y2k-pixel">COMHERE</p>
+        <div class="bp-identity">
+          <strong>컴퓨터 동아리 COM's 주점</strong>
+          <p>접속 중… 그 시절 PC방 감성</p>
+        </div>
+      </div>
+      <div class="bp-hero">
+        <div class="bp-hook">
+          <p class="bp-warning">
+            <svg viewBox="0 0 52 46" aria-hidden="true" focusable="false">
+              <path d="M26 3 50 43H2Z" fill="#ffff55" stroke="#090927" stroke-width="3" stroke-linejoin="round"/>
+              <path d="M23 16h6l-1 13h-4zm1 17h4v4h-4z" fill="#090927"/>
+            </svg>
+            <span class="y2k-pixel">경고</span>
+          </p>
+          <h1 id="bp-heading" class="y2k-pixel"><span>소주가</span><span>무한입니다!</span></h1>
+        </div>
+        <div class="bp-artwork" aria-hidden="true">
+          <img class="bp-bottle" src="__BASE__/static/brand/deco/poster-bottle.png" alt="">
+          <img class="bp-sparkles" src="__BASE__/static/brand/deco/poster-sparkles.png" alt="">
+          <img class="bp-glasses" src="__BASE__/static/brand/deco/poster-glasses.png" alt="">
+        </div>
+      </div>
+      <section class="bp-cover" id="bp-cover" aria-label="입장료" hidden>
+        <p class="bp-price-label">입장료</p>
+        <p class="bp-price"><span id="bp-unit"></span><strong class="bp-value y2k-num" id="bp-value"></strong><span class="bp-benefit" id="bp-benefit" hidden></span></p>
+      </section>
+      <section class="bp-menu" id="bp-menu" aria-label="대표 메뉴와 게임 혜택" hidden>
+        <ul class="bp-items" id="bp-items" role="list" hidden></ul>
+        <p class="bp-reward" id="bp-reward" hidden></p>
+      </section>
+      <section class="bp-scan" aria-labelledby="bp-scan-title">
+        <div class="bp-scan-text">
+          <h2 id="bp-scan-title" class="y2k-pixel"><span>줄 서지 말고 QR로</span> 대기 등록</h2>
+          <a class="bp-confirm y2k-btn" id="bp-wait-link" aria-label="대기 등록 화면 열기">확인</a>
+        </div>
+        <div class="bp-qr" id="bp-qr" role="img" aria-label="대기 등록 QR 코드"></div>
+      </section>
+      <footer class="bp-event" id="bp-event"></footer>
+    </article>
+  </main>
+</div>
+<div id="toasts" class="noprint" role="status" aria-live="polite"></div>
+<script src="__BASE__/static/vendor/qr.js"></script>
+<script src="__BASE__/static/staff-common.js"></script>
+<script src="__BASE__/static/alarm.js"></script>
+<script src="__BASE__/static/shell.js"></script>
+<script src="__BASE__/static/print-common.js"></script>
+<script src="__BASE__/static/poster.js"></script>
+</body>
+</html>
