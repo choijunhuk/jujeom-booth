@@ -13,28 +13,21 @@
     return data.origin ? '' : '서버에 PUBLIC_ORIGIN이 설정되어 있지 않아 지금 열린 주소(' + location.origin + ')로 QR을 만들었어요. 실제 행사 주소에서 이 페이지를 열어 인쇄해야 손님 휴대폰에서 열려요.';
   }
 
-  function tableDesc(item, prices) {
-    if (!item.components || !item.components.length) return item.desc;
-    var total = item.components.reduce(function (sum, part) { return sum + prices.get(part.id) * part.qty; }, 0);
-    if (!Number.isFinite(total)) return item.desc;
-    var desc = (item.desc || '').replace(/\s*\(따로 사면 [\d,]+원\)\s*$/, '');
-    return (desc ? desc + ' ' : '') + '(따로 사면 ' + won(total) + ')';
-  }
-
+  // forTable: the table board stays on the table all day while prices are tuned live, so it prints no prices at all
+  // (not even a bundle's "(따로 사면 N원)"); the guest app shows the current ones.
   function menuSection(menu, forTable) {
     var items = menu.items.filter(function (item) { return !item.hidden && (forTable || !item.soldOut); });
-    var prices = forTable && new Map(menu.items.map(function (item) { return [item.id, item.price]; }));
     var groups = menu.categories.map(function (cat) {
       var group = items.filter(function (item) { return item.cat === cat; });
       if (!group.length) return null;
       return h('div', { class: 'fl-menu-group' },
         h('h3', { class: 'fl-category' }, cat),
         group.map(function (item) {
-          var desc = forTable ? tableDesc(item, prices) : item.components && item.desc;
+          var desc = forTable ? (item.desc || '').replace(/\s*\(따로 사면 [\d,]+원\)\s*$/, '') : item.components && item.desc;
           return h('div', { class: item.soldOut ? 'fl-item mb-sold' : 'fl-item' },
             h('div', { class: 'fl-item-line' },
               item.soldOut ? h('span', null, h('s', null, item.name), h('strong', { class: 'mb-sold-label' }, '품절')) : h('span', null, item.name),
-              h('span', { class: 'fl-price fl-num' }, won(item.price))),
+              forTable ? null : h('span', { class: 'fl-price fl-num' }, won(item.price))),
             desc ? h('p', { class: 'fl-desc' }, desc) : null);
         }));
     });

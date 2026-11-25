@@ -3,7 +3,7 @@
   'use strict';
   var SC = window.SC, h = SC.h, $ = SC.$, common = window.PrintCommon;
   var sheet = $('#mb-sheet'), picker = $('#mb-table'), all = $('#mb-all'), one = $('#mb-one');
-  var status = $('#mb-status'), origin = $('#mb-origin'), overflow = $('#mb-overflow');
+  var status = $('#mb-status'), origin = $('#mb-origin'), overflow = $('#mb-overflow'), coverOff = $('#mb-cover-off');
   var shell, gate, pending, lastSig = '', running = false, printing = false, requestingPrint = false;
   var printMq = window.matchMedia('print');
 
@@ -26,7 +26,15 @@
     overflow.hidden = !tooLong;
   }
 
-  function makePage(table, details) {
+  // Entrance fee is the one price the table board prints (menu prices stay in the guest app).
+  // Printed whenever an amount is set, even while charging is switched off: boards are printed before the event switches it on.
+  function coverLine(state) {
+    var c = state.cover;
+    if (!c || !(c.amount > 0)) return null;
+    return h('p', { class: 'mb-cover' }, c.label + ' ' + (c.mode === 'per_person' ? '1인당 ' : '테이블당 '), h('span', { class: 'y2k-num' }, SC.won(c.amount)));
+  }
+
+  function makePage(table, details, cover) {
     var qr = h('div', { class: 'mb-qr', role: 'img', 'aria-label': table.number + '번 테이블 주문 QR 코드' });
     qr.innerHTML = QR.svg(table.url, { margin: 4 });
     return h('article', { class: 'mb-page', dataset: { table: table.number } },
@@ -35,7 +43,7 @@
         h('span', { class: 'y2k-title-t' }, 'COMHERE.exe'),
         h('span', { class: 'y2k-title-btns', 'aria-hidden': 'true' },
           h('span', { class: 'y2k-tb' }, '_'), h('span', { class: 'y2k-tb' }, '□'), h('span', { class: 'y2k-tb' }, '×'))),
-      h('h1', { class: 'mb-number' }, h('span', { class: 'y2k-num' }, table.number), '번 테이블'),
+      h('div', { class: 'mb-number' }, h('h1', null, h('span', { class: 'y2k-num' }, table.number), '번 테이블'), cover && cover.cloneNode(true)),
       h('section', { class: 'mb-order' }, qr,
         h('div', { class: 'mb-order-copy' },
           h('h2', null, 'QR 찍고 바로 주문'),
@@ -69,11 +77,12 @@
     var warning = common.originWarning(data);
     var details = h('div', { class: 'mb-details' }, h('div', { class: 'mb-details-content' },
       common.menuSection(state.menu, true), common.prizeSection(state, rewards)));
-    var sig = JSON.stringify([tables, warning, details.innerHTML]);
+    var cover = coverLine(state);
+    var sig = JSON.stringify([tables, warning, details.innerHTML, cover && cover.textContent, !!(state.cover && state.cover.enabled)]);
     if (sig === lastSig) return;
 
     var selected = picker.value;
-    var pages = tables.map(function (table) { return makePage(table, details); });
+    var pages = tables.map(function (table) { return makePage(table, details, cover); });
     SC.fill(picker, h('option', { value: '' }, '전체'), tables.map(function (table) {
       return h('option', { value: table.number }, table.number + '번');
     }));
@@ -81,6 +90,7 @@
     sheet.replaceChildren.apply(sheet, pages);
     origin.textContent = warning;
     origin.hidden = !warning;
+    coverOff.hidden = !(cover && !state.cover.enabled);
     lastSig = sig;
     selectTable();
     document.fonts.ready.then(function () { if (!inPrint()) fit(); });

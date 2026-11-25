@@ -28,9 +28,12 @@
   .mb-title img { height: 16px; width: auto; filter: invert(1); }
   .mb-number {
     padding: 2mm 5mm; background: var(--y-face-mid); border-bottom: 1px solid var(--y-face-lo);
-    display: flex; align-items: baseline; gap: 8px; font-size: 26px; line-height: 1;
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 26px; line-height: 1;
   }
-  .mb-number .y2k-num { font-size: 66px; font-weight: 900; }
+  .mb-number h1 { display: flex; align-items: baseline; gap: 8px; margin: 0; font: inherit; }
+  .mb-number h1 .y2k-num { font-size: 66px; font-weight: 900; }
+  .mb-cover { margin: 0; font-size: 22px; font-weight: 900; white-space: nowrap; }
+  .mb-cover .y2k-num { font-size: 34px; font-weight: 900; }
   .mb-order {
     display: grid; grid-template-columns: 96mm minmax(0, 1fr); align-items: center;
     column-gap: 4mm; margin: 4mm; padding: 2mm;
@@ -53,7 +56,7 @@
   .mb-details .fl-menu-group { break-inside: auto; }
   .mb-details .fl-category { background: var(--y-face-mid); padding-inline: .35em; font-size: max(9px, .83em); }
   .mb-details .fl-desc { font-size: max(9px, .82em); }
-  .mb-sold .fl-price, .mb-sold .fl-desc { text-decoration: line-through; }
+  .mb-sold .fl-desc { text-decoration: line-through; }
   .mb-sold-label { margin-left: .35em; padding: 0 .2em; border: 1px solid currentColor; font-size: max(9px, .75em); white-space: nowrap; }
   .mb-details .fl-prizes { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: .6em; word-break: keep-all; }
   .mb-footer { padding: 2mm 4mm; text-align: center; font-size: 12px; font-weight: 800; letter-spacing: .12em; }
@@ -97,6 +100,7 @@
       <p class="muted">A4 세로 · 배율 100%(실제 크기) · 테이블마다 한 장</p>
       <p id="mb-status"></p>
       <p class="mb-warning" id="mb-origin" hidden></p>
+      <p class="mb-warning" id="mb-cover-off" hidden>입장료 받기가 지금 꺼져 있지만 설정된 금액을 인쇄해요. 행사 때 켜지 않을 거면 설정에서 금액을 0원으로 바꾼 뒤 인쇄하세요.</p>
       <p class="mb-warning" id="mb-overflow" hidden>메뉴·상품이 한 장에 다 들어가지 않아 일부 항목이 잘려요.</p>
     </div>
     <div class="mb-sheet" id="mb-sheet"></div>
