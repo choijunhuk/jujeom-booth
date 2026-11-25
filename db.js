@@ -1162,7 +1162,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   // ======================= headcount, cover charge (입장료), share payments (각자 내기) =======================
   const PEOPLE_MAX = 30;
   const OPEN_INTENT_MS = 30 * 60000;
-  const COVER_DEFAULT = { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료' };
+  const COVER_DEFAULT = { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료', maxPeople: 0 }; // maxPeople 0 = no per-table limit
   function coverSettings() {
     const v = setting('cover', null);
     try { return { ...COVER_DEFAULT, ...(v ? JSON.parse(v) : {}) }; } catch { return { ...COVER_DEFAULT }; }
@@ -1170,7 +1170,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   function setCoverSettings(body) {
     const cur = coverSettings();
     const has = (k) => Object.hasOwn(body, k);
-    if (!['enabled', 'mode', 'amount', 'requireBeforeOrder', 'askGuest', 'label'].some(has)) fail(400, 'nothing_to_update', '바꿀 항목이 없습니다.');
+    if (!['enabled', 'mode', 'amount', 'requireBeforeOrder', 'askGuest', 'label', 'maxPeople'].some(has)) fail(400, 'nothing_to_update', '바꿀 항목이 없습니다.');
     const next = { ...cur };
     for (const [k, code] of [['enabled', 'bad_enabled'], ['requireBeforeOrder', 'bad_require_before_order'], ['askGuest', 'bad_ask_guest']]) {
       if (has(k)) { if (typeof body[k] !== 'boolean') fail(400, code, `${k}는 true/false여야 합니다.`); next[k] = body[k]; }
@@ -1181,10 +1181,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       next.amount = body.amount;
     }
     if (has('label')) next.label = cleanLabel(body.label, 1, 12, 'bad_label', '입장료 이름');
+    if (has('maxPeople')) {
+      if (!Number.isInteger(body.maxPeople) || body.maxPeople < 0 || body.maxPeople > PEOPLE_MAX) fail(400, 'bad_max_people', `테이블당 최대 인원은 0~${PEOPLE_MAX}명 사이 정수여야 합니다 (0 = 제한 없음).`);
+      next.maxPeople = body.maxPeople;
+    }
     tx(() => {
       run("INSERT INTO settings(k,v) VALUES('cover',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", JSON.stringify(next));
       const ch = Object.keys(next).filter((k) => next[k] !== cur[k]);
-      const KOF = { enabled: '사용', mode: '방식', amount: '금액', requireBeforeOrder: '주문 전 인원 필수', askGuest: '손님에게 묻기', label: '이름' };
+      const KOF = { enabled: '사용', mode: '방식', amount: '금액', requireBeforeOrder: '주문 전 인원 필수', askGuest: '손님에게 묻기', label: '이름', maxPeople: '테이블당 최대 인원' };
       audit('cover_settings', 'settings', ch.map((k) => `${k} ${cur[k]}→${next[k]}`).join(', ') || 'no change',
         `입장료 설정 · ${next.enabled ? '켜짐' : '꺼짐'} · ${next.mode === 'per_person' ? '1인당' : '테이블당'} ${W(next.amount)}${ch.length ? ` · 바뀐 항목: ${ch.map((k) => KOF[k]).join(', ')}` : ''}`);
     });
@@ -1252,12 +1256,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
     return cur ? cur.people : null;
   }
   const checkPeople = (p) => { if (!Number.isInteger(p) || p < 1 || p > PEOPLE_MAX) fail(400, 'bad_people', `인원은 1~${PEOPLE_MAX}명 사이 정수여야 합니다.`); return p; };
+  // the per-table limit binds guests (headcount answer, waitlist sign-up); staff may still enter more (they decide at the booth)
+  const checkMaxPeople = (p) => { const m = coverSettings().maxPeople; if (m && p > m) fail(400, 'over_max_people', `한 테이블은 최대 ${m}명까지예요. 더 많으면 직원에게 말씀해 주세요.`, { max: m }); return p; };
   function partyOut(t) {
     const r = seatRow(t.id, t.seat);
     const people = r ? r.people : null;
     const cs = coverSettings();
     const required = cs.enabled && cs.requireBeforeOrder; // when the requirement is on, guests can ALWAYS answer (they would otherwise be stuck without staff)
-    return { seat: t.seat, people, askGuest: cs.askGuest, required, canSet: people == null && (cs.askGuest || required), updatedAt: r ? r.updated_at : 0, seatedAt: r ? r.seated_at : null, setBy: r ? r.set_by ?? null : null, setAt: r ? r.set_at ?? null : null };
+    return { seat: t.seat, people, max: cs.maxPeople || null, askGuest: cs.askGuest, required, canSet: people == null && (cs.askGuest || required), updatedAt: r ? r.updated_at : 0, seatedAt: r ? r.seated_at : null, setBy: r ? r.set_by ?? null : null, setAt: r ? r.set_at ?? null : null };
   }
   function setPartyGuest(tableId, people, seat) {
     checkPeople(people);
@@ -1268,6 +1274,7 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
       if (seatPeople(t.id, t.seat) != null) fail(409, 'party_set', '이미 인원 수를 알려 주셨어요. 바꿀 일이 있으면 직원에게 말씀해 주세요.');
       const cs = coverSettings();
       if (!cs.askGuest && !(cs.enabled && cs.requireBeforeOrder)) fail(403, 'party_not_asked', '인원 수는 직원이 입력합니다.');
+      checkMaxPeople(people);
       applyPeople(t, people, now(), 'guest');
       audit('party_set', `table ${t.id}`, `people null→${people} (guest)`, `${t.id}번 테이블 인원 입력(손님) · ${people}명`);
       return { party: partyOut(t) };
@@ -2229,13 +2236,14 @@ function createStore({ dataDir, menu, rewards, tableCount, limits = {}, maxDbByt
   }
   function clearWait() { const n = run("UPDATE waitlist SET status='cancelled', phone=NULL WHERE status IN ('waiting','called','noshow')").changes; if (n) invalidate(); return n; }
   const checkpointWaitPhones = () => { db.exec('PRAGMA busy_timeout=0'); try { if (db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()?.busy) console.warn('wal checkpoint busy; retrying next sweep'); } finally { db.exec('PRAGMA busy_timeout=5000'); } }; // never stall the event loop on a reader; the next 30 s tick retries
-  const waitInfo = () => { sweepWait(); return { open: waitOpen(), sms: !!waitSmsUrl(), waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, notice: bannerOut() }; };
+  const waitInfo = () => { sweepWait(); return { open: waitOpen(), sms: !!waitSmsUrl(), waitingTotal: get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n, maxPeople: coverSettings().maxPeople || null, notice: bannerOut() }; };
   function addWait(device, nick, size, phoneInput, consent) {
     if (!waitOpen()) fail(403, 'wait_closed', '지금은 대기 등록을 받지 않습니다.');
     const phone = normalizePhone(phoneInput);
     if (consent !== true) fail(400, 'need_consent', '문자 호출을 위해 개인정보 수집에 동의해 주세요.');
     const n = cleanNick(nick);
     if (!Number.isInteger(size) || size < 1 || size > 10) fail(400, 'bad_size', '인원은 1~10명으로 입력해 주세요.');
+    checkMaxPeople(size);
     sweepWait();
     if (get("SELECT COUNT(*) n FROM waitlist WHERE device=? AND status IN ('waiting','called')", device).n >= 3) fail(429, 'too_many', '이 기기에서 등록할 수 있는 대기 수를 넘었습니다.');
     if (get("SELECT COUNT(*) n FROM waitlist WHERE status='waiting'").n >= 300) fail(503, 'wait_full', '대기 명단이 가득 찼습니다.');

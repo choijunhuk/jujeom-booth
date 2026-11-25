@@ -890,6 +890,7 @@
     var dirty = false, enabled = false, mode = 'per_person', requireB = false, askG = true;
     var amountIn = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '0', max: '100000', step: '100', 'aria-label': '입장료 금액(원)', oninput: function () { dirty = true; ex(); } });
     var labelIn = h('input', { class: 'field', type: 'text', maxlength: '12', 'aria-label': '입장료 이름', oninput: function () { dirty = true; ex(); } });
+    var maxIn = h('input', { class: 'field', type: 'number', inputmode: 'numeric', min: '0', max: '30', step: '1', 'aria-label': '테이블당 최대 인원', oninput: function () { dirty = true; } });
     var example = h('p', { class: 'sheet-note info' }), err = h('div'), cfgNow = null;
     function tog(label, sub, get, set) {
       var b = h('button', { class: 'btn al-sw', type: 'button', onclick: function () { if (b.disabled) return; set(!get()); dirty = true; b.refresh(); ex(); } });
@@ -912,6 +913,8 @@
       var a = Number(amountIn.value), l = labelIn.value.trim();
       if (!Number.isInteger(a) || a < 0 || a > 100000 || a % 100 !== 0) { SC.fill(err, note('bad', '금액은 100원 단위, 0~100,000원이에요.')); return Promise.resolve(); }
       if (l.length < 1 || l.length > 12) { SC.fill(err, note('bad', '이름은 1~12자로 입력해 주세요.')); return Promise.resolve(); }
+      var mx = Number(maxIn.value || 0);
+      if (!Number.isInteger(mx) || mx < 0 || mx > 30) { SC.fill(err, note('bad', '테이블당 최대 인원은 0~30명이에요 (0 = 제한 없음).')); return Promise.resolve(); }
       if (enabled && a === 0) { SC.fill(err, note('bad', '금액이 0원이면 입장료 주문이 만들어지지 않아요. 금액을 넣거나 입장료를 꺼 주세요.')); return Promise.resolve(); }
       SC.fill(err);
       var c = cfgNow || {}, diff = {};
@@ -921,17 +924,18 @@
       if (l !== c.label) diff.label = l;
       if (requireB !== !!c.requireBeforeOrder) diff.requireBeforeOrder = requireB;
       if (askG !== (c.askGuest !== false)) diff.askGuest = askG;
+      if (mx !== (c.maxPeople || 0)) diff.maxPeople = mx;
       if (!Object.keys(diff).length) { SC.toast('바뀐 내용이 없어요.'); return Promise.resolve(); }
       return X.api('/api/staff/cover/settings', diff).then(function () { dirty = false; SC.toast('입장료 설정을 저장했어요', 'ok'); return X.refresh(); });
     });
     var el0 = h('div', { class: 'card' }, tEn.row, h('div', { class: 'lab' }, '방식', modeSeg), h('label', { class: 'lab' }, '금액 (100원 단위)', amountIn), h('label', { class: 'lab' }, '이름 (기본 "입장료")', labelIn), example,
-      tReq.row, tAsk.row, err, save, note('info', '설정을 바꿔도 이미 앉은 테이블의 입장료는 그대로예요. 새로 앉는 테이블부터 적용돼요.'));
+      tReq.row, tAsk.row, h('label', { class: 'lab' }, '테이블당 최대 인원 (0 = 제한 없음 · 손님 입력과 대기 등록에 적용, 직원 입력은 제한 없음)', maxIn), err, save, note('info', '설정을 바꿔도 이미 앉은 테이블의 입장료는 그대로예요. 새로 앉는 테이블부터 적용돼요.'));
     return { el: el0, update: function (d) {
       var c = d.cover || { enabled: false, mode: 'per_person', amount: 0, label: '입장료', requireBeforeOrder: false, askGuest: true };
       cfgNow = c;
       if (!dirty && !el0.contains(document.activeElement)) {
         enabled = !!c.enabled; mode = c.mode || 'per_person'; requireB = !!c.requireBeforeOrder; askG = c.askGuest !== false;
-        amountIn.value = String(c.amount || 0); labelIn.value = c.label || '입장료';
+        amountIn.value = String(c.amount || 0); labelIn.value = c.label || '입장료'; maxIn.value = String(c.maxPeople || 0);
         tEn.b.refresh(); tReq.b.refresh(); tAsk.b.refresh(); ex();
       }
     } };

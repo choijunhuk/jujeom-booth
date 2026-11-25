@@ -4,7 +4,7 @@
   var SC = window.SC, h = SC.h, $ = SC.$;
   var KEY = 'booth_wait';
   var main = $('#main'), calledEl = $('#called'), connEl = $('#conn');
-  var entry = null, live = null, prevStatus = null, vibTimer = 0, size = 2, infoTimer = 0;
+  var entry = null, live = null, prevStatus = null, vibTimer = 0, size = 2, maxSize = 10, infoTimer = 0;
 
   SC.wake.active = function () { return !!entry; }; // keep the screen on only while waiting
   function save(v) { try { if (v) localStorage.setItem(KEY, JSON.stringify(v)); else localStorage.removeItem(KEY); } catch (e) { /* storage blocked */ } }
@@ -47,7 +47,8 @@
     var hint = h('p', { class: 'hint' }, '이 화면을 열어 두면 호출 때 알려드려요.');
     var out = h('output', { class: 'lcd-sm', 'aria-live': 'polite' }, String(size), h('small', null, '명'));
     var err = h('p', { class: 'err', role: 'alert' }, msg || '');
-    function setSize(n) { size = Math.max(1, Math.min(10, n)); out.firstChild.textContent = String(size); minus.disabled = size <= 1; plus.disabled = size >= 10; }
+    var maxNote = h('p', { class: 'hint', hidden: true });
+    function setSize(n) { size = Math.max(1, Math.min(maxSize, n)); out.firstChild.textContent = String(size); minus.disabled = size <= 1; plus.disabled = size >= maxSize; }
     var minus = h('button', { class: 'y2k-btn', type: 'button', 'aria-label': '인원 줄이기', onclick: function () { setSize(size - 1); } }, '−');
     var plus = h('button', { class: 'y2k-btn', type: 'button', 'aria-label': '인원 늘리기', onclick: function () { setSize(size + 1); } }, '+');
     var go = h('button', { class: 'y2k-btn y2k-btn--primary', type: 'submit' }, '대기 등록');
@@ -67,7 +68,7 @@
       });
     } },
       h('label', { class: 'lab' }, '이름 (닉네임)', nick),
-      h('div', { class: 'lab' }, '인원', h('div', { class: 'stepper' }, minus, out, plus)),
+      h('div', { class: 'lab' }, '인원', h('div', { class: 'stepper' }, minus, out, plus)), maxNote,
       h('label', { class: 'lab' }, '휴대폰 번호', phone),
       h('label', { class: 'consent' }, consent, consentText),
       err, go, hint);
@@ -76,6 +77,7 @@
     setSize(size);
     function applyInfo(i) {
       setNotice(i.notice);
+      maxSize = Math.min(10, i.maxPeople || 10); setSize(size); maxNote.textContent = i.maxPeople ? '한 테이블은 최대 ' + i.maxPeople + '명까지예요.' : ''; maxNote.hidden = !i.maxPeople;
       hint.textContent = i.sms ? '호출되면 문자로도 알려드려요. 이 화면과 진동으로도 알려 드려요.' : '이 화면을 열어 두면 호출 때 알려드려요.';
       form.hidden = !i.open;
       notice.className = i.open ? 'w-sub' : 'err';

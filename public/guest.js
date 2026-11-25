@@ -328,6 +328,7 @@
   function coverOrder() { return S.orders.filter(function (o) { return o.kind === 'cover'; })[0] || null; }
   function foodOrders() { return S.orders.filter(function (o) { return o.kind !== 'cover'; }); }
   function pdKey() { return 'jb:pd:' + TOKEN + ':' + (S ? S.table.seat : 0); }
+  function partyMax() { return (S && S.party && S.party.max) || 30; }
   function stepHtml(act, n, unit) {
     return '<div class="bigstep"><button class="y2k-btn" data-a="' + act + '-dec" aria-label="하나 줄이기">&minus;</button><output aria-live="polite"><span class="y2k-pixel--3x n">' + n + '</span><span class="u">' + unit + '</span></output><button class="y2k-btn" data-a="' + act + '-inc" aria-label="하나 늘리기">+</button></div>';
   }
@@ -342,8 +343,8 @@
     renderParty(cv);
   }
   function renderParty(cv) {
-    var b = $('#partybody'); if (!b) return; if (cv === undefined) cv = S.cover && S.cover.enabled;
-    b.innerHTML = '<h2>몇 명이세요?</h2><p class="note" style="margin:-4px 0 10px">' + (cv ? '입장료와 자리 안내에 써요.' : '자리 안내에 써요.') + (pendingAfterParty ? ' 인원을 알려 주시면 주문이 이어져요.' : '') + '</p>' + stepHtml('pt', partyN, '명') + '<p class="err" id="pterr" role="alert"></p><div class="two">' + (pendingAfterParty ? '' : '<button class="y2k-btn big" data-a="pt-later">나중에</button>') + '<button class="y2k-btn big" data-a="pt-ok">확인</button></div><p class="note" style="margin-top:8px">인원이 바뀌면 직원에게 말씀해 주세요.</p>';
+    var b = $('#partybody'); if (!b) return; if (cv === undefined) cv = S.cover && S.cover.enabled; partyN = Math.min(partyN, partyMax());
+    b.innerHTML = '<h2>몇 명이세요?</h2><p class="note" style="margin:-4px 0 10px">' + (cv ? '입장료와 자리 안내에 써요.' : '자리 안내에 써요.') + (pendingAfterParty ? ' 인원을 알려 주시면 주문이 이어져요.' : '') + '</p>' + stepHtml('pt', partyN, '명') + (S.party && S.party.max ? '<p class="note">한 테이블은 최대 ' + S.party.max + '명까지예요. 더 많으면 직원에게 말씀해 주세요.</p>' : '') + '<p class="err" id="pterr" role="alert"></p><div class="two">' + (pendingAfterParty ? '' : '<button class="y2k-btn big" data-a="pt-later">나중에</button>') + '<button class="y2k-btn big" data-a="pt-ok">확인</button></div><p class="note" style="margin-top:8px">인원이 바뀌면 직원에게 말씀해 주세요.</p>';
   }
   function setParty() {
     api('/party', { people: partyN, seat: S.party && S.party.seat != null ? S.party.seat : S.table.seat }).then(function (r) {
@@ -969,7 +970,7 @@
       case 'notice': if (S.notice && S.notice.text) openSheet('공지', '<p style="font-size:18px;line-height:1.5;white-space:pre-wrap">' + esc(S.notice.text) + '</p><button class="y2k-btn big" style="margin-top:14px" data-a="sclose">확인</button>'); break;
       case 'pt-open': openParty(); break;
       case 'pt-dec': partyN = Math.max(1, partyN - 1); renderParty(); break;
-      case 'pt-inc': partyN = Math.min(30, partyN + 1); renderParty(); break;
+      case 'pt-inc': partyN = Math.min(partyMax(), partyN + 1); renderParty(); break;
       case 'pt-later': closeSheet(); break;
       case 'pt-ok': setParty(); break;
       case 'sh-open': openShare(); break;

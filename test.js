@@ -1432,7 +1432,7 @@ test('waitlist switch: closing refuses registrations, clear cancels everyone', a
     const w1 = await a.post('/api/wait', { phone: waitPhone(), consent: true, nick: '가', size: 2 });
     const w2 = await b.post('/api/wait', { phone: waitPhone(), consent: true, nick: '나', size: 2 });
     assert.equal(w1.status, 201);
-    assert.deepEqual((await a.get('/api/wait/info')).json, { open: true, sms: false, waitingTotal: 2, notice: null });
+    assert.deepEqual((await a.get('/api/wait/info')).json, { open: true, sms: false, waitingTotal: 2, maxPeople: null, notice: null });
     assert.equal((await s.get('/api/staff/state')).json.waitOpen, true);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: 'no' })).status, 400);
     assert.equal((await s.post('/api/staff/waitlist/open', { open: false })).json.waitOpen, false);
@@ -6009,6 +6009,30 @@ test('I1 guest headcount: once per seating (1..30), the askGuest switch, snapsho
   });
 });
 
+test('I1 per-table max people: guests and waitlist capped, staff may exceed, 0 lifts it', async () => {
+  await withBooth(async ({ srv, s, tk }) => {
+    for (const maxPeople of [-1, 31, 2.5, '4', null]) assert.equal((await s.post('/api/staff/cover/settings', { maxPeople })).json.error, 'bad_max_people', String(maxPeople));
+    const set = await s.post('/api/staff/cover/settings', { maxPeople: 4 });
+    assert.equal(set.status, 200, set.text);
+    assert.equal(set.json.cover.maxPeople, 4);
+    const g = await guestWithDevice(srv);
+    assert.equal((await g.get(`/api/t/${tk[0]}`)).json.party.max, 4);
+    const over = await g.post(`/api/t/${tk[0]}/party`, { seat: 1, people: 5 });
+    assert.deepEqual([over.status, over.json.error], [400, 'over_max_people']);
+    assert.equal((await g.get(`/api/t/${tk[0]}`)).json.party.people, null); // the refused answer left nothing behind
+    assert.equal((await g.post(`/api/t/${tk[0]}/party`, { seat: 1, people: 4 })).status, 200);
+    assert.equal((await partyOf(s, 2, 6)).status, 200); // staff decide at the booth
+    assert.equal((await g.get('/api/wait/info')).json.maxPeople, 4);
+    const w = await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '큰손님', size: 5 });
+    assert.deepEqual([w.status, w.json.error], [400, 'over_max_people']);
+    assert.equal((await g.post('/api/wait', { phone: waitPhone(), consent: true, nick: '손님', size: 4 })).status, 201);
+    assert.equal((await s.post('/api/staff/cover/settings', { maxPeople: 0 })).status, 200);
+    assert.equal((await g.get(`/api/t/${tk[2]}`)).json.party.max, null);
+    assert.equal((await g.get('/api/wait/info')).json.maxPeople, null);
+    assert.equal((await g.post(`/api/t/${tk[2]}/party`, { seat: 1, people: 12 })).status, 200);
+  });
+});
+
 test('I1 staff headcount: any time, audit row with before->after, stale guard', async () => {
   await withBooth(async ({ s }) => {
     const a = await partyOf(s, 1, 3);
@@ -6093,14 +6117,14 @@ test('I1 visitors statistics: per seat by seatedAt, unknown headcounts, in sales
 
 test('I2 cover settings: validation, audit, guest and staff snapshots', async () => {
   await withBooth(async ({ srv, s, tk }) => {
-    assert.deepEqual((await s.get('/api/staff/state')).json.cover, { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료' });
+    assert.deepEqual((await s.get('/api/staff/state')).json.cover, { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료', maxPeople: 0 });
     const bad = async (body, code) => assert.equal((await s.post('/api/staff/cover/settings', body)).json.error, code, JSON.stringify(body));
     await bad({}, 'nothing_to_update'); await bad({ enabled: 'yes' }, 'bad_enabled'); await bad({ mode: 'x' }, 'bad_mode');
     for (const amount of [150, -100, 100100, 'x', 1e9]) await bad({ amount }, 'bad_amount');
     await bad({ label: '' }, 'bad_label'); await bad({ label: '가'.repeat(13) }, 'bad_label'); await bad({ requireBeforeOrder: 1 }, 'bad_require_before_order'); await bad({ askGuest: 'no' }, 'bad_ask_guest');
     assert.equal((await new Client(srv).post('/api/staff/cover/settings', { enabled: true })).status, 401);
     const ok = await s.post('/api/staff/cover/settings', { enabled: true, mode: 'per_table', amount: 2000, label: '테이블비' });
-    assert.deepEqual(ok.json.cover, { enabled: true, mode: 'per_table', amount: 2000, requireBeforeOrder: false, askGuest: true, label: '테이블비' });
+    assert.deepEqual(ok.json.cover, { enabled: true, mode: 'per_table', amount: 2000, requireBeforeOrder: false, askGuest: true, label: '테이블비', maxPeople: 0 });
     const row = (await auditOf(s)).find((e) => e.action === 'cover_settings');
     assert.match(row.summary, /enabled false→true.*amount 0→2000/);
     assert.match(row.summaryKo, /입장료 설정 · 켜짐 · 테이블당 2,000원/);
@@ -6631,7 +6655,7 @@ test('I4 upgrade from Release 2 (308295c): the production schema boots, keeps it
     assert.deepEqual(db.prepare('SELECT DISTINCT kind FROM orders').all().map((r) => r.kind), ['food'], 'existing orders are food');
     db.close();
     const st = (await s.get('/api/staff/state')).json;
-    assert.deepEqual(st.cover, { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료' }, 'the cover charge ships OFF');
+    assert.deepEqual(st.cover, { enabled: false, mode: 'per_person', amount: 0, requireBeforeOrder: false, askGuest: true, label: '입장료', maxPeople: 0 }, 'the cover charge ships OFF');
     assert.deepEqual(st.orders.map((o) => [o.id, o.kind, o.paidAmount, o.balanceDue, o.payments.length]), [[Number(paidId), 'food', 10000, 0, 1], [Number(partId), 'food', 2000, 3000, 1]]);
     assert.ok(st.tables.every((t) => t.people === null && t.cover === null));
     const sale = (await s.get('/api/staff/sales')).json;

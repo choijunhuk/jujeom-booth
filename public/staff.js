@@ -1892,7 +1892,7 @@
 
   SETTINGS_SECTIONS.push({ id: 'member', title: '회원 할인', build: buildMemberRule });
   SETTINGS_SECTIONS.push({ id: 'test', title: '테스트', build: SO.testSection });
-  SETTINGS_SECTIONS.push({ id: 'cover', title: '입장료', build: SO.coverSection });
+  SETTINGS_SECTIONS.push({ id: 'cover', title: '입장료 · 인원', build: SO.coverSection });
   SETTINGS_SECTIONS.push({ id: 'couponlimit', title: '쿠폰 제한', build: SO.couponLimitSection });
   SETTINGS_SECTIONS.push({ id: 'notice', title: '손님 공지', build: SO.noticeSection });
   SETTINGS_SECTIONS.push({ id: 'waittimeout', title: '대기 호출 노쇼 시간', build: SO.waitTimeoutSection });
