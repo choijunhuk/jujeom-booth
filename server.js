@@ -46,7 +46,8 @@ const LOCKOUT_MS = envInt('LOCKOUT_MS', 60000);
 const COMS_ME_URL = (env.COMS_ME_URL || '').trim(); // unset = member discount feature off (no outbound requests at all)
 // Origin of the club site, served to pages as __COMS_ORIGIN__: the guest page offers the in-page club login (a same-origin POST to
 // /api/auth/login) only when it is itself open on exactly this origin, so a password never goes to whatever else hosts the booth.
-const COMS_ORIGIN = (() => { try { return COMS_ME_URL ? new URL(COMS_ME_URL).origin : ''; } catch { return ''; } })();
+// Only a plain scheme://host[:port] is substituted, so nothing odd in the env value can break out of the JS string it lands in.
+const COMS_ORIGIN = (() => { try { const o = COMS_ME_URL ? new URL(COMS_ME_URL).origin : ''; return /^https?:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(o) ? o : ''; } catch { return ''; } })();
 
 let STAFF_PIN = env.STAFF_PIN;
 if (!STAFF_PIN) {

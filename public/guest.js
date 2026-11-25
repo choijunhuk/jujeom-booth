@@ -226,12 +226,13 @@
   function checkMember(manual) {
     lastMemberCheck = Date.now();
     var seq = ++memberSeq; // an older lookup (e.g. from before a login) answering late must not overwrite a newer one
-    return api('/member').then(function (r) {
-      if (!r.ok || seq !== memberSeq) return;
+    return api('/member').then(function (r) { // resolves true only when this answer was applied
+      if (!r.ok || seq !== memberSeq) return false;
       var was = isMember(), had = !!M; M = r.data; if (had && !was && isMember() && !manual) toast('COMS 회원 할인이 적용돼요');
       if (manual) toast(isMember() ? 'COMS 회원으로 확인됐어요' : '아직 로그인이 확인되지 않았어요. 로그인 후 다시 확인해 주세요');
       render();
-    }, function () { if (manual) toast('네트워크 오류예요. 다시 눌러 주세요.'); });
+      return true;
+    }, function () { if (manual) toast('네트워크 오류예요. 다시 눌러 주세요.'); return false; });
   }
   function totals() {
     var sub = 0, n = 0;
@@ -745,10 +746,11 @@
   // COMS login in place. Posts to the COMS backend at the origin root (not the booth API); the booth server never sees the password.
   // Only when this page is open on exactly the club site's origin (server-injected from COMS_ME_URL) under a sub-path: anywhere else
   // (dev, bare host:port, the booth mounted on another site) /api/auth/login is not COMS and the password would go to the wrong server.
-  function inlineLogin() { return !!BASE && !!window.COMS_ORIGIN && location.origin === window.COMS_ORIGIN; }
+  function inlineLogin() { return !!BASE && location.protocol === 'https:' && !!window.COMS_ORIGIN && location.origin === window.COMS_ORIGIN; }
   var loginBusy = false; // one attempt at a time across reopened sheets: a late response could otherwise overwrite a newer account's cookie
   function openLogin() {
     if (!inlineLogin()) return;
+    if (loginBusy) { toast('로그인을 처리하고 있어요. 잠시만 기다려 주세요'); return; } // a reopened form could not submit, and would linger after the pending sign-in succeeds
     var sh = openSheet('COMS 로그인',
       '<h2>COMS 로그인</h2><p class="note" style="margin:-6px 0 4px">COMS 동아리 계정으로 로그인하면 회원 할인이 바로 적용돼요.</p>' +
       '<form id="lf"><label class="fld">아이디(학번 또는 이메일)<input class="inp" id="li" maxlength="255" autocomplete="username" autocapitalize="off" spellcheck="false" aria-label="아이디(학번 또는 이메일)"></label>' +
@@ -782,9 +784,10 @@
           lp.value = '';
           if (r.ok) { // confirm membership before the cart reopens, or its total is stale and checkout gets 409 price_changed
             var cap = new Promise(function (res) { setTimeout(res, 8000); }); // a stalled lookup must not hold the lock either
-            return Promise.race([checkMember(false), cap]).then(null, function () {}).then(function () {
+            return Promise.race([checkMember(false), cap]).then(null, function () {}).then(function (fresh) {
               if (live()) closeSheet(); // the guest may have closed this sheet (and opened another) while the request was in flight
-              toast(isMember() ? '회원 확인됐어요. 할인이 적용돼요' : '로그인은 됐지만 이 계정으로는 회원 할인이 확인되지 않았어요');
+              // judge eligibility only from an answer that arrived after this login; otherwise say the check is still pending
+              toast(fresh !== true ? '로그인됐어요. 회원 확인이 아직 안 끝났어요. 잠시 후 다시 확인을 눌러 주세요' : isMember() ? '회원 확인됐어요. 할인이 적용돼요' : '로그인은 됐지만 이 계정으로는 회원 할인이 확인되지 않았어요');
             });
           }
           var m = r.d && r.d.message;
