@@ -6,6 +6,7 @@
   var status = $('#mb-status'), origin = $('#mb-origin'), overflow = $('#mb-overflow'), coverOff = $('#mb-cover-off');
   var shell, gate, pending, lastSig = '', running = false, printing = false, requestingPrint = false;
   var printMq = window.matchMedia('print');
+  var categoryArt = new Map([['안주', 'snacks'], ['식사', 'meals'], ['세트', 'sets']]);
 
   function inPrint() { return printing || printMq.matches; }
 
@@ -14,18 +15,17 @@
     var tooLong = false;
     sheet.querySelectorAll('.mb-details').forEach(function (box) {
       if (!box.getClientRects().length) return;
+      var page = box.closest('.mb-page');
       var menu = box.firstElementChild.firstElementChild;
+      page.classList.remove('mb-compact');
       box.style.fontSize = '';
       function overflows() { return menu.scrollHeight > menu.clientHeight || box.scrollHeight > box.clientHeight; }
       for (var size = parseFloat(getComputedStyle(box).fontSize) - 0.5; size >= 9 && overflows(); size -= 0.5) {
+        // Give dense menus some of the banner's space before shrinking text further.
+        page.classList.toggle('mb-compact', size < 13);
         box.style.fontSize = size + 'px';
       }
-      var clipped = overflows();
-      if (clipped) tooLong = true;
-      var deco = $('.mb-menu-deco', menu);
-      // Stickers only use space that remains after the menu has fitted.
-      deco.classList.toggle('mb-menu-deco-visible', !clipped &&
-        deco.previousElementSibling.getBoundingClientRect().bottom + 6 <= deco.getBoundingClientRect().top);
+      if (overflows()) tooLong = true;
     });
     if (!printing) sheet.classList.remove('mb-printing');
     overflow.hidden = !tooLong;
@@ -39,6 +39,10 @@
     return h('p', { class: 'mb-cover' }, c.label + ' ' + (c.mode === 'per_person' ? '1인당 ' : '테이블당 '), h('span', { class: 'y2k-num' }, SC.won(c.amount)));
   }
 
+  function art(name, className) {
+    return h('img', { class: className, src: SC.BASE + '/static/brand/deco/mb-' + name + '.png', alt: '', 'aria-hidden': 'true' });
+  }
+
   function makePage(table, details, cover) {
     var qr = h('div', { class: 'mb-qr', role: 'img', 'aria-label': table.number + '번 테이블 주문 QR 코드' });
     qr.innerHTML = QR.svg(table.url, { margin: 4 });
@@ -48,18 +52,22 @@
         h('span', { class: 'y2k-title-t' }, 'COMHERE.exe'),
         h('span', { class: 'y2k-title-btns', 'aria-hidden': 'true' },
           h('span', { class: 'y2k-tb' }, '_'), h('span', { class: 'y2k-tb' }, '□'), h('span', { class: 'y2k-tb' }, '×'))),
-      h('div', { class: 'mb-number' }, h('h1', null, h('span', { class: 'y2k-num' }, table.number), '번 테이블'), cover && cover.cloneNode(true)),
-      h('section', { class: 'mb-order' }, qr,
+      h('div', { class: 'mb-hero' }, art('pocha-night', 'mb-hero-art'),
+        h('div', { class: 'mb-number' },
+          h('h1', { class: 'y2k-pixel y2k-pixel--2x' }, h('span', { class: 'y2k-num' }, table.number), '번 테이블'),
+          cover && cover.cloneNode(true))),
+      h('section', { class: 'mb-order' },
+        h('div', { class: 'mb-scan' }, qr, h('p', { class: 'mb-url' }, table.url)),
         h('div', { class: 'mb-order-copy' },
-          h('h2', null, 'QR 찍고 바로 주문'),
+          h('h2', { class: 'y2k-pixel y2k-pixel--2x' }, 'QR 찍고 바로 주문'),
           h('p', null, '직원 안 불러도 주문 · 결제 · 직원 호출까지 휴대폰으로 돼요'),
           h('ol', { class: 'mb-steps', role: 'list' },
-            h('li', null, '① 휴대폰 카메라로 QR 찍기'),
-            h('li', null, '② 메뉴 담고 주문'),
-            h('li', null, '③ 안내에 따라 계좌이체'))),
-        h('p', { class: 'mb-url' }, table.url)),
+            ['휴대폰 카메라로 QR 찍기', '메뉴 담고 주문', '안내에 따라 계좌이체'].map(function (text, i) {
+              return h('li', null, h('span', { class: 'y2k-num', 'aria-hidden': 'true' }, i + 1), text);
+            })),
+          art('toast', 'mb-toast'))),
       details.cloneNode(true),
-      h('footer', { class: 'mb-footer' }, "COM's"));
+      h('footer', { class: 'mb-footer' }, h('span', { class: 'y2k-pixel' }, "COM's")));
   }
 
   function syncControls() {
@@ -82,12 +90,16 @@
     var warning = common.originWarning(data);
     var menu = common.menuSection(state.menu, true);
     menu.classList.add('mb-menu');
-    menu.append(h('div', { class: 'mb-menu-deco', 'aria-hidden': 'true' },
-      ['retro-crt', 'ramen-pot', 'fishcake-skewer', 'pink-floppy'].map(function (name) {
-        return h('img', { src: SC.BASE + '/static/brand/deco/' + name + '.png', alt: '' });
-      })));
+    menu.querySelectorAll('.fl-category').forEach(function (label) {
+      var name = categoryArt.get(label.textContent);
+      if (!name) return;
+      label.classList.add('mb-cat-' + name);
+      label.prepend(art(name, 'mb-category-art'));
+    });
+    var benefits = common.prizeSection(state, rewards);
+    if (benefits) benefits.classList.add('mb-benefits');
     var details = h('div', { class: 'mb-details' }, h('div', { class: 'mb-details-content' },
-      menu, common.prizeSection(state, rewards)));
+      menu, benefits));
     var cover = coverLine(state);
     var sig = JSON.stringify([tables, warning, details.innerHTML, cover && cover.textContent, !!(state.cover && state.cover.enabled)]);
     if (sig === lastSig) return;
@@ -158,6 +170,7 @@
     try {
       if (!await load()) return;
       await document.fonts.ready;
+      await Promise.allSettled(Array.from(sheet.querySelectorAll('.mb-page img'), function (image) { return image.decode(); }));
       if (!running || inPrint() || (!showAll && !picker.value)) return;
       sheet.classList.toggle('mb-print-all', showAll);
       window.print();
