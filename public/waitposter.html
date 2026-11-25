@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>대기 포스터 · COMHERE</title>
+<script src="__BASE__/static/base.js"></script>
+<script src="__BASE__/static/notify.js"></script>
+<link rel="stylesheet" href="__BASE__/static/brand/brand.css">
+<link rel="stylesheet" href="__BASE__/static/staff.css">
+<style>
+  .wp-main { max-width: calc(194mm + 24px); }
+  .wp-status { margin-bottom: 12px; overflow-wrap: anywhere; }
+  .wp-origin { color: var(--accent); font-weight: 700; }
+  .wp-poster {
+    width: 194mm; max-width: 100%; min-height: 280mm; margin: 0 auto;
+    display: flex; flex-direction: column;
+    border: 2px solid #000; background: #fff; color: #000; color-scheme: light;
+    font-family: var(--y-font-ui); word-break: keep-all;
+  }
+  .wp-title { padding: 3px 8px; }
+  .wp-title img { height: 16px; width: auto; filter: invert(1); }
+  .wp-content {
+    display: flex; flex: 1; flex-direction: column; justify-content: space-between;
+    gap: 4mm; padding: 5mm 7mm;
+  }
+  .wp-hero {
+    display: flex; justify-content: space-between; align-items: center; gap: 3mm;
+    padding: 2mm 5mm; border-bottom: 3px solid var(--y-title-a);
+  }
+  .wp-hero h1 { color: var(--y-title-a); font-size: 64px; line-height: 1.12; }
+  .wp-hero p { margin-top: 5px; font-size: 24px; line-height: 1.25; font-weight: 800; }
+  .wp-art { display: block; object-fit: contain; image-rendering: pixelated; }
+  .wp-hourglass { width: 30mm; height: 30mm; }
+  .wp-scan {
+    width: 144mm; max-width: 100%; margin: 0 auto;
+    padding: 0 3mm 2.5mm; text-align: center;
+    border: 2px solid #000; box-shadow: 4px 4px var(--y-hot);
+  }
+  .wp-qr { width: 136mm; max-width: 100%; aspect-ratio: 1; margin: auto; background: #fff; }
+  .wp-qr svg { display: block; width: 100%; height: 100%; }
+  .wp-url {
+    display: block; color: var(--y-title-a); overflow-wrap: anywhere;
+    font: 14px/1.25 ui-monospace, monospace;
+  }
+  .wp-steps {
+    margin: 0; padding: 0; list-style: none;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2mm;
+  }
+  .wp-steps li {
+    --wp-accent: var(--y-cyan);
+    padding: 3mm; border: 1px solid #000; border-top: 4px solid var(--wp-accent);
+    box-shadow: inset 0 1px #000; font-size: 16px; line-height: 1.35;
+  }
+  .wp-steps li:nth-child(2) { --wp-accent: var(--y-lime); }
+  .wp-steps li:nth-child(3) { --wp-accent: var(--y-hot); }
+  .wp-steps h2 { margin-bottom: 5px; font-size: 18px; }
+  .wp-steps .y2k-num {
+    display: inline-grid; place-items: center; width: 25px; height: 25px;
+    margin-right: 5px; border: 1px solid #000; background: var(--wp-accent);
+  }
+  .wp-footer {
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+    padding: 1mm 6mm; border: 1px solid var(--y-face-lo);
+    background: var(--y-face-mid); text-align: center;
+  }
+  .wp-queue { width: 33mm; height: 20mm; justify-self: start; }
+  .wp-phone { width: 17mm; height: 20mm; justify-self: end; }
+  @media screen and (max-width: 756px) {
+    .wp-poster { min-height: 0; }
+  }
+  @media screen and (max-width: 570px) {
+    .wp-content { gap: 12px; padding: 12px; }
+    .wp-hero { padding: 4px 0 10px; }
+    .wp-hero h1 { font-size: 32px; }
+    .wp-hero p { font-size: 17px; }
+    .wp-hourglass { width: 60px; height: 60px; }
+    .wp-steps { grid-template-columns: 1fr; }
+    .wp-queue { width: 76px; height: 48px; }
+    .wp-phone { width: 42px; height: 48px; }
+  }
+  @page { size: A4 portrait; margin: 8mm; }
+  @media print {
+    :root, body { margin: 0; color-scheme: light; background: #fff !important; color: #000 !important; }
+    .noprint, .top, .strip, .dlg, #toasts { display: none !important; }
+    .wp-main { width: 194mm; max-width: none; padding: 0; margin: 0; }
+    .wp-poster { margin: 0; break-inside: avoid; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+<noscript class="noprint"><p>이 페이지는 JavaScript가 필요합니다.</p></noscript>
+<div id="login" class="login noprint" hidden></div>
+<div id="app" hidden>
+  <main id="main" class="wp-main">
+    <div class="view-head noprint">
+      <h2>대기 포스터</h2>
+      <button class="btn btn-primary" id="wp-print" type="button" disabled>포스터 인쇄</button>
+    </div>
+    <div class="wp-status noprint" role="status">
+      <p class="muted">A4 세로 · 배율 100%(실제 크기) · 한 장</p>
+      <p id="wp-status"></p>
+      <p class="wp-origin" id="wp-origin" hidden></p>
+    </div>
+    <article id="wp-poster" class="wp-poster" aria-labelledby="wp-heading" hidden>
+      <header class="wp-title y2k-title">
+        <img src="__BASE__/static/brand/coms-logo.svg" alt="">
+        <span class="y2k-title-t">COMHERE.exe - 대기 등록</span>
+        <span class="y2k-title-btns" aria-hidden="true"><span class="y2k-tb">_</span><span class="y2k-tb">□</span><span class="y2k-tb">×</span></span>
+      </header>
+      <div class="wp-content">
+        <div class="wp-hero">
+          <div>
+            <h1 id="wp-heading" class="y2k-pixel">대기 등록</h1>
+            <p>줄 서지 말고 QR로 대기하세요</p>
+          </div>
+          <img class="wp-art wp-hourglass" src="__BASE__/static/brand/deco/wait-hourglass.png" alt="" aria-hidden="true">
+        </div>
+        <div class="wp-scan">
+          <div class="wp-qr" id="wp-qr" role="img" aria-label="대기 등록 QR 코드"></div>
+          <a class="wp-url" id="wp-url"></a>
+        </div>
+        <ol class="wp-steps" role="list">
+          <li>
+            <h2><span class="y2k-num" aria-hidden="true">1</span>QR 찍기</h2>
+            <p>휴대폰 카메라로 QR을 찍고 대기 등록 화면을 열어요.</p>
+          </li>
+          <li>
+            <h2><span class="y2k-num" aria-hidden="true">2</span>정보 입력</h2>
+            <p>닉네임, 인원, 휴대폰 번호를 입력하고 개인정보 수집에 동의한 뒤 등록해요.</p>
+          </li>
+          <li>
+            <h2><span class="y2k-num" aria-hidden="true">3</span>호출 확인</h2>
+            <p>대기 화면을 열어 두세요. 문자 호출이 켜져 있으면 문자로도 알려드려요.</p>
+          </li>
+        </ol>
+        <footer class="wp-footer">
+          <img class="wp-art wp-queue" src="__BASE__/static/brand/deco/wait-queue.png" alt="" aria-hidden="true">
+          <span class="y2k-pixel y2k-pixel--2x">COM's</span>
+          <img class="wp-art wp-phone" src="__BASE__/static/brand/deco/wait-phone.png" alt="" aria-hidden="true">
+        </footer>
+      </div>
+    </article>
+  </main>
+</div>
+<div id="toasts" class="noprint" role="status" aria-live="polite"></div>
+<script src="__BASE__/static/vendor/qr.js"></script>
+<script src="__BASE__/static/staff-common.js"></script>
+<script src="__BASE__/static/alarm.js"></script>
+<script src="__BASE__/static/shell.js"></script>
+<script src="__BASE__/static/print-common.js"></script>
+<script src="__BASE__/static/waitposter.js"></script>
+</body>
+</html>

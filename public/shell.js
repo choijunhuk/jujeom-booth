@@ -10,6 +10,7 @@
     { id: 'qr', label: 'QR 인쇄', href: '/staff/qr', hint: '테이블 QR 카드 인쇄 · 저장' },
     { id: 'flyer', label: '전단지 인쇄', href: '/staff/flyer', hint: '홍보 전단지 인쇄 (A4 한 장에 2장)' },
     { id: 'menuboard', label: '테이블 메뉴판', href: '/staff/menuboard', hint: 'A4 한 장에 메뉴 + 그 테이블 주문 QR' },
+    { id: 'waitposter', label: '대기 포스터', href: '/staff/waitposter', hint: 'A4 입구용 대기 등록 QR 포스터' },
     { id: 'board', label: '전광판', href: '/board', hint: '게임 랭킹 화면', blank: true },
     { id: 'wait', label: '대기 화면', href: '/wait', hint: '입구 대기 등록 화면', blank: true },
     { id: 'test', label: '손님 화면 테스트', href: '/staff#test', hint: '실제 매출에 섞이지 않는 연습용 손님 화면', blank: true, test: true },
