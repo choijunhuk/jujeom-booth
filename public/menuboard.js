@@ -20,7 +20,12 @@
       for (var size = parseFloat(getComputedStyle(box).fontSize) - 0.5; size >= 9 && overflows(); size -= 0.5) {
         box.style.fontSize = size + 'px';
       }
-      if (overflows()) tooLong = true;
+      var clipped = overflows();
+      if (clipped) tooLong = true;
+      var deco = $('.mb-menu-deco', menu);
+      // Stickers only use space that remains after the menu has fitted.
+      deco.classList.toggle('mb-menu-deco-visible', !clipped &&
+        deco.previousElementSibling.getBoundingClientRect().bottom + 6 <= deco.getBoundingClientRect().top);
     });
     if (!printing) sheet.classList.remove('mb-printing');
     overflow.hidden = !tooLong;
@@ -75,8 +80,14 @@
   function render(state, rewards, data) {
     var tables = common.tableLinks(data);
     var warning = common.originWarning(data);
+    var menu = common.menuSection(state.menu, true);
+    menu.classList.add('mb-menu');
+    menu.append(h('div', { class: 'mb-menu-deco', 'aria-hidden': 'true' },
+      ['retro-crt', 'ramen-pot', 'fishcake-skewer', 'pink-floppy'].map(function (name) {
+        return h('img', { src: SC.BASE + '/static/brand/deco/' + name + '.png', alt: '' });
+      })));
     var details = h('div', { class: 'mb-details' }, h('div', { class: 'mb-details-content' },
-      common.menuSection(state.menu, true), common.prizeSection(state, rewards)));
+      menu, common.prizeSection(state, rewards)));
     var cover = coverLine(state);
     var sig = JSON.stringify([tables, warning, details.innerHTML, cover && cover.textContent, !!(state.cover && state.cover.enabled)]);
     if (sig === lastSig) return;

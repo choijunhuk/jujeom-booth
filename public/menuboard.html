@@ -53,6 +53,13 @@
   .mb-details-content { height: 100%; display: flex; flex-direction: column; gap: .75em; }
   .mb-details-content > :first-child { flex: 1; min-height: 0; overflow: hidden; }
   .mb-details-content > :nth-child(2) { flex-shrink: 0; }
+  .mb-menu { position: relative; }
+  .mb-menu-deco {
+    position: absolute; inset-inline: 0; bottom: 1mm;
+    display: flex; justify-content: space-around; visibility: hidden;
+  }
+  .mb-menu-deco-visible { visibility: visible; }
+  .mb-menu-deco img { width: 19mm; height: 19mm; object-fit: contain; image-rendering: pixelated; }
   .mb-details .fl-menu-group { break-inside: auto; }
   .mb-details .fl-category { background: var(--y-face-mid); padding-inline: .35em; font-size: max(9px, .83em); }
   .mb-details .fl-desc { font-size: max(9px, .82em); }
@@ -69,6 +76,7 @@
     .mb-sheet:not(.mb-printing) .fl-menu, .mb-sheet:not(.mb-printing) .fl-prizes { columns: 1; grid-template-columns: 1fr; }
     .mb-sheet:not(.mb-printing) .mb-details { font-size: 16px !important; }
     .mb-sheet:not(.mb-printing) .mb-details-content { height: auto; }
+    .mb-sheet:not(.mb-printing) .mb-menu-deco { display: none; }
   }
   .mb-printing .mb-page { max-width: none; }
   @page { size: A4 portrait; margin: 8mm; }
