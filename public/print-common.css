@@ -1,0 +1,12 @@
+/* Shared menu and rewards typography for the flyer and table menu board. */
+.fl-section h2 { border-top: 2px solid #000; border-bottom: 1px solid #000; padding: .23em 0; margin-bottom: .32em; font-size: 1.05em; font-weight: 900; }
+.fl-menu { columns: 2; column-gap: .85em; }
+.fl-menu-group { break-inside: avoid; }
+.fl-menu-group + .fl-menu-group { margin-top: .25em; }
+.fl-category { padding: .22em 0 .25em; font-size: .83em; break-after: avoid; }
+.fl-item { padding: .21em 0; break-inside: avoid; }
+.fl-item-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: .28em; font-weight: 800; word-break: keep-all; }
+.fl-num { font-family: var(--y-font-num); font-variant-numeric: tabular-nums; }
+.fl-price { white-space: nowrap; }
+.fl-desc { margin-top: .16em; font-size: .82em; }
+.fl-prizes { list-style: none; margin: 0; padding: 0; display: grid; gap: .2em; font-weight: 700; }

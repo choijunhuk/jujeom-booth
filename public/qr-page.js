@@ -1,15 +1,14 @@
 /* QR print page: print all / selected / one card, save card or QR as PNG (all local). */
 (function () {
   'use strict';
-  var SC = window.SC, h = SC.h, $ = SC.$;
+  var SC = window.SC, h = SC.h, $ = SC.$, common = window.PrintCommon;
   var data = null, sig = '', sel = new Set(), cells = {}, shell = null, gate = null, running = false;
   var FONT = 'system-ui, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif';
 
-  function abs(u) { return /^https?:\/\//i.test(u) ? u : location.origin + u; }
   function cardList(d) {
-    var list = [{ key: 'wait', label: '입구', big: '대기', cls: 'w', url: abs(d.waitUrl), caption: 'QR 찍고 대기 등록', sub: '자리가 나면 알려 드려요', file: 'booth-wait', title: '입구 대기' }];
-    d.tables.slice().sort(function (a, b) { return a.number - b.number; }).forEach(function (t) {
-      list.push({ key: String(t.number), label: '테이블', big: String(t.number), cls: 'd' + Math.min(3, String(t.number).length), url: abs(t.url), caption: 'QR 찍고 주문 · 게임', sub: '쿠폰도 받아 가세요', file: 'booth-table-' + t.number, title: t.number + '번 테이블' });
+    var list = [{ key: 'wait', label: '입구', big: '대기', cls: 'w', url: common.absoluteUrl(d.waitUrl), caption: 'QR 찍고 대기 등록', sub: '자리가 나면 알려 드려요', file: 'booth-wait', title: '입구 대기' }];
+    common.tableLinks(d).forEach(function (t) {
+      list.push({ key: String(t.number), label: '테이블', big: String(t.number), cls: 'd' + Math.min(3, String(t.number).length), url: t.url, caption: 'QR 찍고 주문 · 게임', sub: '쿠폰도 받아 가세요', file: 'booth-table-' + t.number, title: t.number + '번 테이블' });
     });
     return list;
   }
@@ -185,7 +184,8 @@
     });
     $('#cards').replaceChildren.apply($('#cards'), els);
     var info = [h('p', { class: 'muted' }, '카드 ' + list.length + '장 (대기 1 + 테이블 ' + d.tables.length + '). 접지 않는 한 면 카드예요. 바깥 점선을 따라 잘라 코팅하세요 (A6 코팅지·A6 아크릴 꽂이에 맞는 크기). 무광 코팅이면 조명 반사가 적어 QR이 더 잘 찍혀요. 인쇄 설정에서 배율 100%(실제 크기), A4 세로로 인쇄하세요. 한 장에 4개씩 나와요.')];
-    if (!d.origin) info.push(h('div', { class: 'warn' }, '서버에 PUBLIC_ORIGIN이 설정되어 있지 않아 지금 열린 주소(' + location.origin + ')로 QR을 만들었어요. 실제 행사 주소에서 이 페이지를 열어 인쇄해야 손님 휴대폰에서 열려요.'));
+    var warning = common.originWarning(d);
+    if (warning) info.push(h('div', { class: 'warn' }, warning));
     SC.fill($('#info'), info);
     syncBar();
   }

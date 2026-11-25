@@ -800,6 +800,20 @@ test('staff flyer serves its page and script under BASE_PATH=/booth', async () =
   } finally { await srv.stop(); }
 });
 
+test('staff menuboard serves its page and scripts under BASE_PATH=/booth', async () => {
+  const srv = await boot({ base: '/booth', env: { PUBLIC_DIR: path.join(__dirname, 'public') } });
+  try {
+    const c = new Client(srv);
+    const page = await c.get('/staff/menuboard');
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-type'), /^text\/html\b/);
+    for (const file of ['menuboard.js', 'print-common.js']) {
+      assert.ok(page.text.includes(`src="/booth/static/${file}"`));
+      assert.equal((await c.get('/static/' + file)).status, 200);
+    }
+  } finally { await srv.stop(); }
+});
+
 test('request hygiene: content-type, bad json, size limit, csrf', async () => {
   const g = guest();
   const T = tok(1);

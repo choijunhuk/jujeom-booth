@@ -1,7 +1,7 @@
 /* Staff flyer: two identical copies of the current booth promotion. */
 (function () {
   'use strict';
-  var SC = window.SC, h = SC.h, $ = SC.$, won = SC.won;
+  var SC = window.SC, h = SC.h, $ = SC.$, common = window.PrintCommon;
   var sheet = $('#fl-sheet'), status = $('#fl-status'), print = $('#fl-print');
   var fields = ['date', 'time', 'location'].map(function (key) { return $('#fl-' + key); });
   var storageKey = 'comhere-flyer-event:' + SC.BASE;
@@ -35,49 +35,6 @@
     fit();
   }
 
-  function menuSection(menu) {
-    var items = menu.items.filter(function (item) { return !item.hidden && !item.soldOut; });
-    var groups = menu.categories.map(function (cat) {
-      var group = items.filter(function (item) { return item.cat === cat; });
-      if (!group.length) return null;
-      return h('div', { class: 'fl-menu-group' },
-        h('h3', { class: 'fl-category' }, cat),
-        group.map(function (item) {
-          return h('div', { class: 'fl-item' },
-            h('div', { class: 'fl-item-line' }, h('span', null, item.name), h('span', { class: 'fl-price fl-num' }, won(item.price))),
-            item.components && item.desc ? h('p', { class: 'fl-desc' }, item.desc) : null);
-        }));
-    });
-    return h('section', { class: 'fl-section' }, h('h2', null, '메뉴'),
-      items.length ? h('div', { class: 'fl-menu' }, groups) : h('p', null, '판매 중인 메뉴가 없어요.'));
-  }
-
-  function minOrder(rule) { return rule.minOrder > 0 ? ' · ' + won(rule.minOrder) + ' 이상 주문 시' : ''; }
-  function memberOffer(state) {
-    var rule = state.memberDiscount;
-    if (!state.memberEnabled || !rule.enabled) return '';
-    if (rule.mode === 'percent' && rule.pct > 0) {
-      return 'COMS 회원 ' + rule.pct + '% 할인' + (rule.maxDiscount > 0 ? ' (최대 ' + won(rule.maxDiscount) + ')' : '') + minOrder(rule);
-    }
-    if (rule.mode === 'fixed' && rule.amount > 0) {
-      return 'COMS 회원 ' + won(rule.maxDiscount > 0 ? Math.min(rule.amount, rule.maxDiscount) : rule.amount) + ' 할인' + minOrder(rule);
-    }
-    return '';
-  }
-
-  function prizeSection(state, data) {
-    var prizes = data.rewards.filter(function (reward) { return reward.active && reward.remaining > 0; }).map(function (reward) { // sold-out prizes are not advertised
-      var game = data.games[reward.game];
-      return h('li', null, (game ? game.label : reward.game) + ' ', // a reward whose game was removed must not break the whole sheet
-        h('span', { class: 'fl-num' }, reward.threshold.toLocaleString('ko-KR')), '점 이상 → ', reward.label);
-    });
-    if (data.hourly.enabled) prizes.push(h('li', null, '매 정시 1등 테이블: ' + data.hourly.label));
-    var member = memberOffer(state);
-    if (member) prizes.push(h('li', { class: 'fl-num' }, member));
-    return prizes.length ? h('section', { class: 'fl-section' },
-      h('h2', null, '게임 & 혜택'), h('ul', { class: 'fl-prizes' }, prizes)) : null;
-  }
-
   function render(state, rewards, tables) {
     var qr = h('div', { class: 'fl-qr', role: 'img', 'aria-label': '대기 등록 QR 코드' });
     qr.innerHTML = QR.svg(new URL(tables.waitUrl, location.origin).href, { margin: 4 });
@@ -90,7 +47,7 @@
         h('p', { class: 'fl-hook' }, 'QR로 주문하고 미니게임으로 쿠폰 받기'),
         h('p', { class: 'fl-event' })),
       h('div', { class: 'fl-details' }, h('div', { class: 'fl-details-content' },
-        menuSection(state.menu), prizeSection(state, rewards))),
+        common.menuSection(state.menu), common.prizeSection(state, rewards))),
       h('section', { class: 'fl-wait' }, qr, h('div', null,
         h('strong', null, 'QR 찍고 대기 등록'),
         h('p', null, '자리가 나면 문자로 알려드려요'))),

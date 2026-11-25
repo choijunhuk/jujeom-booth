@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>테이블 메뉴판 · COMHERE</title>
+<script src="__BASE__/static/base.js"></script>
+<script src="__BASE__/static/notify.js"></script>
+<link rel="stylesheet" href="__BASE__/static/brand/brand.css">
+<link rel="stylesheet" href="__BASE__/static/staff.css">
+<link rel="stylesheet" href="__BASE__/static/print-common.css">
+<style>
+  .mb-main { max-width: calc(194mm + 24px); }
+  .mb-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .mb-controls .field { width: auto; }
+  .mb-status { margin-bottom: 12px; overflow-wrap: anywhere; }
+  .mb-status p + p { margin-top: 4px; }
+  .mb-warning { color: var(--accent); font-weight: 700; }
+  .mb-sheet:not(.mb-print-all) .mb-other { display: none; }
+  .mb-page {
+    width: 194mm; max-width: 100%; height: 280mm; margin: 0 auto 16px; padding: 0;
+    border: 2px solid #000; background: #fff; color: #000; color-scheme: light;
+    display: flex; flex-direction: column; overflow: hidden;
+    font-family: var(--y-font-ui); overflow-wrap: anywhere;
+  }
+  .mb-title { min-height: 29px; padding: 3px 8px; background: var(--y-title-a); }
+  .mb-title img { height: 16px; width: auto; filter: invert(1); }
+  .mb-number {
+    padding: 2mm 5mm; background: var(--y-face-mid); border-bottom: 1px solid var(--y-face-lo);
+    display: flex; align-items: baseline; gap: 8px; font-size: 26px; line-height: 1;
+  }
+  .mb-number .y2k-num { font-size: 66px; font-weight: 900; }
+  .mb-order {
+    display: grid; grid-template-columns: 96mm minmax(0, 1fr); align-items: center;
+    column-gap: 4mm; margin: 4mm; padding: 2mm;
+    border: 1mm solid var(--y-hot); box-shadow: inset 0 0 0 1px #000;
+  }
+  .mb-qr { width: 96mm; max-width: 100%; aspect-ratio: 1; }
+  .mb-qr svg { display: block; width: 100%; height: 100%; }
+  .mb-order-copy { word-break: keep-all; }
+  .mb-order-copy h2 { font-size: 34px; line-height: 1.15; font-weight: 900; }
+  .mb-order-copy p { margin-top: 8px; font-size: 16px; font-weight: 700; }
+  .mb-steps {
+    display: grid; gap: 6px; list-style: none; margin: 12px 0 0; padding: 8px 0 0;
+    border-top: 1px solid var(--y-face-lo); font-size: 16px; font-weight: 800;
+  }
+  .mb-url { grid-column: 1 / -1; text-align: center; font: 11px/1.25 ui-monospace, monospace; }
+  .mb-details { flex: 1; min-height: 0; margin: 0 4mm; overflow: hidden; font-size: 19px; line-height: 1.22; }
+  .mb-details-content { height: 100%; display: flex; flex-direction: column; gap: .75em; }
+  .mb-details-content > :first-child { flex: 1; min-height: 0; overflow: hidden; }
+  .mb-details-content > :nth-child(2) { flex-shrink: 0; }
+  .mb-details .fl-menu-group { break-inside: auto; }
+  .mb-details .fl-category { background: var(--y-face-mid); padding-inline: .35em; font-size: max(9px, .83em); }
+  .mb-details .fl-desc { font-size: max(9px, .82em); }
+  .mb-sold .fl-price, .mb-sold .fl-desc { text-decoration: line-through; }
+  .mb-sold-label { margin-left: .35em; padding: 0 .2em; border: 1px solid currentColor; font-size: max(9px, .75em); white-space: nowrap; }
+  .mb-details .fl-prizes { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: .6em; word-break: keep-all; }
+  .mb-footer { padding: 2mm 4mm; text-align: center; font-size: 12px; font-weight: 800; letter-spacing: .12em; }
+  @media screen and (max-width: 756px) {
+    .mb-sheet:not(.mb-printing) .mb-page { height: auto; }
+    .mb-sheet:not(.mb-printing) .mb-order { grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 8px; }
+    .mb-sheet:not(.mb-printing) .mb-order-copy { text-align: center; }
+    .mb-sheet:not(.mb-printing) .mb-order-copy h2 { font-size: 26px; }
+    .mb-sheet:not(.mb-printing) .mb-steps { text-align: left; }
+    .mb-sheet:not(.mb-printing) .fl-menu, .mb-sheet:not(.mb-printing) .fl-prizes { columns: 1; grid-template-columns: 1fr; }
+    .mb-sheet:not(.mb-printing) .mb-details { font-size: 16px !important; }
+    .mb-sheet:not(.mb-printing) .mb-details-content { height: auto; }
+  }
+  .mb-printing .mb-page { max-width: none; }
+  @page { size: A4 portrait; margin: 8mm; }
+  @media print {
+    :root, body { margin: 0; color-scheme: light; background: #fff !important; color: #000 !important; }
+    .noprint, .top, .strip, .dlg, #toasts { display: none !important; }
+    .mb-main { width: 194mm; max-width: none; padding: 0; margin: 0; }
+    .mb-sheet { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    .mb-page { margin: 0; break-inside: avoid; break-after: page; }
+    .mb-page:last-child { break-after: auto; }
+  }
+</style>
+</head>
+<body>
+<noscript class="noprint"><p>이 페이지는 JavaScript가 필요합니다.</p></noscript>
+<div id="login" class="login noprint" hidden></div>
+<div id="app" hidden>
+  <main id="main" class="mb-main">
+    <div class="view-head noprint">
+      <h2>테이블 메뉴판</h2>
+      <div class="mb-controls">
+        <button class="btn btn-primary" id="mb-all" type="button" disabled>전체 인쇄</button>
+        <label for="mb-table">테이블</label>
+        <select class="field" id="mb-table" disabled><option value="">전체</option></select>
+        <button class="btn" id="mb-one" type="button" disabled>선택 인쇄</button>
+      </div>
+    </div>
+    <div class="mb-status noprint" role="status">
+      <p class="muted">A4 세로 · 배율 100%(실제 크기) · 테이블마다 한 장</p>
+      <p id="mb-status"></p>
+      <p class="mb-warning" id="mb-origin" hidden></p>
+      <p class="mb-warning" id="mb-overflow" hidden>메뉴·상품이 한 장에 다 들어가지 않아 일부 항목이 잘려요.</p>
+    </div>
+    <div class="mb-sheet" id="mb-sheet"></div>
+  </main>
+</div>
+<div id="toasts" class="noprint" role="status" aria-live="polite"></div>
+<script src="__BASE__/static/vendor/qr.js"></script>
+<script src="__BASE__/static/staff-common.js"></script>
+<script src="__BASE__/static/alarm.js"></script>
+<script src="__BASE__/static/shell.js"></script>
+<script src="__BASE__/static/print-common.js"></script>
+<script src="__BASE__/static/menuboard.js"></script>
+</body>
+</html>
