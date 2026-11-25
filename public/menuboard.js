@@ -170,7 +170,8 @@
     try {
       if (!await load()) return;
       await document.fonts.ready;
-      await Promise.allSettled(Array.from(sheet.querySelectorAll('.mb-page img'), function (image) { return image.decode(); }));
+      // decorations are best-effort: a stalled image must not keep the print buttons disabled
+      await Promise.race([Promise.allSettled(Array.from(sheet.querySelectorAll('.mb-page img'), function (image) { return image.decode(); })), new Promise(function (r) { setTimeout(r, 3000); })]);
       if (!running || inPrint() || (!showAll && !picker.value)) return;
       sheet.classList.toggle('mb-print-all', showAll);
       window.print();
