@@ -222,10 +222,12 @@
     return Math.max(0, Math.min(d, sub));
   }
   function selCoupon() { return cart.coupon ? S.coupons.filter(function (x) { return x.code === cart.coupon; })[0] : null; }
+  var memberSeq = 0;
   function checkMember(manual) {
     lastMemberCheck = Date.now();
+    var seq = ++memberSeq; // an older lookup (e.g. from before a login) answering late must not overwrite a newer one
     return api('/member').then(function (r) {
-      if (!r.ok) return;
+      if (!r.ok || seq !== memberSeq) return;
       var was = isMember(), had = !!M; M = r.data; if (had && !was && isMember() && !manual) toast('COMS 회원 할인이 적용돼요');
       if (manual) toast(isMember() ? 'COMS 회원으로 확인됐어요' : '아직 로그인이 확인되지 않았어요. 로그인 후 다시 확인해 주세요');
       render();
@@ -741,9 +743,9 @@
       function () { openPay(S.orders.filter(function (x) { return x.id === o.id; })[0] || o, false); });
   }
   // COMS login in place. Posts to the COMS backend at the origin root (not the booth API); the booth server never sees the password.
-  // Only when the booth is served under a sub-path over HTTPS, i.e. behind the shared COMS proxy: opened directly (dev, bare host:port)
-  // /api/auth/login would be the booth listener itself and the password would go to the wrong server, maybe in clear text.
-  function inlineLogin() { return !!BASE && location.protocol === 'https:'; }
+  // Only when this page is open on exactly the club site's origin (server-injected from COMS_ME_URL) under a sub-path: anywhere else
+  // (dev, bare host:port, the booth mounted on another site) /api/auth/login is not COMS and the password would go to the wrong server.
+  function inlineLogin() { return !!BASE && !!window.COMS_ORIGIN && location.origin === window.COMS_ORIGIN; }
   var loginBusy = false; // one attempt at a time across reopened sheets: a late response could otherwise overwrite a newer account's cookie
   function openLogin() {
     if (!inlineLogin()) return;
@@ -779,9 +781,10 @@
         .then(function (r) {
           lp.value = '';
           if (r.ok) { // confirm membership before the cart reopens, or its total is stale and checkout gets 409 price_changed
-            return checkMember(false).then(null, function () {}).then(function () {
+            var cap = new Promise(function (res) { setTimeout(res, 8000); }); // a stalled lookup must not hold the lock either
+            return Promise.race([checkMember(false), cap]).then(null, function () {}).then(function () {
               if (live()) closeSheet(); // the guest may have closed this sheet (and opened another) while the request was in flight
-              toast(isMember() ? '회원 확인됐어요. 할인이 적용돼요' : '로그인은 됐지만 회원 확인이 안 됐어요. 잠시 후 다시 확인을 눌러 주세요');
+              toast(isMember() ? '회원 확인됐어요. 할인이 적용돼요' : '로그인은 됐지만 이 계정으로는 회원 할인이 확인되지 않았어요');
             });
           }
           var m = r.d && r.d.message;

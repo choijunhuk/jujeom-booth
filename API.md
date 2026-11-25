@@ -9,10 +9,12 @@ Single Node process: HTTP API + SSE + static files. Zero dependencies. This is t
 **The frontend learns the base path from the server.** In every served `.html`, `.js` and `.css` file the literal token `__BASE__` is replaced with `BASE` (`""` or `/booth`, never a trailing slash). Write:
 
 ```html
-<script src="__BASE__/static/base.js"></script>   <!-- public/base.js is exactly: window.BASE = "__BASE__"; -->
+<script src="__BASE__/static/base.js"></script>   <!-- public/base.js: window.BASE = "__BASE__"; window.COMS_ORIGIN = "__COMS_ORIGIN__"; -->
 <script src="__BASE__/static/guest.js"></script>
 <link rel="stylesheet" href="__BASE__/static/guest.css">
 ```
+
+`__COMS_ORIGIN__` is replaced the same way with the origin of `COMS_ME_URL` (`""` when unset or unparsable). The guest page offers the in-page club login (a same-origin `POST /api/auth/login` to the club backend) only when `BASE` is non-empty and its own `location.origin` equals it; anywhere else it links to the club site instead, so a password is never posted to a server that is not the club's.
 
 and call the API as `fetch(window.BASE + '/api/...')`. Never hard-code `/booth` or an absolute `/api`. Use relative-to-BASE URLs for `EventSource` too.
 

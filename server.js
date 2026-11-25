@@ -44,6 +44,9 @@ const SSE_WAIT_MAX = 60;
 const SSE_BACKLOG_MAX = 64 * 1024; // public streams whose unsent backlog exceeds this are dropped
 const LOCKOUT_MS = envInt('LOCKOUT_MS', 60000);
 const COMS_ME_URL = (env.COMS_ME_URL || '').trim(); // unset = member discount feature off (no outbound requests at all)
+// Origin of the club site, served to pages as __COMS_ORIGIN__: the guest page offers the in-page club login (a same-origin POST to
+// /api/auth/login) only when it is itself open on exactly this origin, so a password never goes to whatever else hosts the booth.
+const COMS_ORIGIN = (() => { try { return COMS_ME_URL ? new URL(COMS_ME_URL).origin : ''; } catch { return ''; } })();
 
 let STAFF_PIN = env.STAFF_PIN;
 if (!STAFF_PIN) {
@@ -157,7 +160,7 @@ function serveFile(c, full, cacheControl) {
   const ext = path.extname(full).toLowerCase();
   let buf;
   try { if (!fs.statSync(full).isFile()) throw new Error('not file'); buf = fs.readFileSync(full); } catch { return notFoundPage(c.res); }
-  if (SUBST.has(ext)) buf = Buffer.from(buf.toString('utf8').replaceAll('__BASE__', BASE));
+  if (SUBST.has(ext)) buf = Buffer.from(buf.toString('utf8').replaceAll('__BASE__', BASE).replaceAll('__COMS_ORIGIN__', COMS_ORIGIN));
   c.res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Content-Length': buf.length, 'Cache-Control': cacheControl });
   c.res.end(buf);
 }

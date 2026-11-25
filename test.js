@@ -64,6 +64,7 @@ async function boot({ base = '', env = {}, dir, menu, menuRaw, rewards, tablesCo
     }
     fs.writeFileSync(path.join(pub, 'x.js'), 'var base="__BASE__";');
     fs.writeFileSync(path.join(pub, 'base.js'), 'window.BASE="__BASE__";');
+    fs.writeFileSync(path.join(pub, 'coms.js'), 'window.COMS_ORIGIN="__COMS_ORIGIN__";');
   }
   const child = spawn(process.execPath, [SERVER], {
     env: { PATH: process.env.PATH, PORT: '0', HOST: '127.0.0.1', STAFF_PIN: PIN, BASE_PATH: base, DATA_DIR: data, CONFIG_DIR: cfg, PUBLIC_DIR: pub, ...env },
@@ -741,6 +742,8 @@ test('pages, security headers, device cookie', async () => {
   assert.deepEqual((await g.get(`/api/t/${tok(1)}`)).json.pay, { bank: '', account: '', holder: '', tossEnabled: false, kakaoPayUrl: '', requireDepositor: false }); // spec change: pay grew toss / kakao / requireDepositor
   assert.ok(r.text.includes('src="/static/base.js"'));
   assert.equal((await g.get('/static/base.js')).text, 'window.BASE="";');
+  // the club origin (from COMS_ME_URL) is what the guest page compares its own origin against before offering the in-page club login
+  assert.equal((await g.get('/static/coms.js')).text, `window.COMS_ORIGIN="${new URL(fake.url).origin}";`);
   assert.ok(r.text.includes('src="/static/x.js"'));
   assert.ok(!/<script(?![^>]*\ssrc=)/.test(r.text), 'fixture has no inline script');
   assert.ok(!r.text.includes('__BASE__'));
@@ -1699,6 +1702,7 @@ test('member discount: feature off (no COMS_ME_URL) makes no outbound requests a
     const T = (await s.get('/api/staff/tables')).json.tables[0].token;
     const g = new Client(srv); g.jar.token = fake.member(5001); g.jar.booth_d = await realDevice(srv);
     assert.deepEqual((await g.get(`/api/t/${T}/member`)).json, memberBody({ enabled: false, member: false }));
+    assert.equal((await g.get('/static/coms.js')).text, 'window.COMS_ORIGIN="";'); // no club configured: no in-page login anywhere
     const r = await order(g, T, [{ id: 'tteokbokki', qty: 1 }]);
     assert.deepEqual([r.json.order.memberDiscount, r.json.order.member, r.json.order.total], [0, false, 8000]);
     assert.equal(fake.hitsFor(g.jar.token).length, 0);
