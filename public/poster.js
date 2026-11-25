@@ -6,7 +6,7 @@
   var status = $('#bp-status'), origin = $('#bp-origin'), coverOff = $('#bp-cover-off');
   var fields = [$('#fl-date'), $('#fl-time'), $('#fl-location')];
   var storagePrefix = 'comhere-flyer-event:' + SC.BASE + ':';
-  var today = new Intl.DateTimeFormat('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' });
+  var today = new Intl.DateTimeFormat('ko-KR', { month: 'long', day: 'numeric', weekday: 'short', timeZone: 'Asia/Seoul' });
   var settings = { noAuthRedirect: true };
   var printMedia = window.matchMedia('print');
   var shell, gate, pending, refreshTimer, printing = false;
@@ -53,7 +53,7 @@
     if (pending) return pending;
     var request = Promise.all([
       SC.api('/api/staff/state', settings),
-      SC.api('/api/staff/rewards', settings),
+      SC.api('/api/staff/rewards', settings).catch(function (e) { if (e.status === 401) throw e; return { rewards: [] }; }), // optional: never block the poster
       SC.api('/api/staff/tables', settings)
     ]).then(function ([state, rewards, tables]) {
       if (pending !== request) return false;
