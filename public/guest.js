@@ -771,7 +771,8 @@
       var id = li.value.trim(), pw = lp.value;
       if (!id || !pw) { fail('아이디와 비밀번호를 입력해 주세요'); return; }
       loginBusy = true; lb.disabled = true; fail('');
-      fetch('/api/auth/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifier: id, password: pw, rememberMe: false }) })
+      var ac = window.AbortController ? new AbortController() : null, tm = ac && setTimeout(function () { ac.abort(); }, 15000); // a hung request must not hold loginBusy forever
+      fetch('/api/auth/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifier: id, password: pw, rememberMe: false }), signal: ac ? ac.signal : undefined })
         .then(function (res) {
           return res.json().then(function (d) { return d; }, function () { return null; }).then(function (d) { return { ok: res.ok, d: d }; });
         })
@@ -787,7 +788,7 @@
           fail(typeof m === 'string' && /[가-힣]/.test(m) ? m.slice(0, 120) : GENERIC);
         }, function () { lp.value = ''; fail(GENERIC); })
         .then(null, function () {}) // never leave the attempt locked
-        .then(function () { loginBusy = false; lb.disabled = false; if (live() && le.textContent) lp.focus(); });
+        .then(function () { clearTimeout(tm); loginBusy = false; lb.disabled = false; if (live() && le.textContent) lp.focus(); });
     });
   }
   function askNick(cb) {
