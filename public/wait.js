@@ -77,7 +77,7 @@
     setSize(size);
     function applyInfo(i) {
       setNotice(i.notice);
-      maxSize = Math.min(10, i.maxPeople || 10); setSize(size); maxNote.textContent = i.maxPeople ? '한 테이블은 최대 ' + i.maxPeople + '명까지예요.' : ''; maxNote.hidden = !i.maxPeople;
+      maxSize = Math.min(10, i.maxPeople || 10); setSize(size); maxNote.textContent = i.maxPeople ? '한 테이블은 최대 ' + maxSize + '명까지예요.' : ''; maxNote.hidden = !i.maxPeople;
       hint.textContent = i.sms ? '호출되면 문자로도 알려드려요. 이 화면과 진동으로도 알려 드려요.' : '이 화면을 열어 두면 호출 때 알려드려요.';
       form.hidden = !i.open;
       notice.className = i.open ? 'w-sub' : 'err';

@@ -913,7 +913,7 @@
       var a = Number(amountIn.value), l = labelIn.value.trim();
       if (!Number.isInteger(a) || a < 0 || a > 100000 || a % 100 !== 0) { SC.fill(err, note('bad', '금액은 100원 단위, 0~100,000원이에요.')); return Promise.resolve(); }
       if (l.length < 1 || l.length > 12) { SC.fill(err, note('bad', '이름은 1~12자로 입력해 주세요.')); return Promise.resolve(); }
-      var mx = Number(maxIn.value || 0);
+      var mx = maxIn.value.trim() === '' ? NaN : Number(maxIn.value);
       if (!Number.isInteger(mx) || mx < 0 || mx > 30) { SC.fill(err, note('bad', '테이블당 최대 인원은 0~30명이에요 (0 = 제한 없음).')); return Promise.resolve(); }
       if (enabled && a === 0) { SC.fill(err, note('bad', '금액이 0원이면 입장료 주문이 만들어지지 않아요. 금액을 넣거나 입장료를 꺼 주세요.')); return Promise.resolve(); }
       SC.fill(err);
